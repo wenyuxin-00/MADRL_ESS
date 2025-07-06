@@ -3,3 +3,4 @@
 !*.ipynb
 !*.py
 !.gitignore
+echo "environments/agent_training_data.xlsx" >> .gitignore
