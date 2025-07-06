@@ -8,17 +8,29 @@ import copy
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class ReplayBuffer:
+    # def __init__(self, capacity, obs_dim, state_dim, action_dim, batch_size):
+    #     self.capacity = capacity
+    #     self.obs_cap = np.empty((capacity, obs_dim))
+    #     self.next_obs_cap = np.empty((capacity, obs_dim))
+    #     self.state_cap = np.empty((capacity, state_dim))
+    #     self.next_state_cap = np.empty((capacity, state_dim))
+    #     self.action_cap = np.empty((capacity, action_dim))
+    #     self.reward_cap = np.empty((capacity, 1))
+    #     self.done_cap = np.empty((capacity, 1), dtype=bool)
+    #     self.batch_size = batch_size
+    #     self.current = 0 
+
     def __init__(self, capacity, obs_dim, state_dim, action_dim, batch_size):
         self.capacity = capacity
-        self.obs_cap = np.empty((capacity, obs_dim))
-        self.next_obs_cap = np.empty((capacity, obs_dim))
-        self.state_cap = np.empty((capacity, state_dim))
-        self.next_state_cap = np.empty((capacity, state_dim))
-        self.action_cap = np.empty((capacity, action_dim))
-        self.reward_cap = np.empty((capacity, 1))
-        self.done_cap = np.empty((capacity, 1), dtype=bool)
+        self.obs_cap = np.zeros((capacity, obs_dim))          # 初始化为0
+        self.next_obs_cap = np.zeros((capacity, obs_dim))     # 初始化为0
+        self.state_cap = np.zeros((capacity, state_dim))      # 初始化为0
+        self.next_state_cap = np.zeros((capacity, state_dim)) # 初始化为0
+        self.action_cap = np.zeros((capacity, action_dim))    # 初始化为0
+        self.reward_cap = np.zeros((capacity, 1))            # 初始化为0
+        self.done_cap = np.zeros((capacity, 1), dtype=bool)  # 初始化为False
         self.batch_size = batch_size
-        self.current = 0 
+        self.current = 0
 
     def add_memo(self, obs, next_obs, state, next_state, action, reward, done):
         self.obs_cap[self.current] = obs
@@ -75,11 +87,9 @@ class Actor(nn.Module):
 
     def forward(self, state):
         x = F.relu(self.fc1(state))
-        # print("fc1输出范围:", x.min(), x.max())  # 检查是否合理
         x = F.relu(self.fc2(x))
         mu = torch.sigmoid(self.pi(x)) #softmax
-        # mu = torch.sigmoid(self.pi(x)) + 1e-6 * torch.randn_like(self.pi(x))
-        # mu = torch.softmax(self.pi(x), dim=1)
+        # mu = torch.tanh(self.pi(x)) #tanh
         return mu
     
     def save_checkpoint(self, checkpoint_file):
@@ -106,50 +116,10 @@ class Agent:
     def get_action(self, obs):
         single_obs = torch.tensor(data=obs, dtype=torch.float).unsqueeze(0).to(device)
         single_action = self.actor.forward(single_obs)
-        noise = torch.randn(self.action_dim).to(device) * 0.2
-        single_action = torch.clamp(input=single_action + noise, min=0.0, max=1.0)
+        noise = torch.randn(self.action_dim).to(device) * 0.3
+        single_action = torch.clamp(input=single_action + noise, min=0, max=1.0)
 
         return single_action.detach().cpu().numpy()[0]
-    # def get_action(self, obs):
-    #     with torch.no_grad():
-    #         # 1. Min-Max标准化（按特征维度分别处理）
-    #         obs = np.asarray(obs, dtype=np.float32)
-            
-    #         # 定义各维度理论范围（根据您的场景调整）
-    #         feat_ranges = np.array([
-    #             [0, 96],     # 时段（假设96个时间步） 
-    #             [0, 16.5],  # 电价（根据历史数据调整）
-                
-    #             [0.0, 1.7],   # 负荷KW
-    #             [0.0, 1.0],  # SOC（电池状态）
-    #         ])
-            
-    #         # Min-Max标准化公式：(x - min) / (max - min)
-    #         obs_normalized = (obs - feat_ranges[:, 0]) / (feat_ranges[:, 1] - feat_ranges[:, 0] + 1e-8)
-            
-    #         # 2. 硬截断保证数值安全
-    #         obs_normalized = np.clip(obs_normalized, -1.0, 2.0)  # 允许略微超出[0,1]范围
-            
-    #         # 3. 转换为张量
-    #         obs_tensor = torch.as_tensor(obs_normalized, dtype=torch.float32, device=device)
-            
-    #         # 4. NaN防护（双重检查）
-    #         if torch.isnan(obs_tensor).any():
-    #             print(f"警告：标准化后观测值含NaN，原始值: {obs}")
-    #             obs_tensor = torch.zeros_like(obs_tensor)
-            
-    #         # 5. 动作生成与保护
-    #         action = self.actor(obs_tensor.unsqueeze(0))
-    #         if torch.isnan(action).any():
-    #             print(f"NaN动作！标准化后obs: {obs_normalized}")
-    #             action = torch.rand_like(action) * 0.6 + 0.2  # 生成0.2~0.8的安全动作
-            
-    #         # 6. 添加受限噪声
-    #         noise = torch.randn_like(action) * 0.08  # 减小噪声幅度
-    #         noise = torch.clamp(noise, -0.15, 0.15) # 硬截断噪声
-            
-    #         # 7. 最终动作裁剪（避开边界）
-    #         return (action + noise).clamp(0.1, 0.9).squeeze(0).cpu().numpy()
 
     def save_mode(self, filename):
         self.actor.save_checkpoint(filename)
