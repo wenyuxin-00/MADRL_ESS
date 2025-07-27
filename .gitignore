@@ -1,6 +1,75 @@
-# 忽略所有非代码文件
-*
-!*.ipynb
+# === 基本忽略规则 ===
+# 忽略所有文件
+
+# === 恢复重要目录结构 ===
+# 使用 !/ 恢复文件夹结构
+!*/
+
+# === 恢复重要文件类型 ===
+# 代码文件
 !*.py
+!*.ipynb
+!*.js
+!*.ts
+!*.html
+!*.css
+!*.scss
+
+# 配置文件
+!*.yml
+!*.yaml
+!*.json
+!*.toml
+!*.ini
+
+# 文档文件
+!*.md
+!*.txt
+!*.pdf
+
+# Git 相关
 !.gitignore
-echo "environments/agent_training_data.xlsx" >> .gitignore
+!.gitattributes
+!.gitmodules
+
+# 脚本文件
+!*.sh
+!*.bat
+!*.ps1
+
+# === 恢复特定项目目录 ===
+# 明确列出需要跟踪的目录
+!data/
+!test/
+!forecast/
+!models/
+
+# === 特别忽略规则 ===
+# 特定大文件
+environments/agent_training_data.xlsx
+
+# === 忽略不需要的文件类型 ===
+# 缓存和临时文件
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.swp
+*.tmp
+
+# 打包文件
+*.egg
+*.egg-info/
+dist/
+build/
+__pypackages__/
+
+# 环境文件
+.env
+.venv/
+env/
+venv/
+
+# IDE 设置
+.vscode/
+.idea/
