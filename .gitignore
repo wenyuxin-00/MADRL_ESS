@@ -1,88 +1,14 @@
-# === 基本规则：恢复目录结构 ===
+# 1. 默认忽略所有文件和文件夹
+*
+
+# 2. 但是，不要忽略目录本身，这样Git才能继续在目录中查找文件
+# 注意：这不会取消忽略目录中的文件，只会保留目录结构
 !*/
 
-# === 恢复重要文件类型 ===
-# 代码文件
+# 3. 取消忽略指定类型的文件，让它们可以被Git追踪
 !*.py
 !*.ipynb
-!*.js
-!*.ts
-!*.html
-!*.css
-!*.scss
+!*.xlsx
 
-# 配置文件
-!*.yml
-!*.yaml
-!*.json
-!*.toml
-!*.ini
-
-# 文档文件
-!*.md
-!*.txt
-!*.pdf
-
-# Git 相关
+# 4. 最后，确保.gitignore文件本身不被忽略
 !.gitignore
-!.gitattributes
-!.gitmodules
-
-# 脚本文件
-!*.sh
-!*.bat
-!*.ps1
-
-# === 恢复特定项目目录（包含其所有内容）===
-# 新增 ! 确保目录及其内容都被跟踪
-!data/
-!data/**/*
-!test/
-!test/**/*
-!forecast/
-!forecast/**/*
-!models/
-!models/**/*
-
-# === 特别忽略规则 ===
-# 忽略所有位置的所有 Excel 文件
-*.xlsx
-**/*.xlsx
-
-# 忽略所有位置的所有 PNG 文件
-*.png
-**/*.png
-
-# === 忽略不需要的文件类型 ===
-# 缓存和临时文件
-__pycache__/
-**/__pycache__/
-*.py[cod]
-*$py.class
-*.swp
-*.tmp
-
-# 打包文件
-*.egg
-*.egg-info/
-dist/
-build/
-__pypackages__/
-
-# 环境文件
-.env
-.venv/
-env/
-venv/
-
-# IDE 设置
-.vscode/
-.idea/
-
-# 忽略所有位置的所有 CSV 文件
-*.csv
-**/*.csv
-
-# 忽略所有位置的所有 PTH 文件
-*.pth
-**/*.pth
