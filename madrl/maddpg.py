@@ -28,14 +28,22 @@ class MADDPG(object):
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.lr_a)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.lr_c)
 
-    def choose_action(self, obs, noise_std):
-        # --- MODIFIED: Move observation to device and action back to cpu ---
-        obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            a = self.actor(obs).cpu().data.numpy().flatten()
-        a = (a + np.random.normal(0, noise_std, size=self.action_dim)).clip(-self.max_action, self.max_action)
-        return a
-
+    def choose_action(self, obs_batch, noise_std):
+            """
+            接收向量化环境传来的批量状态。
+            obs_batch 形状: (num_envs, obs_dim)
+            """
+            # --- 核心修改：移除 .unsqueeze(0)，因为 obs_batch 本身就带有 num_envs 维度 ---
+            obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                # a_batch 形状: (num_envs, action_dim)
+                a_batch = self.actor(obs_tensor).cpu().data.numpy()
+                
+            # --- 核心修改：生成的探索噪声维度必须与 a_batch 完全一致 ---
+            noise = np.random.normal(0, noise_std, size=a_batch.shape)
+            a_batch = np.clip(a_batch + noise, -self.max_action, self.max_action)
+            
+            return a_batch
     def train(self, replay_buffer, agent_n):
         # 从经验回放缓冲区中采样一批数据
         batch_obs_n, batch_a_n, batch_r_n, batch_obs_next_n, batch_done_n = replay_buffer.sample()

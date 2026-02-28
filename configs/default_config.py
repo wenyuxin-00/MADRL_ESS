@@ -6,8 +6,8 @@ class Config:
         # --- 环境与物理参数 ---
         self.num_agents = 3
         self.episode_limit = 96
-        self.future_price = 24
-        self.future_load = 24
+        self.future_price = 6
+        self.future_load = 6
         self.battery_capacity = 1.0
         self.max_charge_rate = 0.1
         self.efficiency = 1.0
@@ -15,18 +15,23 @@ class Config:
         
         # --- 观测空间配置 (方便做消融实验) ---
         # 支持: 'time', 'price', 'load', 'soc', 'future_price', 'future_load'
-        self.obs_config = ['time', 'price', 'load', 'soc', 'future_price', 'future_load']
+        self.obs_config = ["time","price","load","soc","soc_margin","action_bounds","global_summary","future_price","future_load"]
 
         # --- 训练核心参数 ---
         self.algorithm = "MADDPG"  # "MADDPG" 或 "MATD3"
-        self.train_episodes = 300
+        self.train_episodes = 1000
         self.max_train_steps = self.train_episodes * self.episode_limit
-        self.batch_size = 96 * 10
+        self.num_envs = 32
+        self.rollout_steps = 32
+        self.update_epochs = 8
+        self.batch_size = 4096
         self.max_action = 1.0
         self.buffer_size = int(1e6)
-        
+        self.update_interval = 1
+        self.updates_per_step = 1
+        self.w_pv_rolling = 1
         # --- 网络与优化器参数 ---
-        self.hidden_dim = 128
+        self.hidden_dim = 256
         self.lr_a = 1e-4
         self.lr_c = 1e-4
         self.gamma = 0.999

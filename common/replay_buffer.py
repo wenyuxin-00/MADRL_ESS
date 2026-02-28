@@ -26,7 +26,25 @@ class ReplayBuffer(object):
             self.buffer_done_n[agent_id][self.count] = done_n[agent_id]
         self.count = (self.count + 1) % self.buffer_size  # When the 'count' reaches max_size, it will be reset to 0.
         self.current_size = min(self.current_size + 1, self.buffer_size)
-
+    def store_transitions_batched(self, obs_n, a_n, r_n, obs_next_n, done_n):
+            """
+            一次性存入来自 num_envs 个环境的经验。
+            输入参数均为列表，列表长度为 N (智能体个数)。
+            列表中的每个元素都是形状为 (num_envs, dim) 的 numpy 数组。
+            """
+            num_envs = obs_n[0].shape[0]
+            
+            # 遍历每个环境产生的数据，逐条存入 Buffer
+            for env_idx in range(num_envs):
+                for agent_id in range(self.N):
+                    self.buffer_obs_n[agent_id][self.count] = obs_n[agent_id][env_idx]
+                    self.buffer_a_n[agent_id][self.count] = a_n[agent_id][env_idx]
+                    self.buffer_r_n[agent_id][self.count] = r_n[agent_id][env_idx]
+                    self.buffer_s_next_n[agent_id][self.count] = obs_next_n[agent_id][env_idx]
+                    self.buffer_done_n[agent_id][self.count] = done_n[agent_id][env_idx]
+                    
+                self.count = (self.count + 1) % self.buffer_size
+                self.current_size = min(self.current_size + 1, self.buffer_size)
     def sample(self, ):
         index = np.random.choice(self.current_size, size=self.batch_size, replace=False)
         batch_obs_n, batch_a_n, batch_r_n, batch_obs_next_n, batch_done_n = [], [], [], [], []
