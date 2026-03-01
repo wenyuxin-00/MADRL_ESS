@@ -6,13 +6,31 @@ class Config:
         # --- 环境与物理参数 ---
         self.num_agents = 3
         self.episode_limit = 96
-        self.future_price = 6
-        self.future_load = 6
-        self.battery_capacity = 1.0
-        self.max_charge_rate = 0.1
-        self.efficiency = 1.0
-        self.init_soc = 0.05
+        self.future_horizon = 24  # 固定未来视界 K=24（业务要求）
         
+        # 电池参数（SoC ∈ [0,1]）
+        self.battery_capacity = 1.0   # 电池容量（能量单位）
+        self.max_charge_rate = 0.1    # 最大充放功率（功率单位）
+        self.efficiency = 1.0         # 充放效率
+        self.init_soc = 0.5           # 初始 SoC（0~1）
+        self.dt = 0.25                 # 时间步长（小时）
+        
+        # SOC 约束
+        self.soc_min = 0.05
+        self.soc_max = 0.95
+        self.soc_target = 0.5         # SoC 正则化的目标值
+        self.soc_eps = 1e-3           # 动作越限判定阈值
+        
+        # rolling window 长度（全局摘要用）
+        self.rolling_window_k = 8
+        self.rolling_window_k = max(2, self.rolling_window_k)  # 至少2才有 std 的意义
+        
+        # 奖励超参数
+        self.w_pv_rolling = 0
+        self.w_pen = 5.0              # 动作越限惩罚系数
+        self.w_soc = 0.1              # SoC 正则系数
+        self.lambda_bonus = 0.01      # 吞吐量奖励系数
+
         # --- 观测空间配置 (方便做消融实验) ---
         # 支持: 'time', 'price', 'load', 'soc', 'future_price', 'future_load'
         self.obs_config = ["time","price","load","soc","soc_margin","action_bounds","global_summary","future_price","future_load"]
@@ -29,7 +47,7 @@ class Config:
         self.buffer_size = int(1e6)
         self.update_interval = 1
         self.updates_per_step = 1
-        self.w_pv_rolling = 1
+        
         # --- 网络与优化器参数 ---
         self.hidden_dim = 256
         self.lr_a = 1e-4
