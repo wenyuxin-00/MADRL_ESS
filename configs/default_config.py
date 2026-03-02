@@ -10,8 +10,8 @@ class Config:
         
         # 电池参数（SoC ∈ [0,1]）
         self.battery_capacity = 1.0   # 电池容量（能量单位）
-        self.max_charge_rate = 0.1    # 最大充放功率（功率单位）
-        self.efficiency = 1.0         # 充放效率
+        self.max_charge_rate = 0.5/4    # 最大充放功率（功率单位）
+        self.efficiency = 0.95        # 充放效率
         self.init_soc = 0.5           # 初始 SoC（0~1）
         self.dt = 0.25                 # 时间步长（小时）
         
@@ -20,10 +20,6 @@ class Config:
         self.soc_max = 0.95
         self.soc_target = 0.5         # SoC 正则化的目标值
         self.soc_eps = 1e-3           # 动作越限判定阈值
-        
-        # rolling window 长度（全局摘要用）
-        self.rolling_window_k = 8
-        self.rolling_window_k = max(2, self.rolling_window_k)  # 至少2才有 std 的意义
         
         # 奖励超参数
         self.w_pv_rolling = 0

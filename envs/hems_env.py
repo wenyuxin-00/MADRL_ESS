@@ -7,23 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class EnergyStorageEnv(gym.Env):
-    """
-    多智能体储能系统 MDP（完全 NumPy 向量化，无 PV 版本）
-    ----------------------------------------------------------------------
-    观测（每个智能体 1D 向量）：
-      [time_sin, time_cos,
-       price(t..t+K) padding,
-       load_i(t..t+K) padding,
-       soc_i]
-
-    动作：
-      a_i ∈ [-1, 1]
-      e_bat_i = a_i * P_max   (充电>0, 放电<0)
-
-    奖励（每个智能体）：
-      r = r_inc - r_pen + r_pbrs - r_soc + r_bonus
-    """
-
     metadata = {"render.modes": []}
 
     def __init__(self, args: Any, data_path: Optional[str] = None, mode: str = "train"):
@@ -33,8 +16,8 @@ class EnergyStorageEnv(gym.Env):
 
         # ========== 基本配置（从配置文件读取，无默认值） ==========
         self.n = int(args.num_agents)
-        self.episode_length = int(args.episode_limit)
-        self.k = int(args.future_horizon)
+        self.episode_length = int(args.episode_limit)#整个 episode 的时间步数，通常对应一天或多天的仿真长度
+        self.future_horizon = int(args.future_horizon)            #未来视界长度 K，PBRS 中计算势能时用到的未来平均电价的时间窗口长度
         self.c_bat = float(args.battery_capacity)    # 电池容量（能量单位）
         self.p_max = float(args.max_charge_rate)     # 最大充放功率（功率单位）
         self.eff = float(args.efficiency)              # 充放效率
@@ -122,14 +105,14 @@ class EnergyStorageEnv(gym.Env):
     # ------------------------------------------------------------------
     def _build_observation_space(self) -> List[spaces.Box]:
         # time(2) + price(K+1) + load(K+1) + soc(1)
-        obs_dim = 2 + 2 * (self.k + 1) + 1  # time + price + load + soc
+        obs_dim = 2 + 2 * (self.future_horizon + 1) + 1  # time + price + load + soc
         return [spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32) for _ in range(self.n)]
 
     # ------------------------------------------------------------------
     # 工具：取未来窗口（含当前，共 K+1），不足用 0 padding
     # ------------------------------------------------------------------
     @staticmethod
-    def _pad_window_1d(x: np.ndarray, start: int, length: int) -> np.ndarray:
+    def _pad_window_1d(x: np.ndarray, start: int, length: int) -> np.ndarray:        
         end = start + length
         if start >= len(x):
             return np.zeros((length,), dtype=np.float32)
@@ -155,7 +138,7 @@ class EnergyStorageEnv(gym.Env):
     def _get_obs_matrix(self) -> np.ndarray:
         t = self.cur_step
         T = self.episode_length
-        k1 = self.k + 1
+        k1 = self.future_horizon + 1
 
         time_sin = np.sin(2.0 * np.pi * t / T).astype(np.float32)
         time_cos = np.cos(2.0 * np.pi * t / T).astype(np.float32)
@@ -185,7 +168,7 @@ class EnergyStorageEnv(gym.Env):
     # ------------------------------------------------------------------
     def _future_mean_price(self, t: int) -> float:
         start = t + 1
-        end = min(t + 1 + self.k, self.episode_length)
+        end = min(t + 1 + self.future_horizon, self.episode_length)
         if start >= self.episode_length:
             return float(self.ep_price[min(t, self.episode_length - 1)])
         seg = self.ep_price[start:end]
@@ -252,16 +235,22 @@ class EnergyStorageEnv(gym.Env):
         price_t = float(self.ep_price[t])
         load_t = self.ep_load[t, :].astype(np.float32)  # (N,)
 
-        # (1) Incremental Cost Reward：e_net = load + e_bat_exec
+        # (1) Incremental Cost Reward：e_net = load + e_bat_exec，增量成本奖励 (Incremental Cost Reward)
+        #在包含光伏（PV）和建筑负荷（Load）的微网中，基础奖励 $r_t$ 往往被庞大的基础负荷与光伏功率所主导，导致电池动作带来的经济收益信号变得极其微弱且充满噪声。
+        #$r_t^{idle}$ 代表如果电池这一步“完全不动作（闲置）”时环境的默认收益。两者相减，就能直接评估“当前采取的充放电动作，比什么都不干到底多赚了多少钱”。这极大地增强了奖励信号的信噪比。
         e_net = load_t + e_bat
         r = -e_net * price_t
         r_idle = -load_t * price_t
         r_inc = (r - r_idle).astype(np.float32)
 
-        # (2) Action Penalty：惩罚“请求与执行差异”（越界越多罚越多）
-        r_pen = (self.w_pen * np.abs(e_bat_req - e_bat) / (self.p_max + 1e-6)).astype(np.float32)
+        
+        # (2) Action Penalty：惩罚“请求与执行差异”（越界越多罚越多），软约束边界：动作越限惩罚 (Action Penalty)
+        #智能体可能会在电池快空时尝试放电，或在快满时尝试充电。正则化项 $r_t^{pen} = w_{pen}|a_t|$，当采取导致越限的错误动作时施加惩罚,这可以防止智能体退化到“永远放电”的看起来局部最优/实际无效策略。。
 
-        # (3) PBRS
+        r_pen = (self.w_pen * np.abs(e_bat_req - e_bat) / (self.p_max + 1e-6)).astype(np.float32)
+        
+        # (3) PBRS，基于势能的奖励塑形 (Potential Based Reward Shaping, PBRS) ，低买高卖需要跨越多个时间步（Delayed Rewards），普通的 DRL 算法很难将“现在的充电”与“几小时后的高价放电”联系起来。
+        #将势能 $\Phi(s_t)$ 定义为“当前储存电量的潜在价值”，即电池当前储能 $E_t$ 乘以未来一段视界内的平均电价 $\mu_t$。这等于给了智能体一个实时向导：当预期未来电价很高时，把电存起来就能获得即时的正向势能奖励。
         mu_t = self._future_mean_price(t)
         mu_next = self._future_mean_price(min(t + 1, self.episode_length - 1))
         phi_t = (mu_t * e_t).astype(np.float32)
@@ -269,10 +258,16 @@ class EnergyStorageEnv(gym.Env):
         r_pbrs = (self.gamma * phi_next - phi_t).astype(np.float32)
 
         # (4) SoC Regularization
-        r_soc = (self.w_soc * (soc_t - self.soc_target) ** 2).astype(np.float32)
+        #电池如果长期处于极高或极低 SOC 状态，面对突发的电价尖峰或负荷波动时，会丧失调节能力。引入均方误差惩罚 $r_t^{soc} = w_{soc}(x_t - x_{mid})^2$，其中 $x_{mid}$ 通常设为 0.5
+        #半满的电池是最灵活的，既能随时充电也能随时放电。这个正则化项就像一根弹簧，持续鼓励智能体在完成套利后，让 SOC 回归到中间的安全且灵活的区域。
+        # r_soc = (self.w_soc * (soc_t - self.soc_target) ** 2).astype(np.float32)
+        r_soc =0.0
 
         # (5) Throughput Bonus（用执行功率）
+        #智能体为了绝对避免越限惩罚，干脆选择永远保持闲置（Idle）。增加一个简单的动作绝对值奖励 $r_t^{bonus} = \lambda_{bonus} \cdot |e_t^{bat}|$。
+        #只要电池有实质性的充放电动作，就给予微小的奖金。这是一种非常有效的探索（Exploration）激励手段，能够强制打破僵局，鼓励智能体去尝试使用电池，而不是退化到永远闲置的策略。
         r_bonus = (self.lambda_bonus * np.abs(e_bat)).astype(np.float32)
+
 
         reward = (r_inc - r_pen + r_pbrs - r_soc + r_bonus).astype(np.float32)
 
