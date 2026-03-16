@@ -1,11 +1,12 @@
 # configs/default_config.py
 import torch
 
+
 class Config:
     def __init__(self):
         # --- 环境与物理参数 ---
         self.num_agents = 3
-        self.episode_limit = 96
+        self.episode_limit = 96 * 2
         self.future_horizon = 24  # 固定未来视界 K=24（业务要求）
         
         # 电池参数（SoC ∈ [0,1]）
@@ -28,16 +29,27 @@ class Config:
         self.lambda_bonus = 0.01      # 吞吐量奖励系数
 
         # --- 观测空间配置 (方便做消融实验) ---
-        # 支持: 'time', 'price', 'load', 'soc', 'future_price', 'future_load'
-        self.obs_config = ["time","price","load","soc","soc_margin","action_bounds","global_summary","future_price","future_load"]
+        # 支持: 'time'(2), 'price'(K+1), 'load'(K+1), 'soc'(1)
+        # 注意：此列表须与 hems_env._build_observation_space / _get_obs_matrix 保持一致
+        self.obs_config = ["time", "price", "load", "soc"]
 
         # --- 训练核心参数 ---
-        self.algorithm = "MADDPG"  # "MADDPG" 或 "MATD3"
+        self.algorithm = "MADDPG"       # "MADDPG" | "MATD3"
+        self.reward_type = "composite"  # "composite" | "sparse"（见 common/rewards/）
+        self.actor_type  = "mlp"        # "mlp"（见 models/registry.py ACTOR_REGISTRY）
+        # 由 core.builder.resolve_algorithm_model_config() 按 algorithm 自动解析。
+        self.critic_type = None         # None | "maddpg_mlp" | "matd3_mlp"
+        self.forecaster_type = "perfect" # "perfect" | "naive" | "lstm"（见 forecast/）
+        # forecaster_type="lstm" 时推荐提供 outputs/best_lstm.pt，
+        # 并在同目录放置 best_lstm_meta.json / best_lstm_scaler.pkl。
+        self.lstm_model_path = None
+        self.lstm_meta_path = None
+        self.lstm_scaler_path = None
         self.train_episodes = 1000
         self.max_train_steps = self.train_episodes * self.episode_limit
         self.num_envs = 32
-        self.rollout_steps = 32
-        self.update_epochs = 8
+        # self.rollout_steps = 32
+        # self.update_epochs = 8
         self.batch_size = 4096
         self.max_action = 1.0
         self.buffer_size = int(1e6)
@@ -67,3 +79,4 @@ class Config:
         
         # 运行时设备
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.N = self.num_agents  # 算法模块通过 args.N 访问智能体数量

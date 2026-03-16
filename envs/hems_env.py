@@ -9,110 +9,84 @@ from typing import Any, Dict, List, Optional, Tuple
 class EnergyStorageEnv(gym.Env):
     metadata = {"render.modes": []}
 
-    def __init__(self, args: Any, data_path: Optional[str] = None, mode: str = "train"):
+    def __init__(self, args: Any, mode: str = "train",
+                 dataset=None, reward_fn=None,
+                 forecaster=None, obs_builder=None,
+                 data_path: Optional[str] = None):
         super().__init__()
         self.args = args
         self.mode = mode
 
         # ========== 基本配置（从配置文件读取，无默认值） ==========
         self.n = int(args.num_agents)
-        self.episode_length = int(args.episode_limit)#整个 episode 的时间步数，通常对应一天或多天的仿真长度
-        self.future_horizon = int(args.future_horizon)            #未来视界长度 K，PBRS 中计算势能时用到的未来平均电价的时间窗口长度
-        self.c_bat = float(args.battery_capacity)    # 电池容量（能量单位）
-        self.p_max = float(args.max_charge_rate)     # 最大充放功率（功率单位）
-        self.eff = float(args.efficiency)              # 充放效率
+        self.episode_length = int(args.episode_limit)
+        self.future_horizon = int(args.future_horizon)
+        self.c_bat = float(args.battery_capacity)
+        self.p_max = float(args.max_charge_rate)
+        self.eff = float(args.efficiency)
         self.gamma = float(args.gamma)
-        self.init_soc = float(args.init_soc)           # 初始 SoC（0~1）
-        self.dt = float(args.dt)                       # 时间步长（小时）
+        self.init_soc = float(args.init_soc)
+        self.dt = float(args.dt)
 
         # ========== SOC 约束 ==========
         self.soc_min = float(args.soc_min)
         self.soc_max = float(args.soc_max)
-        self.soc_target = float(args.soc_target)       # SoC 正则化的目标值
-        self.soc_eps = float(args.soc_eps)             # 动作越限判定阈值
+        self.soc_target = float(args.soc_target)
+        self.soc_eps = float(args.soc_eps)
 
         # ========== 奖励超参数 ==========
-        self.w_pen = float(args.w_pen)                 # 动作越限惩罚系数
-        self.w_soc = float(args.w_soc)                 # SoC 正则系数
-        self.lambda_bonus = float(args.lambda_bonus)  # 吞吐量奖励系数
+        self.w_pen = float(args.w_pen)
+        self.w_soc = float(args.w_soc)
+        self.lambda_bonus = float(args.lambda_bonus)
 
-        # ========== 数据加载 ==========
-        self._load_data(data_path)
+        # ========== 奖励函数（可插拔） ==========
+        from common.rewards import get_reward_fn
+        reward_type = getattr(args, 'reward_type', 'composite')
+        self.reward_fn = reward_fn if reward_fn is not None else get_reward_fn(reward_type, args)
+
+        # ========== 数据集（可插拔，向后兼容） ==========
+        if dataset is None:
+            from datasets.csv_price_load import CsvPriceLoadDataset
+            if data_path is None:
+                data_dir = Path(__file__).resolve().parent.parent / "data"
+                data_path = str(data_dir / ("train_prices.csv" if mode == "train" else "test_prices.csv"))
+            dataset = CsvPriceLoadDataset(data_path, self.episode_length, self.n)
+        self._dataset = dataset
+
+        # ========== 预测器（可插拔，默认 PerfectForecaster） ==========
+        if forecaster is None:
+            from forecast.oracle import PerfectForecaster
+            forecaster = PerfectForecaster()
+        self.forecaster = forecaster
+
+        # ========== 观测构造器（可插拔，默认 DefaultObservationBuilder） ==========
+        if obs_builder is None:
+            from envs.observation.default_builder import DefaultObservationBuilder
+            obs_config = getattr(args, 'obs_config', ['time', 'price', 'load', 'soc'])
+            obs_builder = DefaultObservationBuilder(obs_config, self.future_horizon)
+        self.obs_builder = obs_builder
+
+        # ========== 可用 episode 数 ==========
+        self.num_available_episodes = self._dataset.num_episodes()
 
         # episode 切片缓存
         self.cur_step: int = 0
-        self.ep_price: np.ndarray = np.zeros((self.episode_length,), dtype=np.float32)            # (T,)
-        self.ep_load: np.ndarray = np.zeros((self.episode_length, self.n), dtype=np.float32)     # (T,N)
+        self.ep_price: np.ndarray = np.zeros((self.episode_length,), dtype=np.float32)
+        self.ep_load: np.ndarray = np.zeros((self.episode_length, self.n), dtype=np.float32)
 
         # SoC 状态（(N,)）
         self.soc: np.ndarray = np.full((self.n,), self.init_soc, dtype=np.float32)
 
         # ========== Gym space ==========
         self.action_space = [spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32) for _ in range(self.n)]
-        self.observation_space = self._build_observation_space()
-
-    # ------------------------------------------------------------------
-    # 数据加载：兼容 load1..loadN / load
-    # ------------------------------------------------------------------
-    def _load_data(self, data_path: Optional[str]) -> None:
-        if data_path is None:
-            data_dir = Path(__file__).resolve().parent.parent / "data"
-            data_path = data_dir / ("train_prices.csv" if self.mode == "train" else "test_prices.csv")
-
-        with open(data_path, "r", encoding="utf-8") as f:
-            header = f.readline().strip().split(",")
-
-        raw = np.loadtxt(data_path, delimiter=",", skiprows=1, dtype=np.float32)
-        if raw.ndim == 1:
-            raw = raw.reshape(1, -1)
-
-        self.raw = raw
-        self.header = header
-
-        # price 必须存在
-        if "price" not in header:
-            raise ValueError(f"CSV header 必须包含 'price' 列，但当前 header={header}")
-        price_idx = header.index("price")
-        self.all_price = raw[:, price_idx].astype(np.float32)  # (T_all,)
-
-        # load：优先 load1..loadN，否则 load
-        load_cols = []
-        for i in range(self.n):
-            name = f"load{i+1}"
-            if name in header:
-                load_cols.append(header.index(name))
-
-        if len(load_cols) == self.n:
-            self.all_load = raw[:, load_cols].astype(np.float32)  # (T_all,N)
-        elif "load" in header:
-            load_idx = header.index("load")
-            one = raw[:, load_idx].astype(np.float32)[:, None]    # (T_all,1)
-            self.all_load = np.repeat(one, self.n, axis=1)
-        else:
-            raise ValueError(
-                "CSV 必须包含 load 列：要么 load1..loadN，要么单列 load。"
-                f"当前 header={header}"
-            )
-
-        # 可用 episode 数
-        total_steps = len(self.all_price)
-        self.num_available_episodes = total_steps // self.episode_length
-        if self.num_available_episodes <= 0:
-            raise ValueError(f"数据长度不足：len={total_steps}, episode_length={self.episode_length}")
-
-    # ------------------------------------------------------------------
-    # 观测空间
-    # ------------------------------------------------------------------
-    def _build_observation_space(self) -> List[spaces.Box]:
-        # time(2) + price(K+1) + load(K+1) + soc(1)
-        obs_dim = 2 + 2 * (self.future_horizon + 1) + 1  # time + price + load + soc
-        return [spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32) for _ in range(self.n)]
+        obs_dim = self.obs_builder.get_obs_dim()
+        self.observation_space = [spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32) for _ in range(self.n)]
 
     # ------------------------------------------------------------------
     # 工具：取未来窗口（含当前，共 K+1），不足用 0 padding
     # ------------------------------------------------------------------
     @staticmethod
-    def _pad_window_1d(x: np.ndarray, start: int, length: int) -> np.ndarray:        
+    def _pad_window_1d(x: np.ndarray, start: int, length: int) -> np.ndarray:
         end = start + length
         if start >= len(x):
             return np.zeros((length,), dtype=np.float32)
@@ -133,38 +107,7 @@ class EnergyStorageEnv(gym.Env):
         return chunk.astype(np.float32)
 
     # ------------------------------------------------------------------
-    # 观测构造（向量化返回 (N, obs_dim)）
-    # ------------------------------------------------------------------
-    def _get_obs_matrix(self) -> np.ndarray:
-        t = self.cur_step
-        T = self.episode_length
-        k1 = self.future_horizon + 1
-
-        time_sin = np.sin(2.0 * np.pi * t / T).astype(np.float32)
-        time_cos = np.cos(2.0 * np.pi * t / T).astype(np.float32)
-
-        price_win = self._pad_window_1d(self.ep_price, t, k1)     # (k1,)
-        load_win = self._pad_window_2d(self.ep_load, t, k1).T     # (N,k1)
-
-        obs_dim = self.observation_space[0].shape[0]
-        obs = np.zeros((self.n, obs_dim), dtype=np.float32)
-
-        idx = 0
-        obs[:, idx] = time_sin
-        obs[:, idx + 1] = time_cos
-        idx += 2
-
-        obs[:, idx:idx + k1] = price_win[None, :]
-        idx += k1
-
-        obs[:, idx:idx + k1] = load_win
-        idx += k1
-
-        obs[:, idx] = self.soc
-        return obs
-
-    # ------------------------------------------------------------------
-    # PBRS：未来 K 步平均电价 μ_t（不含当前 t）
+    # PBRS：未来 K 步平均电价 μ_t（使用真实价格，不经过 forecaster）
     # ------------------------------------------------------------------
     def _future_mean_price(self, t: int) -> float:
         start = t + 1
@@ -187,16 +130,19 @@ class EnergyStorageEnv(gym.Env):
                 raise IndexError(f"episode_idx={episode_idx} 超出范围 [0, {self.num_available_episodes-1}]")
             ep = int(episode_idx)
 
-        start = ep * self.episode_length
-        end = start + self.episode_length
-
-        self.ep_price = self.all_price[start:end].astype(np.float32)      # (T,)
-        self.ep_load = self.all_load[start:end, :].astype(np.float32)     # (T,N)
+        episode_data = self._dataset.get_episode(ep)
+        self.ep_price = episode_data["price"]   # (T,)
+        self.ep_load = episode_data["load"]     # (T,N)
 
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
 
-        obs = self._get_obs_matrix()
+        # 初始化预测器
+        self.forecaster.reset()
+        if hasattr(self.forecaster, 'set_episode'):
+            self.forecaster.set_episode(self.ep_price)
+
+        obs = self.obs_builder.build(self)
         return [obs[i] for i in range(self.n)]
 
     def step(self, actions: List[np.ndarray]) -> Tuple[List[np.ndarray], List[float], List[bool], Dict]:
@@ -215,61 +161,36 @@ class EnergyStorageEnv(gym.Env):
         eff = max(self.eff, 1e-6)
 
         # -------- 3) 可行域投影：得到执行功率 e_bat_exec --------
-        # 充电：E_next = E + p*eff*dt <= C  => p <= (C-E)/(eff*dt)
-        p_max_chg = np.minimum(self.p_max, (self.c_bat - e_t) / (eff * self.dt))  # >=0
-
-        # 放电：E_next = E + p/eff*dt >= 0，p为负 => |p| <= E*eff/dt
-        p_max_dis = np.minimum(self.p_max, (e_t * eff) / self.dt)                 # >=0
+        p_max_chg = np.minimum(self.p_max, (self.c_bat - e_t) / (eff * self.dt))
+        p_max_dis = np.minimum(self.p_max, (e_t * eff) / self.dt)
 
         p_lower = -p_max_dis
         p_upper = p_max_chg
 
-        e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)  # 执行功率（可行）
+        e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)
 
         # -------- 4) SoC 更新（用执行功率） --------
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
         e_next = np.clip(e_t + delta_e, 0.0, self.c_bat).astype(np.float32)
         soc_next = (e_next / self.c_bat).astype(np.float32)
 
-        # -------- 5) 奖励分量（全向量化） --------
+        # -------- 5) 奖励计算（委托给可插拔的 reward_fn） --------
         price_t = float(self.ep_price[t])
         load_t = self.ep_load[t, :].astype(np.float32)  # (N,)
 
-        # (1) Incremental Cost Reward：e_net = load + e_bat_exec，增量成本奖励 (Incremental Cost Reward)
-        #在包含光伏（PV）和建筑负荷（Load）的微网中，基础奖励 $r_t$ 往往被庞大的基础负荷与光伏功率所主导，导致电池动作带来的经济收益信号变得极其微弱且充满噪声。
-        #$r_t^{idle}$ 代表如果电池这一步“完全不动作（闲置）”时环境的默认收益。两者相减，就能直接评估“当前采取的充放电动作，比什么都不干到底多赚了多少钱”。这极大地增强了奖励信号的信噪比。
-        e_net = load_t + e_bat
-        r = -e_net * price_t
-        r_idle = -load_t * price_t
-        r_inc = (r - r_idle).astype(np.float32)
-
-        
-        # (2) Action Penalty：惩罚“请求与执行差异”（越界越多罚越多），软约束边界：动作越限惩罚 (Action Penalty)
-        #智能体可能会在电池快空时尝试放电，或在快满时尝试充电。正则化项 $r_t^{pen} = w_{pen}|a_t|$，当采取导致越限的错误动作时施加惩罚,这可以防止智能体退化到“永远放电”的看起来局部最优/实际无效策略。。
-
-        r_pen = (self.w_pen * np.abs(e_bat_req - e_bat) / (self.p_max + 1e-6)).astype(np.float32)
-        
-        # (3) PBRS，基于势能的奖励塑形 (Potential Based Reward Shaping, PBRS) ，低买高卖需要跨越多个时间步（Delayed Rewards），普通的 DRL 算法很难将“现在的充电”与“几小时后的高价放电”联系起来。
-        #将势能 $\Phi(s_t)$ 定义为“当前储存电量的潜在价值”，即电池当前储能 $E_t$ 乘以未来一段视界内的平均电价 $\mu_t$。这等于给了智能体一个实时向导：当预期未来电价很高时，把电存起来就能获得即时的正向势能奖励。
         mu_t = self._future_mean_price(t)
         mu_next = self._future_mean_price(min(t + 1, self.episode_length - 1))
-        phi_t = (mu_t * e_t).astype(np.float32)
-        phi_next = (mu_next * e_next).astype(np.float32)
-        r_pbrs = (self.gamma * phi_next - phi_t).astype(np.float32)
 
-        # (4) SoC Regularization
-        #电池如果长期处于极高或极低 SOC 状态，面对突发的电价尖峰或负荷波动时，会丧失调节能力。引入均方误差惩罚 $r_t^{soc} = w_{soc}(x_t - x_{mid})^2$，其中 $x_{mid}$ 通常设为 0.5
-        #半满的电池是最灵活的，既能随时充电也能随时放电。这个正则化项就像一根弹簧，持续鼓励智能体在完成套利后，让 SOC 回归到中间的安全且灵活的区域。
-        # r_soc = (self.w_soc * (soc_t - self.soc_target) ** 2).astype(np.float32)
-        r_soc =0.0
-
-        # (5) Throughput Bonus（用执行功率）
-        #智能体为了绝对避免越限惩罚，干脆选择永远保持闲置（Idle）。增加一个简单的动作绝对值奖励 $r_t^{bonus} = \lambda_{bonus} \cdot |e_t^{bat}|$。
-        #只要电池有实质性的充放电动作，就给予微小的奖金。这是一种非常有效的探索（Exploration）激励手段，能够强制打破僵局，鼓励智能体去尝试使用电池，而不是退化到永远闲置的策略。
-        r_bonus = (self.lambda_bonus * np.abs(e_bat)).astype(np.float32)
-
-
-        reward = (r_inc - r_pen + r_pbrs - r_soc + r_bonus).astype(np.float32)
+        env_state = dict(
+            e_bat_req=e_bat_req, e_bat=e_bat,
+            soc_t=soc_t, soc_next=soc_next,
+            e_t=e_t, e_next=e_next,
+            price_t=price_t, load_t=load_t,
+            mu_t=mu_t, mu_next=mu_next,
+            gamma=self.gamma,
+        )
+        reward, components = self.reward_fn.compute(env_state)
+        e_net = load_t + e_bat
 
         # -------- 6) 写回状态 / 推进时间 --------
         self.soc = soc_next
@@ -279,35 +200,26 @@ class EnergyStorageEnv(gym.Env):
 
         # 下一观测
         if not done:
-            obs = self._get_obs_matrix()
+            obs = self.obs_builder.build(self)
             obs_n = [obs[i] for i in range(self.n)]
         else:
             obs_dim = self.observation_space[0].shape[0]
             obs_n = [np.zeros((obs_dim,), dtype=np.float32) for _ in range(self.n)]
 
-        # -------- 7) info：增加 e_bat_req，并返回可行域边界便于调试 --------
+        # -------- 7) info --------
         info = {
             "episode_done": done,
             "t": int(t),
             "price": float(price_t),
-
-            # 请求 vs 执行
             "e_bat_req": e_bat_req.astype(np.float32),
-            "e_bat": e_bat.astype(np.float32),  # 执行功率（保持 key 兼容 Runner）
+            "e_bat": e_bat.astype(np.float32),
             "p_lower": p_lower.astype(np.float32),
             "p_upper": p_upper.astype(np.float32),
-
             "soc_t": soc_t,
             "soc_next": soc_next,
             "net_load": e_net.astype(np.float32),
-
-            "r_inc": r_inc,
-            "r_pen": r_pen,
-            "r_pbrs": r_pbrs,
-            "r_soc": r_soc,
-            "r_bonus": r_bonus,
+            **components,
             "reward": reward,
-
             "mu_t": float(mu_t),
             "mu_next": float(mu_next),
         }
