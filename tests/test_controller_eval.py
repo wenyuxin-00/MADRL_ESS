@@ -6,7 +6,7 @@ import pytest
 from controllers import ClassicDRLController, MADRLController, MPCController, ZeroController
 from core.builder import build_env, build_train_runner
 from evaluation import evaluate_controller
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_zero_controller_can_be_evaluated(tmp_path):

@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 
 from algorithms.registry import get_agent_cls
 from common.nested import to_torch_nested
+from common.project_paths import get_tensorboard_run_dir
 from common.replay_buffer import ReplayBuffer, to_torch_batch
 from evaluation.episode_recorder import append_step_record, init_episode_record
 from runners.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
@@ -45,7 +46,14 @@ class TrainRunner:
         self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
 
         self.replay_buffer = ReplayBuffer(self.cfg)
-        self.writer = SummaryWriter(log_dir=f"runs/{self.cfg.algo.name}_{env_name}_{number}_seed_{seed}")
+        log_dir = get_tensorboard_run_dir(
+            algorithm=self.cfg.algo.name,
+            env_name=env_name,
+            run_number=number,
+            seed=seed,
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=str(log_dir))
 
         self.history = []
         self.episode_rewards = []

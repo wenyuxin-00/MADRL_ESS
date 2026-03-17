@@ -1,38 +1,14 @@
-"""Forecaster registry and factory.
-预测器注册表与工厂函数。
-
-Note / 注意:
-    - Forecasters only affect the price window in observations.
-      预测器只影响观测中的价格窗口。
-    - Environment rewards always use ground-truth price/load signals.
-      环境真实奖励仍然使用真实 price/load 计算。
-    - The LSTM forecaster loads from a unified artifact directory to ensure
-      consistency between forecast notebook training and runtime inference.
-
-How to add a new forecaster / 如何添加新预测器:
-    1. Create ``forecast/your_forecaster.py`` implementing ``Forecaster`` from ``base.py``
-       - Must provide ``predict(history, horizon)`` -> np.ndarray of shape ``(horizon,)``
-    2. Register here::
-
-           register_forecaster("your_type", YourForecaster)
-
-    3. Add construction logic in ``build_forecaster()`` below
-    4. Use in config: ``cfg.forecast.type = "your_type"``
-"""
+"""Forecaster registry and factory."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from forecast.artifacts import (
-    DEFAULT_LSTM_META_NAME,
-    DEFAULT_LSTM_MODEL_NAME,
-    DEFAULT_LSTM_SCALER_NAME,
-    get_default_lstm_artifact_paths,
-)
+from forecast.artifacts import get_default_lstm_artifact_dir
 from forecast.lstm_forecaster import LSTMForecaster, resolve_lstm_artifact_paths
 from forecast.naive import NaiveForecaster
 from forecast.oracle import PerfectForecaster
+from forecast.training import collect_available_lstm_artifacts, ensure_lstm_artifacts
 
 FORECASTER_REGISTRY: dict[str, type] = {
     "perfect": PerfectForecaster,
@@ -42,35 +18,12 @@ FORECASTER_REGISTRY: dict[str, type] = {
 
 
 def register_forecaster(name: str, forecaster_cls: type) -> None:
-    """Register a new forecaster class.
-    注册一个新的预测器类。
-    """
+    """Register a new forecaster class."""
     FORECASTER_REGISTRY[name] = forecaster_cls
 
 
-def resolve_lstm_runtime_paths(model_path: str | Path | None) -> tuple[Path, Path, Path]:
-    """解析 runtime 应加载的 LSTM artifact 路径。"""
-    if model_path is None:
-        default_paths = get_default_lstm_artifact_paths()
-        return (
-            default_paths["model_path"],
-            default_paths["meta_path"],
-            default_paths["scaler_path"],
-        )
-
-    candidate = Path(model_path)
-    if candidate.suffix == "":
-        return (
-            candidate / DEFAULT_LSTM_MODEL_NAME,
-            candidate / DEFAULT_LSTM_META_NAME,
-            candidate / DEFAULT_LSTM_SCALER_NAME,
-        )
-
-    return resolve_lstm_artifact_paths(candidate)
-
-
 def build_forecaster(cfg):
-    """按配置创建预测器。"""
+    """Build the observation-side forecaster from config."""
     forecast_cfg = cfg.forecast
     forecaster_type = forecast_cfg.type
 
@@ -85,20 +38,40 @@ def build_forecaster(cfg):
             f"Unknown forecaster_type '{forecaster_type}', available: {list(FORECASTER_REGISTRY)}"
         )
 
-    model_path, meta_path, scaler_path = resolve_lstm_runtime_paths(forecast_cfg.lstm_model_path)
-    missing = [path for path in (model_path, meta_path, scaler_path) if not path.exists()]
-    if missing:
-        default_paths = get_default_lstm_artifact_paths()
-        missing_text = ", ".join(str(path) for path in missing)
-        raise FileNotFoundError(
-            "LSTM 预测器缺少 artifact 文件："
-            f"{missing_text}。请先运行 forecast/forecast.ipynb 生成统一产物，"
-            f"默认目录为 {default_paths['artifact_dir']}。"
+    if forecast_cfg.lstm_model_path is not None:
+        model_path, meta_path, scaler_path = resolve_lstm_artifact_paths(forecast_cfg.lstm_model_path)
+        return LSTMForecaster.from_artifacts(
+            model_path=str(model_path),
+            meta_path=str(meta_path),
+            scaler_path=str(scaler_path),
+            device=cfg.runtime.device,
+            signal_name="price",
         )
 
-    return LSTMForecaster.from_artifacts(
-        model_path=str(model_path),
-        meta_path=str(meta_path),
-        scaler_path=str(scaler_path),
+    ensure_result = ensure_lstm_artifacts(cfg, device=cfg.runtime.device)
+    artifact_map = collect_available_lstm_artifacts(cfg)
+    if not artifact_map:
+        artifact_root = Path(forecast_cfg.lstm_artifact_root or get_default_lstm_artifact_dir())
+        raise FileNotFoundError(
+            "No managed LSTM forecast artifacts are available. "
+            f"Checked root: {artifact_root} for future_horizon={cfg.env.future_horizon}."
+        )
+
+    required_signals = [signal_name for signal_name in cfg.obs.sequence_features if signal_name in forecast_cfg.target_signals]
+    missing_required = [signal_name for signal_name in required_signals if signal_name not in artifact_map]
+    if missing_required:
+        raise FileNotFoundError(
+            "Missing required LSTM forecast artifacts for observation signals: "
+            f"{missing_required}. Available managed signals: {sorted(artifact_map)}."
+        )
+
+    if ensure_result.get("trained_signals"):
+        trained = ", ".join(ensure_result["trained_signals"])
+        print(f"[forecast] trained new artifacts for signals: {trained}")
+        if ensure_result.get("plot_path"):
+            print(f"[forecast] weekly comparison plot saved to {ensure_result['plot_path']}")
+
+    return LSTMForecaster.from_signal_artifacts(
+        artifact_map,
         device=cfg.runtime.device,
     )

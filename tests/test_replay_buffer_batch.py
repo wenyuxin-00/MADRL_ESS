@@ -4,7 +4,7 @@ import torch
 from common.nested import stack_nested
 from common.replay_buffer import ReplayBuffer, to_torch_batch
 from core.builder import build_env
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):

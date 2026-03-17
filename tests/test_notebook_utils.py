@@ -1,5 +1,5 @@
 from madrl.notebook_utils import build_compare_controller_builders, sanity_check_runner
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_sanity_check_runner_reports_core_shapes(tmp_path):

@@ -5,7 +5,7 @@ import pytest
 
 from core.builder import build_train_runner
 from runners.checkpoints import LATEST_CHECKPOINT_MANIFEST, resolve_checkpoint_to_load
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 @pytest.mark.parametrize(

@@ -17,18 +17,19 @@ from pprint import pprint
 
 import torch
 
+from common.project_paths import get_data_root, project_root as resolve_project_root
 from configs.experiment_config import ExperimentConfig
-from forecast.artifacts import get_default_lstm_artifact_paths
+from forecast.artifacts import get_default_lstm_artifact_dir
 
 
 def project_root() -> Path:
-    """返回仓库根目录，便于 notebook 与脚本共用。"""
-    return Path(__file__).resolve().parents[1]
+    """Return the repository root."""
+    return resolve_project_root()
 
 
 def default_data_dir() -> Path:
-    """返回默认数据目录。"""
-    return project_root() / "data"
+    """Return the default dataset directory."""
+    return get_data_root()
 
 
 def make_base_config(data_dir: str | Path | None = None, device=None) -> ExperimentConfig:
@@ -107,6 +108,9 @@ def apply_observation_profile(
     if profile_name == "default":
         cfg.obs.local_features = ["time", "price", "load", "soc"]
         cfg.obs.sequence_features = ["price", "load"]
+    elif profile_name == "simbench":
+        cfg.obs.local_features = ["time", "price", "load", "pv", "soc"]
+        cfg.obs.sequence_features = ["price", "load", "pv"]
     elif profile_name == "minimal":
         cfg.obs.local_features = ["price", "load", "soc"]
         cfg.obs.sequence_features = ["price", "load"]
@@ -132,8 +136,9 @@ def apply_reward_profile(cfg: ExperimentConfig, reward_type: str) -> ExperimentC
 def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> ExperimentConfig:
     """应用预测器选择。"""
     cfg.forecast.type = forecast_type
-    if forecast_type == "lstm" and cfg.forecast.lstm_model_path is None:
-        cfg.forecast.lstm_model_path = get_default_lstm_artifact_paths()["model_path"]
+    if forecast_type == "lstm":
+        if cfg.forecast.lstm_artifact_root is None:
+            cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
     return cfg
 
 
@@ -199,7 +204,13 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict:
         "data_dir": str(cfg.data.data_dir),
     }
     if cfg.forecast.type == "lstm":
-        summary["lstm_model_path"] = str(cfg.forecast.lstm_model_path)
+        summary["forecast_signals"] = list(cfg.forecast.target_signals)
+        summary["history_window"] = int(cfg.forecast.history_window)
+        summary["artifact_root"] = str(
+            cfg.forecast.lstm_artifact_root or get_default_lstm_artifact_dir()
+        )
+        if cfg.forecast.lstm_model_path is not None:
+            summary["legacy_lstm_model_path"] = str(cfg.forecast.lstm_model_path)
     return summary
 
 

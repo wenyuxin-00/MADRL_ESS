@@ -1,7 +1,4 @@
-"""朴素价格预测器。
-
-用途：提供一个几乎零参数的基线预测器，便于衡量“有预测信息”相对“无预测信息”的收益。
-"""
+"""Simple baseline forecaster."""
 
 from __future__ import annotations
 
@@ -11,21 +8,37 @@ from forecast.base import Forecaster
 
 
 class NaiveForecaster(Forecaster):
-    """用最近窗口的均值填充未来价格。"""
+    """Repeat the recent mean as a light-weight baseline."""
 
     def __init__(self, window: int = 96):
         self.window = int(window)
 
-    def predict(self, history: np.ndarray, horizon: int) -> np.ndarray:
+    def predict(
+        self,
+        history: np.ndarray,
+        horizon: int,
+        *,
+        signal_name: str = "price",
+    ) -> np.ndarray:
+        del signal_name
         if horizon <= 0:
             return np.zeros((0,), dtype=np.float32)
 
-        history = np.asarray(history, dtype=np.float32).reshape(-1)
-        current_price = float(history[-1]) if history.size > 0 else 0.0
-        if horizon == 1:
-            return np.array([current_price], dtype=np.float32)
+        history = np.asarray(history, dtype=np.float32)
+        if history.ndim == 1:
+            history = history.reshape(-1, 1)
+            squeeze_output = True
+        elif history.ndim == 2:
+            squeeze_output = False
+        else:
+            raise ValueError(f"NaiveForecaster expects 1D or 2D history, got shape {history.shape}")
 
-        tail = history[-self.window :] if history.size >= self.window else history
-        mean_price = float(np.mean(tail)) if tail.size > 0 else current_price
-        future = np.full((horizon - 1,), mean_price, dtype=np.float32)
-        return np.concatenate([np.array([current_price], dtype=np.float32), future], axis=0)
+        current_value = history[-1] if history.shape[0] > 0 else np.zeros((history.shape[1],), dtype=np.float32)
+        if horizon == 1:
+            return current_value.astype(np.float32) if squeeze_output else current_value[:, None].astype(np.float32)
+
+        tail = history[-self.window :] if history.shape[0] >= self.window else history
+        mean_value = tail.mean(axis=0) if tail.size > 0 else current_value
+        future = np.repeat(mean_value.reshape(-1, 1), horizon - 1, axis=1).astype(np.float32)
+        window = np.concatenate([current_value.reshape(-1, 1), future], axis=1).astype(np.float32)
+        return window[0] if squeeze_output else window

@@ -19,7 +19,8 @@ import torch
 
 from algorithms.registry import get_agent_cls
 from common.nested import add_batch_dim, to_torch_nested
-from configs.profiles import print_experiment_summary, project_root
+from common.project_paths import get_checkpoint_root, project_root
+from configs.profiles import print_experiment_summary
 from controllers import ClassicDRLController, MADRLController, MPCController, ZeroController
 from core.builder import build_env, build_train_runner
 from evaluation import evaluate_controller
@@ -35,6 +36,11 @@ def summarize_cfg(cfg) -> dict:
 def get_lstm_artifact_paths(root=None) -> dict:
     """返回统一的 LSTM artifact 三件套路径。"""
     return get_default_lstm_artifact_paths(root)
+
+
+def get_madrl_checkpoint_root(root=None) -> Path:
+    """Return the canonical checkpoint directory used by training notebooks."""
+    return get_checkpoint_root(root)
 
 
 def build_runner(cfg, seed: int = 0, env_name: str = "NotebookTrain", number: int = 1):
@@ -176,6 +182,7 @@ __all__ = [
     "build_runner",
     "evaluate_runner",
     "get_lstm_artifact_paths",
+    "get_madrl_checkpoint_root",
     "inspect_runner_io",
     "load_madrl_controller",
     "project_root",

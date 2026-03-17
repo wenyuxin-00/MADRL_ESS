@@ -4,7 +4,7 @@ from envs.hems_env import EnergyStorageEnv
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.registry import build_obs_builder, get_obs_builder_cls
 from envs.registry import get_env_cls
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_env_registry_returns_default_environment_class():

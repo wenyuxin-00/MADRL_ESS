@@ -1,7 +1,7 @@
-"""LSTM 价格预测网络。
+"""Shared univariate LSTM forecast network.
 
-网络定义集中放在一个公开模块里，保证预测 notebook、runtime forecaster
-和测试依赖的是同一份结构真源。
+The class keeps its historical name for compatibility, but it is now used for
+price, load, and pv scalar series alike.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import torch.nn as nn
 
 
 class LSTMPricePredictor(nn.Module):
-    """LSTM 直接多步价格预测器。"""
+    """Direct multi-step LSTM predictor for one scalar signal."""
 
     def __init__(
         self,

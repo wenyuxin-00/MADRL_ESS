@@ -195,7 +195,7 @@ class EnergyStorageEnv(gym.Env):
 
         self.forecaster.reset()
         if hasattr(self.forecaster, "set_episode"):
-            self.forecaster.set_episode(self.ep_price)
+            self.forecaster.set_episode(self.signals)
 
         return self.obs_builder.build(self)
 

@@ -92,6 +92,18 @@ class ForecastConfig:
 
     type: str = "perfect"
     naive_window: int = 96
+    target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
+    history_window: int = 96
+    lstm_hidden_size: int = 64
+    lstm_num_layers: int = 1
+    lstm_dropout: float = 0.0
+    lstm_batch_size: int = 512
+    lstm_epochs: int = 4
+    lstm_lr: float = 1e-3
+    lstm_train_ratio: float = 0.7
+    lstm_val_ratio: float = 0.15
+    auto_train_missing: bool = True
+    lstm_artifact_root: str | Path | None = None
     lstm_model_path: str | Path | None = None
 
 

@@ -1,7 +1,7 @@
 from controllers import ClassicDRLController, MPCController, ZeroController
 from core.builder import build_env
 from evaluation import comparison_records_to_rows, evaluate_controller_suite
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_compare_suite_marks_placeholders_as_not_implemented(tmp_path):

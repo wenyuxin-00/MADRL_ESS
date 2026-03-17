@@ -13,6 +13,7 @@ from datasets.registry import build_dataset
 from envs.observation.registry import build_obs_builder
 from envs.registry import get_env_cls
 from forecast.registry import build_forecaster
+from forecast.training import ensure_lstm_artifacts
 from models import validate_and_finalize_model_config
 from runners.train_runner import TrainRunner
 
@@ -72,6 +73,9 @@ def build_train_runner(
 ) -> TrainRunner:
     """按统一配置创建训练 runner。"""
     validate_and_finalize_model_config(cfg)
+
+    if cfg.forecast.type == "lstm" and cfg.forecast.lstm_model_path is None:
+        ensure_lstm_artifacts(cfg, device=cfg.runtime.device)
 
     train_env = _build_train_vec_env(cfg)
     eval_dataset = build_dataset(cfg, mode="test")

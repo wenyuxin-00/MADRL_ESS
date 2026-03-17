@@ -1,8 +1,4 @@
-"""pytest 公共配置。
-
-当前运行环境的系统临时目录存在权限问题，因此这里显式提供一个仓库内可控、可清理的
-`tmp_path` fixture，保证测试在不同机器上都不依赖本机目录结构。
-"""
+"""Shared pytest fixtures for repository-local temporary files."""
 
 from __future__ import annotations
 
@@ -12,12 +8,13 @@ from pathlib import Path
 
 import pytest
 
-TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / "test_tmp_cases"
+
+TEST_TMP_ROOT = Path(__file__).resolve().parent / ".tmp"
 
 
 @pytest.fixture
 def tmp_path():
-    """提供一个仓库内的临时目录，并在测试后清理。"""
+    """Provide a temporary directory that stays inside ``tests/``."""
     TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
     case_dir = TEST_TMP_ROOT / f"case_{uuid.uuid4().hex}"
     case_dir.mkdir(parents=True, exist_ok=False)
@@ -28,5 +25,6 @@ def tmp_path():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """测试结束后清理统一临时目录。"""
+    """Remove the shared temporary root after the test session finishes."""
+    _ = session, exitstatus
     shutil.rmtree(TEST_TMP_ROOT, ignore_errors=True)

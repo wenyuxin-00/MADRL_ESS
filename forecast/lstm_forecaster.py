@@ -1,15 +1,10 @@
-"""基于已训练 LSTM 的运行时价格预测器。
-
-职责：
-- 统一加载 LSTM 模型、meta 和 scaler 三件套 artifact。
-- 在环境 rollout 时按统一 forecaster 契约生成价格窗口。
-- 与 forecast/forecast.ipynb 复用同一份网络定义与 artifact 格式。
-"""
+"""Runtime LSTM forecaster with multi-signal support."""
 
 from __future__ import annotations
 
 import json
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -29,8 +24,12 @@ LSTM_REQUIRED_META_FIELDS = (
 )
 
 
-def resolve_lstm_artifact_paths(model_path, meta_path=None, scaler_path=None) -> tuple[Path, Path, Path]:
-    """根据模型路径解析标准 sidecar artifact 路径。"""
+def resolve_lstm_artifact_paths(
+    model_path,
+    meta_path=None,
+    scaler_path=None,
+) -> tuple[Path, Path, Path]:
+    """Resolve the standard sidecar paths for one saved LSTM model."""
     model_path = Path(model_path)
     stem = model_path.stem
     meta_path = Path(meta_path) if meta_path is not None else model_path.with_name(f"{stem}{LSTM_META_SUFFIX}")
@@ -52,8 +51,10 @@ def save_lstm_forecaster_artifacts(
     hidden_size: int,
     num_layers: int,
     dropout: float,
+    signal_name: str = "price",
+    future_horizon: int | None = None,
 ) -> dict[str, str]:
-    """保存运行时 LSTM 预测器所需的标准三件套。"""
+    """Save the standard model/meta/scaler triplet for one signal."""
     if scaler is None:
         raise ValueError("LSTM forecaster artifacts require a fitted scaler object.")
 
@@ -63,7 +64,9 @@ def save_lstm_forecaster_artifacts(
     torch.save(state_dict, model_path)
 
     meta = {
-        "artifact_format": "lstm_forecaster_v1",
+        "artifact_format": "lstm_forecaster_v2",
+        "signal_name": str(signal_name),
+        "future_horizon": int(pred_len if future_horizon is None else future_horizon),
         "seq_len": int(seq_len),
         "pred_len": int(pred_len),
         "hidden_size": int(hidden_size),
@@ -82,8 +85,12 @@ def save_lstm_forecaster_artifacts(
     }
 
 
-def load_lstm_forecaster_artifacts(model_path, meta_path=None, scaler_path=None) -> tuple[dict, object]:
-    """加载运行时 LSTM 预测器所需的 meta 与 scaler。"""
+def load_lstm_forecaster_artifacts(
+    model_path,
+    meta_path=None,
+    scaler_path=None,
+) -> tuple[dict, object]:
+    """Load the standard meta/scaler sidecars for one signal model."""
     _, meta_path, scaler_path = resolve_lstm_artifact_paths(model_path, meta_path, scaler_path)
 
     if not meta_path.exists():
@@ -108,8 +115,20 @@ def load_lstm_forecaster_artifacts(model_path, meta_path=None, scaler_path=None)
     return meta, scaler
 
 
+@dataclass
+class _SignalForecasterRuntime:
+    signal_name: str
+    seq_len: int
+    pred_len: int
+    hidden_size: int
+    num_layers: int
+    dropout: float
+    model: torch.nn.Module
+    scaler: object | None
+
+
 class LSTMForecaster(Forecaster):
-    """运行时 LSTM 价格预测器。"""
+    """Runtime LSTM forecaster for shared and per-agent signals."""
 
     def __init__(
         self,
@@ -121,25 +140,81 @@ class LSTMForecaster(Forecaster):
         seq_len: int = 1344,
         device: str | torch.device = "cpu",
         scaler=None,
+        signal_runtimes: dict[str, _SignalForecasterRuntime] | None = None,
     ):
-        self.seq_len = int(seq_len)
-        self.pred_len = int(pred_len)
         self.device = torch.device(device)
-        self.scaler = scaler
-        self._cache = np.array([], dtype=np.float32)
 
-        self.model = LSTMPricePredictor(
+        if signal_runtimes is None:
+            runtime = self._build_runtime(
+                signal_name="price",
+                model_path=model_path,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dropout=dropout,
+                pred_len=pred_len,
+                seq_len=seq_len,
+                scaler=scaler,
+                device=self.device,
+            )
+            signal_runtimes = {"price": runtime}
+
+        self.signal_runtimes = dict(signal_runtimes)
+        self._set_legacy_attributes()
+
+    def _set_legacy_attributes(self) -> None:
+        """Expose historical single-signal attributes for compatibility."""
+        preferred_signal = "price" if "price" in self.signal_runtimes else next(iter(self.signal_runtimes))
+        runtime = self.signal_runtimes[preferred_signal]
+        self.seq_len = int(runtime.seq_len)
+        self.pred_len = int(runtime.pred_len)
+        self.scaler = runtime.scaler
+        self.model = runtime.model
+
+    def _sync_legacy_price_runtime(self) -> None:
+        """Keep historical direct attribute mutation compatible with tests/notebooks."""
+        if "price" not in self.signal_runtimes:
+            return
+        runtime = self.signal_runtimes["price"]
+        runtime.seq_len = int(getattr(self, "seq_len", runtime.seq_len))
+        runtime.pred_len = int(getattr(self, "pred_len", runtime.pred_len))
+        runtime.scaler = getattr(self, "scaler", runtime.scaler)
+        runtime.model = getattr(self, "model", runtime.model)
+
+    @staticmethod
+    def _build_runtime(
+        *,
+        signal_name: str,
+        model_path: str | None,
+        hidden_size: int,
+        num_layers: int,
+        dropout: float,
+        pred_len: int,
+        seq_len: int,
+        scaler,
+        device: torch.device,
+    ) -> _SignalForecasterRuntime:
+        model = LSTMPricePredictor(
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
             pred_len=pred_len,
-        ).to(self.device)
+        ).to(device)
 
         if model_path is not None:
-            state_dict = torch.load(model_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
 
-        self.model.eval()
+        model.eval()
+        return _SignalForecasterRuntime(
+            signal_name=str(signal_name),
+            seq_len=int(seq_len),
+            pred_len=int(pred_len),
+            hidden_size=int(hidden_size),
+            num_layers=int(num_layers),
+            dropout=float(dropout),
+            model=model,
+            scaler=scaler,
+        )
 
     @classmethod
     def from_artifacts(
@@ -148,8 +223,9 @@ class LSTMForecaster(Forecaster):
         meta_path: str | None = None,
         scaler_path: str | None = None,
         device: str | torch.device = "cpu",
+        signal_name: str = "price",
     ):
-        """从标准 artifact 三件套直接构建 forecaster。"""
+        """Build a single-signal forecaster from one artifact triplet."""
         meta, scaler = load_lstm_forecaster_artifacts(
             model_path=model_path,
             meta_path=meta_path,
@@ -164,14 +240,62 @@ class LSTMForecaster(Forecaster):
             seq_len=int(meta["seq_len"]),
             device=device,
             scaler=scaler,
-        )
+            signal_runtimes=None,
+        ).rename_default_signal(meta.get("signal_name", signal_name))
+
+    @classmethod
+    def from_signal_artifacts(
+        cls,
+        signal_artifacts: dict[str, tuple[str, str | None, str | None]],
+        *,
+        device: str | torch.device = "cpu",
+    ):
+        """Build a multi-signal runtime forecaster from several artifact triplets."""
+        device = torch.device(device)
+        signal_runtimes: dict[str, _SignalForecasterRuntime] = {}
+        for signal_name, (model_path, meta_path, scaler_path) in signal_artifacts.items():
+            meta, scaler = load_lstm_forecaster_artifacts(
+                model_path=model_path,
+                meta_path=meta_path,
+                scaler_path=scaler_path,
+            )
+            runtime = cls._build_runtime(
+                signal_name=meta.get("signal_name", signal_name),
+                model_path=model_path,
+                hidden_size=int(meta["hidden_size"]),
+                num_layers=int(meta["num_layers"]),
+                dropout=float(meta["dropout"]),
+                pred_len=int(meta["pred_len"]),
+                seq_len=int(meta["seq_len"]),
+                scaler=scaler,
+                device=device,
+            )
+            signal_runtimes[str(signal_name)] = runtime
+
+        return cls(device=device, signal_runtimes=signal_runtimes)
+
+    def rename_default_signal(self, signal_name: str):
+        """Rename the compatibility default signal after loading legacy artifacts."""
+        if "price" in self.signal_runtimes and signal_name != "price":
+            self.signal_runtimes[str(signal_name)] = self.signal_runtimes.pop("price")
+            self.signal_runtimes[str(signal_name)].signal_name = str(signal_name)
+        self._set_legacy_attributes()
+        return self
+
+    def available_signals(self) -> list[str]:
+        """Return all signal names backed by loaded artifacts."""
+        return sorted(self.signal_runtimes)
 
     def reset(self) -> None:
-        """在 episode 重置时清空滚动缓存。"""
-        self._cache = np.array([], dtype=np.float32)
+        """The runtime forecaster is stateless across episodes."""
+        return None
 
-    def predict(self, history: np.ndarray, horizon: int) -> np.ndarray:
-        """基于历史价格滚动预测 horizon 步。"""
+    def _predict_univariate(
+        self,
+        runtime: _SignalForecasterRuntime,
+        history: np.ndarray,
+        horizon: int,
+    ) -> np.ndarray:
         if horizon <= 0:
             return np.zeros((0,), dtype=np.float32)
 
@@ -179,37 +303,72 @@ class LSTMForecaster(Forecaster):
         if history.size == 0:
             return np.zeros((horizon,), dtype=np.float32)
 
-        current_price = np.array([history[-1]], dtype=np.float32)
+        current_value = np.array([history[-1]], dtype=np.float32)
         if horizon == 1:
-            return current_price.copy()
+            return current_value.copy()
 
-        self._cache = history.copy()
-        result = []
+        rolling_history = history.copy()
+        future_chunks = []
         remaining = horizon - 1
 
         while remaining > 0:
-            if len(self._cache) < self.seq_len:
-                pad = np.zeros(self.seq_len - len(self._cache), dtype=np.float32)
-                inp = np.concatenate([pad, self._cache])
+            if rolling_history.size < runtime.seq_len:
+                pad = np.zeros((runtime.seq_len - rolling_history.size,), dtype=np.float32)
+                model_input = np.concatenate([pad, rolling_history], axis=0)
             else:
-                inp = self._cache[-self.seq_len :]
+                model_input = rolling_history[-runtime.seq_len :]
 
-            if self.scaler is not None:
-                inp = self.scaler.transform(inp.reshape(-1, 1)).flatten().astype(np.float32)
+            if runtime.scaler is not None:
+                model_input = runtime.scaler.transform(model_input.reshape(-1, 1)).reshape(-1).astype(np.float32)
 
-            inp_t = torch.tensor(inp, dtype=torch.float32, device=self.device).unsqueeze(0)
+            model_tensor = torch.tensor(
+                model_input,
+                dtype=torch.float32,
+                device=self.device,
+            ).unsqueeze(0)
+
             with torch.no_grad():
-                out = self.model(inp_t).cpu().numpy().flatten()
+                prediction = runtime.model(model_tensor).detach().cpu().numpy().reshape(-1)
 
-            if self.scaler is not None:
-                out = self.scaler.inverse_transform(out.reshape(-1, 1)).flatten()
-            out = np.asarray(out, dtype=np.float32)
+            if runtime.scaler is not None:
+                prediction = runtime.scaler.inverse_transform(prediction.reshape(-1, 1)).reshape(-1)
 
-            take = min(self.pred_len, remaining)
-            pred_chunk = out[:take].astype(np.float32)
-            result.append(pred_chunk)
-            self._cache = np.concatenate([self._cache, pred_chunk], axis=0)
+            prediction = np.asarray(prediction, dtype=np.float32)
+            take = min(runtime.pred_len, remaining)
+            prediction = prediction[:take].astype(np.float32)
+            future_chunks.append(prediction)
+            rolling_history = np.concatenate([rolling_history, prediction], axis=0)
             remaining -= take
 
-        future = np.concatenate(result).astype(np.float32)
-        return np.concatenate([current_price, future], axis=0)[:horizon].astype(np.float32)
+        future = np.concatenate(future_chunks, axis=0).astype(np.float32)
+        return np.concatenate([current_value, future], axis=0)[:horizon].astype(np.float32)
+
+    def predict(
+        self,
+        history: np.ndarray,
+        horizon: int,
+        *,
+        signal_name: str = "price",
+    ) -> np.ndarray:
+        if signal_name not in self.signal_runtimes:
+            if len(self.signal_runtimes) == 1:
+                signal_name = next(iter(self.signal_runtimes))
+            else:
+                available = self.available_signals()
+                raise KeyError(f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {available}")
+
+        self._sync_legacy_price_runtime()
+        runtime = self.signal_runtimes[signal_name]
+        history = np.asarray(history, dtype=np.float32)
+
+        if history.ndim == 1:
+            return self._predict_univariate(runtime, history, horizon)
+
+        if history.ndim != 2:
+            raise ValueError(f"LSTMForecaster expects 1D or 2D history, got shape {history.shape}")
+
+        predictions = [
+            self._predict_univariate(runtime, history[:, column_idx], horizon)
+            for column_idx in range(history.shape[1])
+        ]
+        return np.stack(predictions, axis=0).astype(np.float32)

@@ -2,7 +2,7 @@ import pytest
 
 from configs import compose_experiment_config
 from configs.experiment_config import ExperimentConfig
-from forecast.artifacts import get_default_lstm_artifact_paths
+from forecast.artifacts import get_default_lstm_artifact_dir
 from models import validate_and_finalize_model_config
 
 
@@ -44,11 +44,12 @@ def test_compose_experiment_config_applies_profiles():
     assert cfg.obs.sequence_features == ["price", "load"]
 
 
-def test_compose_experiment_config_sets_default_lstm_artifact_path():
+def test_compose_experiment_config_sets_default_lstm_artifact_root():
     cfg = compose_experiment_config(forecast_type="lstm")
 
     assert cfg.forecast.type == "lstm"
-    assert cfg.forecast.lstm_model_path == get_default_lstm_artifact_paths()["model_path"]
+    assert cfg.forecast.lstm_artifact_root == get_default_lstm_artifact_dir()
+    assert cfg.forecast.lstm_model_path is None
 
 
 @pytest.mark.parametrize(

@@ -1,20 +1,4 @@
-"""Forecaster abstract base class.
-预测器抽象基类。
-
-All forecasters follow the same lightweight contract:
-所有预测器都遵循同一份轻量契约：
-
-    - Input: real price history up to current step ``[p0, ..., pt]``
-      输入：到当前时刻为止的真实价格历史
-    - Output: price window of length ``horizon``, where ``result[0] == pt``
-      输出：长度为 horizon 的价格窗口，其中 result[0] == pt
-    - Forecasters only affect the observation's price window, NOT the
-      environment's true reward computation.
-      预测器只影响观测中的价格窗口，不影响环境真实奖励计算
-
-See ``forecast/oracle.py`` (simplest) and ``forecast/lstm_forecaster.py``
-(most complex) for implementation examples.
-"""
+"""Forecaster base contract."""
 
 from __future__ import annotations
 
@@ -24,26 +8,40 @@ import numpy as np
 
 
 class Forecaster(ABC):
-    """Price forecaster base class.
-    价格预测器基类。
+    """Base class for observation-side forecasters.
+
+    Forecasters only replace the future-looking observation windows. They do
+    not change the environment's ground-truth reward computation.
+
+    The contract supports both shared 1-D signals such as ``price`` and
+    per-agent 2-D signals such as ``load`` / ``pv`` stored as ``(T, N)``.
     """
 
     @abstractmethod
-    def predict(self, history: np.ndarray, horizon: int) -> np.ndarray:
-        """Return a look-ahead price window given price history.
-        基于价格历史返回一个前瞻窗口。
+    def predict(
+        self,
+        history: np.ndarray,
+        horizon: int,
+        *,
+        signal_name: str = "price",
+    ) -> np.ndarray:
+        """Return a look-ahead window for one signal.
 
         Args:
-            history: 1-D array of observed prices ``[p0, ..., pt]``.
-            horizon: Number of future steps to predict.
+            history: Observed signal history up to the current step.
+                Shared signals use shape ``(t + 1,)``.
+                Per-agent signals use shape ``(t + 1, n_agents)``.
+            horizon: Number of values to return. The current value is included
+                in the first position, so ``result[..., 0]`` always represents
+                the current step.
+            signal_name: Canonical signal key such as ``price``, ``load``, or
+                ``pv``.
 
         Returns:
-            np.ndarray of shape ``(horizon,)`` where ``result[0] == pt``
-            (current price) and ``result[1:]`` are forecasted future prices.
+            ``(horizon,)`` for shared signals or ``(n_agents, horizon)`` for
+            per-agent signals.
         """
 
     def reset(self) -> None:
-        """Reset internal state at episode boundaries (optional).
-        在 episode 重置时清理内部状态（可选）。
-        """
+        """Reset optional episode-local state."""
         return None

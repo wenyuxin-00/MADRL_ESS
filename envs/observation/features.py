@@ -138,7 +138,11 @@ def _shared_signal_sequence_feature(
 ) -> ObservationFeatureSpec:
     def builder(env, sequence_length: int) -> np.ndarray:
         if use_forecaster:
-            return env.forecaster.predict(env.get_signal_history(signal_name), sequence_length).astype(np.float32)
+            return env.forecaster.predict(
+                env.get_signal_history(signal_name),
+                sequence_length,
+                signal_name=signal_name,
+            ).astype(np.float32)
         return pad_sequence_1d(env.get_signal(signal_name), env.cur_step, sequence_length).astype(np.float32)
 
     return ObservationFeatureSpec(
@@ -151,17 +155,31 @@ def _shared_signal_sequence_feature(
     )
 
 
-def _per_agent_signal_sequence_feature(signal_name: str, description: str) -> ObservationFeatureSpec:
+def _per_agent_signal_sequence_feature(
+    signal_name: str,
+    description: str,
+    *,
+    use_forecaster: bool = False,
+) -> ObservationFeatureSpec:
+    def builder(env, sequence_length: int) -> np.ndarray:
+        if use_forecaster:
+            return env.forecaster.predict(
+                env.get_signal_history(signal_name),
+                sequence_length,
+                signal_name=signal_name,
+            ).astype(np.float32)
+        return pad_sequence_2d(
+            env.get_signal(signal_name),
+            env.cur_step,
+            sequence_length,
+        ).T.astype(np.float32)
+
     return ObservationFeatureSpec(
         name=signal_name,
         group="sequence",
         dim=1,
         scope="per_agent",
-        builder=lambda env, sequence_length: pad_sequence_2d(
-            env.get_signal(signal_name),
-            env.cur_step,
-            sequence_length,
-        ).T.astype(np.float32),
+        builder=builder,
         description=description,
     )
 
@@ -178,6 +196,7 @@ register_local_feature(
 )
 register_local_feature(_current_shared_signal_feature("price", "当前真实电价"))
 register_local_feature(_current_per_agent_signal_feature("load", "当前每个 agent 的负荷"))
+register_local_feature(_current_per_agent_signal_feature("pv", "当前每个 agent 的光伏出力"))
 register_local_feature(
     ObservationFeatureSpec(
         name="soc",
@@ -190,7 +209,8 @@ register_local_feature(
 )
 
 register_sequence_feature(_shared_signal_sequence_feature("price", "价格窗口，支持预测器替换", use_forecaster=True))
-register_sequence_feature(_per_agent_signal_sequence_feature("load", "每个 agent 的负荷窗口"))
+register_sequence_feature(_per_agent_signal_sequence_feature("load", "每个 agent 的负荷窗口", use_forecaster=True))
+register_sequence_feature(_per_agent_signal_sequence_feature("pv", "每个 agent 的光伏窗口", use_forecaster=True))
 
 
 def build_adjacency_field(n_agents: int, adjacency_type: str) -> np.ndarray:

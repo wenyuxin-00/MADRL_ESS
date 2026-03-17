@@ -7,7 +7,7 @@ from runners.checkpoints import (
     resolve_checkpoint_to_load,
     write_checkpoint_manifest,
 )
-from tests.helpers import make_case_dir
+from tests.support.helpers import make_case_dir
 
 
 def _touch_checkpoint_pair(algo_dir: Path, episode_tag: int) -> None:
@@ -56,7 +56,12 @@ def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
 
 
 def test_compare_notebook_uses_shared_builder_helper():
-    notebook_path = Path(__file__).resolve().parents[1] / "madrl" / "compare.ipynb"
+    notebook_path = (
+        Path(__file__).resolve().parents[1]
+        / "notebooks"
+        / "madrl"
+        / "compare_controllers.ipynb"
+    )
     text = notebook_path.read_text(encoding="utf-8")
 
     assert "LOAD_EPISODE = 992" not in text

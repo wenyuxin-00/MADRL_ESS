@@ -4,7 +4,7 @@ from common.subproc_vec_env import SubprocVecEnv
 from common.vec_env import DummyVecEnv
 from core.builder import build_env
 from datasets.registry import build_dataset
-from tests.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config
 
 
 def test_dataset_returns_canonical_signals_schema(tmp_path):
