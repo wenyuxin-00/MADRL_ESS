@@ -20,12 +20,12 @@ class CompositeReward(RewardFn):
       → 无需修改 hems_env.py 或 train_madrl.ipynb
     """
 
-    def __init__(self, args):
-        self.w_pen = float(args.w_pen)
-        self.w_soc = float(args.w_soc)
-        self.lambda_bonus = float(args.lambda_bonus)
-        self.p_max = float(args.max_charge_rate)
-        self.soc_target = float(args.soc_target)
+    def __init__(self, cfg):
+        self.w_pen = float(cfg.reward.w_pen)
+        self.w_soc = float(cfg.reward.w_soc)
+        self.lambda_bonus = float(cfg.reward.lambda_bonus)
+        self.p_max = float(cfg.env.max_charge_rate)
+        self.soc_target = float(cfg.env.soc_target)
 
     @property
     def component_meta(self) -> list:

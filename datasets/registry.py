@@ -1,50 +1,41 @@
-"""
-datasets/registry.py
-职责：数据集注册表与工厂函数。
+"""数据集 registry。
 
-用法：
-    from datasets.registry import build_dataset
-    train_ds = build_dataset(args, mode='train')
-    test_ds  = build_dataset(args, mode='test')
-
-后续扩展：注册新数据集类型只需在 DATASET_REGISTRY 中添加条目。
+当前只注册一个最小可用数据集实现，但保留最小 registry 骨架，
+方便未来按 `dataset_type` 扩展新的数据来源。
 """
+
+from __future__ import annotations
 
 from pathlib import Path
+
 from datasets.csv_price_load import CsvPriceLoadDataset
 
-DATASET_REGISTRY: dict = {
+DATASET_REGISTRY: dict[str, type] = {
     "csv_price_load": CsvPriceLoadDataset,
 }
 
 
-def build_dataset(args, mode: str = "train"):
-    """根据 args.dataset_type 构建数据集实例。
+def register_dataset(name: str, dataset_cls: type) -> None:
+    """注册一个数据集类。"""
+    DATASET_REGISTRY[name] = dataset_cls
 
-    Parameters
-    ----------
-    args : Config
-        超参数对象。须包含 episode_limit, num_agents。
-        可选：dataset_type（默认 "csv_price_load"）、data_dir。
-    mode : str
-        "train" 或 "test"，决定使用哪个 CSV 文件。
 
-    Returns
-    -------
-    BaseEpisodeDataset
-    """
-    dataset_type = getattr(args, "dataset_type", "csv_price_load")
-    if dataset_type not in DATASET_REGISTRY:
-        raise ValueError(f"未知 dataset_type '{dataset_type}'，可选: {list(DATASET_REGISTRY)}")
+def get_dataset_cls(name: str) -> type:
+    """按名称读取数据集类。"""
+    if name not in DATASET_REGISTRY:
+        raise ValueError(f"Unknown data.dataset_type '{name}', available: {list(DATASET_REGISTRY)}")
+    return DATASET_REGISTRY[name]
 
-    # 默认数据路径：项目根目录 data/
-    data_dir = Path(getattr(args, "data_dir", None) or
-                    Path(__file__).resolve().parent.parent / "data")
+
+def build_dataset(cfg, mode: str = "train"):
+    """按配置构建数据集。"""
+    dataset_cls = get_dataset_cls(cfg.data.dataset_type)
+    data_dir = Path(cfg.data.data_dir or (Path(__file__).resolve().parent.parent / "data"))
     csv_name = "train_prices.csv" if mode == "train" else "test_prices.csv"
     data_path = data_dir / csv_name
 
-    return DATASET_REGISTRY[dataset_type](
+    return dataset_cls(
         data_path=data_path,
-        episode_length=int(args.episode_limit),
-        n_agents=int(args.num_agents),
+        episode_length=cfg.env.episode_limit,
+        n_agents=cfg.env.num_agents,
     )

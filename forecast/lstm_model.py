@@ -1,15 +1,17 @@
-"""Shared LSTM price prediction model.
+"""LSTM 价格预测网络。
 
-Keep the network definition in one public module so notebook training,
-runtime forecasters, and tests all depend on the same source of truth.
+网络定义集中放在一个公开模块里，保证预测 notebook、runtime forecaster
+和测试依赖的是同一份结构真源。
 """
+
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
 
 class LSTMPricePredictor(nn.Module):
-    """LSTM direct multi-step price predictor."""
+    """LSTM 直接多步价格预测器。"""
 
     def __init__(
         self,
@@ -34,6 +36,7 @@ class LSTMPricePredictor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """输入形状支持 `(B, T)` 或 `(B, T, 1)`。"""
         if x.dim() == 2:
             x = x.unsqueeze(-1)
         elif x.dim() != 3:

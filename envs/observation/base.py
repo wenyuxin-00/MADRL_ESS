@@ -1,41 +1,34 @@
-"""
-envs/observation/base.py
-职责：定义观测构造器的统一抽象接口。
+"""观测构造器接口。
 
-ObservationBuilder 将 env 的内部状态映射到 agent 的观测向量。
-- get_obs_dim() 在构建时即可确定，无需 env 实例
-- build(env) 在每次 reset/step 后调用，返回 (N, obs_dim) 矩阵
-
-设计意图：
-  通过依赖注入将观测逻辑与物理 env 解耦，使 obs_config 消融实验
-  只需替换 obs_builder，无需修改 hems_env.py 物理代码。
+环境状态可以变化，但对外暴露给模型的结构化观测必须稳定。
+这里统一约束 schema、layout 与 build 逻辑，方便 notebook 调试和模型装配。
 """
+
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
+
 import numpy as np
 
 
 class ObservationBuilder(ABC):
-    """观测构造器抽象基类。"""
+    """为单个环境步构造结构化观测。"""
 
     @abstractmethod
-    def get_obs_dim(self) -> int:
-        """返回单个 agent 的观测维度。在构造时即可确定，无需 env 实例。"""
-        ...
+    def get_schema(self, n_agents: int) -> dict[str, tuple[int, ...]]:
+        """返回每个观测字段的 shape。"""
 
     @abstractmethod
-    def build(self, env) -> np.ndarray:
-        """
-        构造当前时步的完整观测矩阵。
+    def get_layout(self, n_agents: int) -> dict[str, dict]:
+        """返回每个观测字段的语义布局信息。"""
 
-        Parameters
-        ----------
-        env : EnergyStorageEnv
-            已初始化并 reset 的环境实例。
+    @abstractmethod
+    def build(self, env) -> dict[str, np.ndarray]:
+        """构造一步结构化观测。"""
 
-        Returns
-        -------
-        np.ndarray, shape (N, obs_dim), float32
-            N 个 agent 的观测向量。
-        """
-        ...
+    def zeros(self, n_agents: int) -> dict[str, np.ndarray]:
+        """按当前 schema 返回全零观测。"""
+        return {
+            key: np.zeros(shape, dtype=np.float32)
+            for key, shape in self.get_schema(n_agents).items()
+        }

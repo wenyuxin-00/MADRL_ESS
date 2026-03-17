@@ -1,0 +1,28 @@
+from madrl.notebook_utils import build_compare_controller_builders, sanity_check_runner
+from tests.helpers import make_case_dir, make_smoke_config
+
+
+def test_sanity_check_runner_reports_core_shapes(tmp_path):
+    case_dir = make_case_dir(tmp_path, "sanity_runner")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    summary = sanity_check_runner(cfg, seed=0)
+
+    assert "observation_schema" in summary
+    assert "rollout_obs_shapes" in summary
+    assert summary["action_dim"] == 1
+
+
+def test_build_compare_controller_builders_supports_baselines(tmp_path):
+    case_dir = make_case_dir(tmp_path, "compare_builders")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    builders, metadata = build_compare_controller_builders(
+        cfg,
+        controllers_to_compare=["zero", "mpc", "classic_drl"],
+        model_root=case_dir / "saved_models",
+        algorithm="MADDPG",
+    )
+
+    assert set(builders) == {"zero", "mpc", "classic_drl"}
+    assert metadata == {}

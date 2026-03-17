@@ -1,119 +1,83 @@
-"""
-forecast/registry.py
-职责：预测器注册表与工厂函数。
+"""预测器构建入口。
 
-用法：
-    from forecast.registry import build_forecaster
-    forecaster = build_forecaster(args)
-
-支持的 forecaster_type：
-  - "perfect" : PerfectForecaster（Oracle，直接返回真实未来价格，为默认值）
-  - "naive"   : NaiveForecaster（历史滚动均值，无参数基准）
-  - "lstm"    : LSTMForecaster（推荐使用标准产物：
-                best_lstm.pt + best_lstm_meta.json + best_lstm_scaler.pkl）
-
-后续扩展：注册新预测器只需在 FORECASTER_REGISTRY 中添加条目。
+注意：
+- 预测器只影响观测中的价格窗口。
+- 环境真实奖励仍然使用真实 price/load 计算。
+- LSTM 预测器默认从统一 artifact 目录加载，保证 forecast notebook 与 runtime 闭环。
 """
 
-from forecast.oracle import PerfectForecaster
-from forecast.naive import NaiveForecaster
+from __future__ import annotations
+
+from pathlib import Path
+
+from forecast.artifacts import (
+    DEFAULT_LSTM_META_NAME,
+    DEFAULT_LSTM_MODEL_NAME,
+    DEFAULT_LSTM_SCALER_NAME,
+    get_default_lstm_artifact_paths,
+)
 from forecast.lstm_forecaster import LSTMForecaster, resolve_lstm_artifact_paths
+from forecast.naive import NaiveForecaster
+from forecast.oracle import PerfectForecaster
 
-FORECASTER_REGISTRY: dict = {
+FORECASTER_REGISTRY: dict[str, type] = {
     "perfect": PerfectForecaster,
-    "naive":   NaiveForecaster,
-    "lstm":    LSTMForecaster,
+    "naive": NaiveForecaster,
+    "lstm": LSTMForecaster,
 }
 
 
-def build_forecaster(args):
-    """根据 args.forecaster_type 构建预测器实例。
+def resolve_lstm_runtime_paths(model_path: str | Path | None) -> tuple[Path, Path, Path]:
+    """解析 runtime 应加载的 LSTM artifact 路径。"""
+    if model_path is None:
+        default_paths = get_default_lstm_artifact_paths()
+        return (
+            default_paths["model_path"],
+            default_paths["meta_path"],
+            default_paths["scaler_path"],
+        )
 
-    Parameters
-    ----------
-    args : Config
-        超参数对象。
-        - forecaster_type: str，默认 "perfect"
-        - naive_window:    int，仅 naive 需要，默认 96
-        - lstm_model_path: str，仅 lstm 需要（必须指定）
-        - lstm_meta_path:  str，可选；默认自动查找 <stem>_meta.json
-        - lstm_scaler_path:str，可选；默认自动查找 <stem>_scaler.pkl
-        - lstm_seq_len / lstm_pred_len / lstm_hidden_size / lstm_num_layers / lstm_dropout：
-          当 sidecar 工件缺失时，可作为兼容兜底显式提供
+    candidate = Path(model_path)
+    if candidate.suffix == "":
+        return (
+            candidate / DEFAULT_LSTM_MODEL_NAME,
+            candidate / DEFAULT_LSTM_META_NAME,
+            candidate / DEFAULT_LSTM_SCALER_NAME,
+        )
 
-    Returns
-    -------
-    Forecaster
-    """
-    ft = getattr(args, "forecaster_type", "perfect")
+    return resolve_lstm_artifact_paths(candidate)
 
-    if ft == "perfect":
+
+def build_forecaster(cfg):
+    """按配置创建预测器。"""
+    forecast_cfg = cfg.forecast
+    forecaster_type = forecast_cfg.type
+
+    if forecaster_type == "perfect":
         return PerfectForecaster()
 
-    elif ft == "naive":
-        window = int(getattr(args, "naive_window", 96))
-        return NaiveForecaster(window=window)
+    if forecaster_type == "naive":
+        return NaiveForecaster(window=int(forecast_cfg.naive_window))
 
-    elif ft == "lstm":
-        model_path = getattr(args, "lstm_model_path", None)
-        if model_path is None:
-            raise ValueError(
-                "forecaster_type='lstm' requires args.lstm_model_path to point to "
-                "the saved LSTM weights file."
-            )
-        meta_path = getattr(args, "lstm_meta_path", None)
-        scaler_path = getattr(args, "lstm_scaler_path", None)
-        device = getattr(args, "device", "cpu")
-
-        _, default_meta_path, default_scaler_path = resolve_lstm_artifact_paths(
-            model_path=model_path,
-            meta_path=meta_path,
-            scaler_path=scaler_path,
-        )
-        has_standard_artifacts = default_meta_path.exists() and default_scaler_path.exists()
-
-        if meta_path is not None or scaler_path is not None or has_standard_artifacts:
-            return LSTMForecaster.from_artifacts(
-                model_path=str(model_path),
-                meta_path=str(meta_path) if meta_path is not None else None,
-                scaler_path=str(scaler_path) if scaler_path is not None else None,
-                device=device,
-            )
-
-        explicit_meta = {
-            "hidden_size": getattr(args, "lstm_hidden_size", None),
-            "num_layers": getattr(args, "lstm_num_layers", None),
-            "dropout": getattr(args, "lstm_dropout", None),
-            "pred_len": getattr(args, "lstm_pred_len", None),
-            "seq_len": getattr(args, "lstm_seq_len", None),
-        }
-        missing_explicit = [k for k, v in explicit_meta.items() if v is None]
-        if missing_explicit:
-            raise FileNotFoundError(
-                "forecaster_type='lstm' could not find the standard sidecar artifacts "
-                f"'{default_meta_path.name}' and '{default_scaler_path.name}', and these "
-                f"explicit lstm_* settings are also missing: {missing_explicit}"
-            )
-
-        scaler = getattr(args, "lstm_scaler", None)
-        if scaler is None:
-            raise FileNotFoundError(
-                "forecaster_type='lstm' requires a fitted scaler for inference. "
-                f"Expected '{default_scaler_path}' or set args.lstm_scaler_path."
-            )
-
-        return LSTMForecaster(
-            model_path=str(model_path),
-            hidden_size=int(explicit_meta["hidden_size"]),
-            num_layers=int(explicit_meta["num_layers"]),
-            dropout=float(explicit_meta["dropout"]),
-            pred_len=int(explicit_meta["pred_len"]),
-            seq_len=int(explicit_meta["seq_len"]),
-            device=device,
-            scaler=scaler,
-        )
-
-    else:
+    if forecaster_type != "lstm":
         raise ValueError(
-            f"未知 forecaster_type '{ft}'，可选: {list(FORECASTER_REGISTRY)}"
+            f"Unknown forecaster_type '{forecaster_type}', available: {list(FORECASTER_REGISTRY)}"
         )
+
+    model_path, meta_path, scaler_path = resolve_lstm_runtime_paths(forecast_cfg.lstm_model_path)
+    missing = [path for path in (model_path, meta_path, scaler_path) if not path.exists()]
+    if missing:
+        default_paths = get_default_lstm_artifact_paths()
+        missing_text = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(
+            "LSTM 预测器缺少 artifact 文件："
+            f"{missing_text}。请先运行 forecast/forecast.ipynb 生成统一产物，"
+            f"默认目录为 {default_paths['artifact_dir']}。"
+        )
+
+    return LSTMForecaster.from_artifacts(
+        model_path=str(model_path),
+        meta_path=str(meta_path),
+        scaler_path=str(scaler_path),
+        device=cfg.runtime.device,
+    )

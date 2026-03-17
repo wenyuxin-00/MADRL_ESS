@@ -1,14 +1,28 @@
-# 1. 默认忽略所有文件和文件夹
-*
+﻿# Python 缓存
+__pycache__/
+*.py[cod]
 
-# 2. 但是，不要忽略目录本身，这样Git才能继续在目录中查找文件
-# 注意：这不会取消忽略目录中的文件，只会保留目录结构
-!*/
+# Jupyter
+.ipynb_checkpoints/
 
-# 3. 取消忽略指定类型的文件，让它们可以被Git追踪
-!*.py
-!*.ipynb
-!*.xlsx
+# 测试与临时目录
+.pytest_cache/
+.pytest_cache_local/
+.test_runs/
+.tmp_test_cases/
+.tmp_test_exec/
+.tmp_pytest/
+.tmp_manual_*/
+.pytest_cache_exec/
+pytest-cache-files-*/
+test_tmp_cases/
 
-# 4. 最后，确保.gitignore文件本身不被忽略
-!.gitignore
+# 训练与实验产物
+runs/
+artifacts/
+madrl/saved_models/
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+.gitnexus

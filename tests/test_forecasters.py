@@ -1,10 +1,9 @@
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
 from sklearn.preprocessing import MinMaxScaler
 
+from configs.experiment_config import ExperimentConfig
 from forecast.lstm_forecaster import (
     LSTMForecaster,
     load_lstm_forecaster_artifacts,
@@ -76,12 +75,11 @@ def test_build_forecaster_loads_lstm_artifacts(tmp_path):
         dropout=0.0,
     )
 
-    args = SimpleNamespace(
-        forecaster_type="lstm",
-        lstm_model_path=artifact_paths["model_path"],
-        device="cpu",
-    )
-    forecaster = build_forecaster(args)
+    cfg = ExperimentConfig()
+    cfg.forecast.type = "lstm"
+    cfg.forecast.lstm_model_path = artifact_paths["model_path"]
+    cfg.runtime.device = "cpu"
+    forecaster = build_forecaster(cfg)
 
     assert isinstance(forecaster, LSTMForecaster)
     assert forecaster.seq_len == 6

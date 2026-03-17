@@ -1,59 +1,66 @@
-import torch
+"""Canonical replay buffer built around transition batches."""
+
+from __future__ import annotations
+
 import numpy as np
 
+from common.nested import index_nested, stack_nested, to_torch_nested
 
-class ReplayBuffer(object):
-    def __init__(self, args):
-        self.N = args.N  # The number of agents
-        self.buffer_size = args.buffer_size
-        self.batch_size = args.batch_size
-        self.count = 0
+
+class ReplayBuffer:
+    """Simple ring-buffer for canonical transition dictionaries."""
+
+    def __init__(self, cfg):
+        self.buffer_size = int(cfg.train.buffer_size)
+        self.batch_size = int(cfg.train.batch_size)
+        self.storage: list[dict] = []
+        self.position = 0
         self.current_size = 0
-        self.buffer_obs_n, self.buffer_a_n, self.buffer_r_n, self.buffer_s_next_n, self.buffer_done_n = [], [], [], [], []
-        for agent_id in range(self.N):
-            self.buffer_obs_n.append(np.empty((self.buffer_size, args.obs_dim_n[agent_id]), dtype=np.float32))
-            self.buffer_a_n.append(np.empty((self.buffer_size, args.action_dim_n[agent_id]), dtype=np.float32))
-            self.buffer_r_n.append(np.empty((self.buffer_size, 1), dtype=np.float32))
-            self.buffer_s_next_n.append(np.empty((self.buffer_size, args.obs_dim_n[agent_id]), dtype=np.float32))
-            self.buffer_done_n.append(np.empty((self.buffer_size, 1), dtype=np.float32))
 
-    def store_transition(self, obs_n, a_n, r_n, obs_next_n, done_n):
-        for agent_id in range(self.N):
-            self.buffer_obs_n[agent_id][self.count] = obs_n[agent_id]
-            self.buffer_a_n[agent_id][self.count] = a_n[agent_id]
-            self.buffer_r_n[agent_id][self.count] = r_n[agent_id]
-            self.buffer_s_next_n[agent_id][self.count] = obs_next_n[agent_id]
-            self.buffer_done_n[agent_id][self.count] = done_n[agent_id]
-        self.count = (self.count + 1) % self.buffer_size  # When the 'count' reaches max_size, it will be reset to 0.
-        self.current_size = min(self.current_size + 1, self.buffer_size)
-    def store_transitions_batched(self, obs_n, a_n, r_n, obs_next_n, done_n):
-        """
-        一次性存入来自 num_envs 个环境的经验。
-        输入参数均为列表，列表长度为 N (智能体个数)。
-        列表中的每个元素都是形状为 (num_envs, dim) 的 numpy 数组。
-        """
-        num_envs = obs_n[0].shape[0]
+    def _store_transition(self, transition: dict) -> None:
+        if self.current_size < self.buffer_size:
+            self.storage.append(transition)
+            self.current_size += 1
+        else:
+            self.storage[self.position] = transition
+        self.position = (self.position + 1) % self.buffer_size
 
-        # 用 numpy 切片批量写入，避免双重 for 循环
-        # 处理 buffer 环绕（wrap-around）情况
-        indices = np.arange(self.count, self.count + num_envs) % self.buffer_size
-        for agent_id in range(self.N):
-            self.buffer_obs_n[agent_id][indices] = obs_n[agent_id]
-            self.buffer_a_n[agent_id][indices] = a_n[agent_id]
-            self.buffer_r_n[agent_id][indices] = r_n[agent_id]
-            self.buffer_s_next_n[agent_id][indices] = obs_next_n[agent_id]
-            self.buffer_done_n[agent_id][indices] = done_n[agent_id]
+    def store_transitions_batched(self, obs, action, reward, next_obs, done) -> None:
+        """Store one batched env rollout step."""
+        num_envs = int(np.asarray(action).shape[0])
+        for env_idx in range(num_envs):
+            transition = {
+                "obs": index_nested(obs, env_idx),
+                "action": np.asarray(action[env_idx], dtype=np.float32).copy(),
+                "reward": np.asarray(reward[env_idx], dtype=np.float32).copy(),
+                "next_obs": index_nested(next_obs, env_idx),
+                "done": np.asarray(done[env_idx], dtype=np.float32).copy(),
+            }
+            self._store_transition(transition)
 
-        self.count = (self.count + num_envs) % self.buffer_size
-        self.current_size = min(self.current_size + num_envs, self.buffer_size)
-    def sample(self, ):
-        index = np.random.choice(self.current_size, size=self.batch_size, replace=self.current_size < self.batch_size)
-        batch_obs_n, batch_a_n, batch_r_n, batch_obs_next_n, batch_done_n = [], [], [], [], []
-        for agent_id in range(self.N):
-            batch_obs_n.append(torch.from_numpy(self.buffer_obs_n[agent_id][index]))
-            batch_a_n.append(torch.from_numpy(self.buffer_a_n[agent_id][index]))
-            batch_r_n.append(torch.from_numpy(self.buffer_r_n[agent_id][index]))
-            batch_obs_next_n.append(torch.from_numpy(self.buffer_s_next_n[agent_id][index]))
-            batch_done_n.append(torch.from_numpy(self.buffer_done_n[agent_id][index]))
+    def sample(self) -> dict:
+        """Sample a canonical transition batch."""
+        indices = np.random.choice(
+            self.current_size,
+            size=self.batch_size,
+            replace=self.current_size < self.batch_size,
+        )
+        transitions = [self.storage[idx] for idx in indices]
+        return {
+            "obs": stack_nested([transition["obs"] for transition in transitions]),
+            "action": np.stack([transition["action"] for transition in transitions], axis=0),
+            "reward": np.stack([transition["reward"] for transition in transitions], axis=0),
+            "next_obs": stack_nested([transition["next_obs"] for transition in transitions]),
+            "done": np.stack([transition["done"] for transition in transitions], axis=0),
+        }
 
-        return batch_obs_n, batch_a_n, batch_r_n, batch_obs_next_n, batch_done_n
+
+def to_torch_batch(batch: dict, device) -> dict:
+    """Convert a sampled canonical batch to torch tensors."""
+    return {
+        "obs": to_torch_nested(batch["obs"], device),
+        "action": to_torch_nested(batch["action"], device),
+        "reward": to_torch_nested(batch["reward"], device),
+        "next_obs": to_torch_nested(batch["next_obs"], device),
+        "done": to_torch_nested(batch["done"], device),
+    }

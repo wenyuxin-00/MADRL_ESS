@@ -7,6 +7,7 @@ from runners.checkpoints import (
     resolve_checkpoint_to_load,
     write_checkpoint_manifest,
 )
+from tests.helpers import make_case_dir
 
 
 def _touch_checkpoint_pair(algo_dir: Path, episode_tag: int) -> None:
@@ -15,7 +16,8 @@ def _touch_checkpoint_pair(algo_dir: Path, episode_tag: int) -> None:
 
 
 def test_checkpoint_manifest_round_trip(tmp_path):
-    model_dir = tmp_path / "saved_models"
+    case_dir = make_case_dir(tmp_path, "checkpoint_roundtrip")
+    model_dir = case_dir / "saved_models"
     algo_dir = model_dir / "MADDPG"
     algo_dir.mkdir(parents=True, exist_ok=True)
     _touch_checkpoint_pair(algo_dir, episode_tag=7)
@@ -41,7 +43,8 @@ def test_checkpoint_manifest_round_trip(tmp_path):
 
 
 def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
-    model_dir = tmp_path / "saved_models"
+    case_dir = make_case_dir(tmp_path, "checkpoint_scan")
+    model_dir = case_dir / "saved_models"
     algo_dir = model_dir / "MATD3"
     algo_dir.mkdir(parents=True, exist_ok=True)
     _touch_checkpoint_pair(algo_dir, episode_tag=3)
@@ -52,11 +55,10 @@ def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
     assert resolved["saved_episode_tag"] == 5
 
 
-def test_compare_notebook_no_longer_hardcodes_episode_992():
-    notebook_path = Path(
-        r"c:\Users\10856\Desktop\GithubProject\MADRL_ESS\MADRL_ESS\madrl\compare.ipynb"
-    )
+def test_compare_notebook_uses_shared_builder_helper():
+    notebook_path = Path(__file__).resolve().parents[1] / "madrl" / "compare.ipynb"
     text = notebook_path.read_text(encoding="utf-8")
 
     assert "LOAD_EPISODE = 992" not in text
-    assert "resolve_checkpoint_to_load" in text
+    assert "resolve_checkpoint_to_load" not in text
+    assert "build_compare_controller_builders" in text

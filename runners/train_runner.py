@@ -1,18 +1,20 @@
-"""
-runners/train_runner.py
-职责：封装多智能体强化学习的训练循环。
+"""训练 runner。
 
-TrainRunner 负责：
-  - 接收预构建的并行训练环境（DummyVecEnv）和评估环境
-  - 通过 algorithms.registry 按算法名实例化 agent
-  - 管理 ReplayBuffer、TensorBoard writer、episode history
-  - 执行主训练循环（run），含动作选取、env 交互、buffer 存储、网络更新
-  - save_model / load_model：保存/加载 actor+critic 权重
+职责保持聚焦：
+- 管理向量环境 rollout
+- 维护 replay buffer 与更新节奏
+- 记录 history / episode_rewards / perf_summary
+- 提供 notebook 可直接调用的公共调试接口
 
-第二步重构：env 由 core/builder.py 装配后注入，runner 不再自己构建 env。
+资源生命周期保持显式：
+- `run()` 只负责训练，不会自动关闭环境或 writer
+- 调用方在完成评估、保存等操作后应显式调用 `close()`
 """
+
+from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 import torch
@@ -20,197 +22,233 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from algorithms.registry import get_agent_cls
-from common.replay_buffer import ReplayBuffer
+from common.nested import to_torch_nested
+from common.replay_buffer import ReplayBuffer, to_torch_batch
+from evaluation.episode_recorder import append_step_record, init_episode_record
 from runners.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
 
 
 class TrainRunner:
-    """多智能体训练 Runner。
+    """轻量、显式的训练循环。"""
 
-    Parameters
-    ----------
-    args : Config
-        全局超参数对象（来自 configs/default_config.py）。
-        须已包含 N, obs_dim_n, action_dim_n（由 builder 设置）。
-    train_env : DummyVecEnv
-        预构建的并行训练环境。
-    eval_env : EnergyStorageEnv
-        预构建的评估环境（单实例）。
-    env_name : str
-        环境名称，用于日志命名，默认 "EnergyStorageEnv"。
-    number : int
-        实验编号，用于区分不同 run 的日志目录。
-    seed : int
-        随机种子，用于 numpy 和 torch。
-    """
-
-    def __init__(self, args, train_env, eval_env, env_name="EnergyStorageEnv", number=1, seed=0):
-        self.args = args
+    def __init__(self, cfg, train_env, eval_env, env_name: str = "EnergyStorageEnv", number: int = 1, seed: int = 0):
+        self.cfg = cfg
         self.env_name = env_name
-
         self.env = train_env
         self.env_evaluate = eval_env
 
         np.random.seed(seed)
         torch.manual_seed(seed)
+        self._configure_torch_runtime()
 
-        # 通过注册表选择算法
-        agent_cls = get_agent_cls(self.args.algorithm)
-        self.agent_n = [agent_cls(args, i) for i in range(self.args.N)]
+        agent_cls = get_agent_cls(self.cfg.algo.name)
+        self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
 
-        self.replay_buffer = ReplayBuffer(self.args)
-        self.writer = SummaryWriter(log_dir=f"runs/{self.args.algorithm}_{env_name}_{number}_seed_{seed}")
+        self.replay_buffer = ReplayBuffer(self.cfg)
+        self.writer = SummaryWriter(log_dir=f"runs/{self.cfg.algo.name}_{env_name}_{number}_seed_{seed}")
 
         self.history = []
         self.episode_rewards = []
         self.total_steps = 0
         self.episodes_completed = 0
-        self.noise_std = self.args.noise_std_init
+        self.noise_std = float(self.cfg.train.noise_std_init)
+        self.perf_summary = {}
+        self._closed = False
 
     @staticmethod
-    def _to_scalar(x) -> float:
-        arr = np.asarray(x)
-        return float(arr.reshape(-1)[0])
+    def _configure_torch_runtime() -> None:
+        """打开几项安全的 PyTorch runtime 优化。"""
+        try:
+            torch.set_float32_matmul_precision("high")
+        except (AttributeError, RuntimeError):
+            pass
 
-    def _init_env_history(self):
-        """每个并行环境一个 episode 账本（分量键由 reward_fn.component_meta 动态生成）"""
-        hist = {
-            "price":      [],
-            "e_bat_req":  [[] for _ in range(self.args.N)],
-            "e_bat_exec": [[] for _ in range(self.args.N)],
-            "soc":        [[float(self.args.init_soc)] for _ in range(self.args.N)],
-            "r_total_sum": [],
+        if torch.cuda.is_available() and hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = True
+
+    def format_env_actions(self, action_batch: np.ndarray):
+        """把 `(num_envs, n_agents, action_dim)` 转成 vec env 需要的输入格式。"""
+        return [action_batch[:, agent_id].copy() for agent_id in range(self.cfg.env.num_agents)]
+
+    def select_action_batch(self, obs_np):
+        """把 batched observation 一次性转 torch，并完成所有 actor 推理。"""
+        obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
+        with torch.no_grad():
+            action_t = torch.stack(
+                [agent.act_from_torch_obs(obs_t, noise_std=self.noise_std) for agent in self.agent_n],
+                dim=1,
+            )
+        return action_t.cpu().numpy().astype(np.float32)
+
+    def rollout_once(self, obs_np=None) -> dict:
+        """执行一次公共调试 rollout，供 notebook 和测试使用。"""
+        obs_np = self.env.reset() if obs_np is None else obs_np
+        action_batch = self.select_action_batch(obs_np)
+        next_obs, reward, done, info_list = self.env.step(self.format_env_actions(action_batch))
+        return {
+            "obs": obs_np,
+            "action_batch": action_batch,
+            "next_obs": next_obs,
+            "reward": reward,
+            "done": done,
+            "info_list": info_list,
         }
-        for meta in self.env_evaluate.reward_fn.component_meta:
-            hist[f"{meta.key}_sum"] = []
-        return hist
 
-    def save_model(self, model_dir: str, episode: int):
-        """保存所有 agent 权重，并写入 latest checkpoint manifest。
-
-        在并行环境下，实际完成的 episode 数可能与名义上的
-        ``Config.train_episodes`` 不完全相等，因此 manifest 额外记录
-        ``episodes_completed`` 作为后续评估/加载的可信来源。
-        """
-        algo_dir = os.path.join(model_dir, self.args.algorithm)
+    def save_model(self, model_dir: str, episode: int) -> None:
+        """保存所有 agent checkpoint，并写入 latest manifest。"""
+        algo_dir = os.path.join(model_dir, self.cfg.algo.name)
         os.makedirs(algo_dir, exist_ok=True)
         for agent in self.agent_n:
             agent.save_model(algo_dir, episode)
+
         manifest = build_checkpoint_manifest(
-            algorithm=self.args.algorithm,
+            algorithm=self.cfg.algo.name,
             saved_episode_tag=episode,
             episodes_completed=self.episodes_completed,
             total_steps=self.total_steps,
-            num_envs=self.args.num_envs,
-            episode_limit=self.args.episode_limit,
+            num_envs=self.cfg.train.num_envs,
+            episode_limit=self.cfg.env.episode_limit,
             save_dir=algo_dir,
         )
         write_checkpoint_manifest(algo_dir, manifest)
-        print(f"Models saved to: {algo_dir}")
 
-    def load_model(self, model_dir: str, episode: int):
-        """加载所有 agent 的 actor/critic 权重（含 target 网络同步）。"""
-        algo_dir = os.path.join(model_dir, self.args.algorithm)
+    def load_model(self, model_dir: str, episode: int) -> None:
+        """从磁盘加载所有 agent checkpoint。"""
+        algo_dir = os.path.join(model_dir, self.cfg.algo.name)
         for agent in self.agent_n:
             agent.load_model(algo_dir, episode)
-        print(f"Models loaded from: {algo_dir}")
 
-    def run(self):
-        """主训练循环。
+    def close(self) -> None:
+        """关闭环境与 writer。"""
+        if self._closed:
+            return
+        self.env.close()
+        self.env_evaluate.close()
+        self.writer.close()
+        self._closed = True
 
-        Returns
-        -------
-        int
-            本次训练完成的 episode 总数。
-        """
-        target_interactions = self.args.max_train_steps // self.args.num_envs
+    def run(self) -> int:
+        """执行训练循环，并返回完成的 episode 数。"""
+        target_interactions = (
+            self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit) // self.cfg.train.num_envs
+        )
         interaction_step = 0
         episodes_completed = 0
+        noise_decay = float(self.cfg.train.resolved_noise_std_decay())
+        run_start = time.perf_counter()
+        action_time_total = 0.0
+        env_step_time_total = 0.0
+        update_time_total = 0.0
+        update_calls = 0
 
         reward_metas = self.env_evaluate.reward_fn.component_meta
+        active_histories = [
+            init_episode_record(
+                n_agents=self.cfg.env.num_agents,
+                init_soc=float(self.cfg.env.init_soc),
+                reward_metas=reward_metas,
+            )
+            for _ in range(self.cfg.train.num_envs)
+        ]
+        active_episode_rewards = np.zeros(self.cfg.train.num_envs, dtype=np.float32)
 
-        active_histories = [self._init_env_history() for _ in range(self.args.num_envs)]
-        active_ep_rewards = np.zeros(self.args.num_envs, dtype=np.float32)
-
-        pbar = tqdm(total=target_interactions, desc="Training (Parallel)", unit="iters")
+        progress = tqdm(total=target_interactions, desc="Training", unit="iters")
 
         try:
-            obs_n = self.env.reset()
-
+            obs = self.env.reset()
             while interaction_step < target_interactions:
-                # 1) 动作
-                a_n = [agent.choose_action(obs, noise_std=self.noise_std) for agent, obs in zip(self.agent_n, obs_n)]
+                action_start = time.perf_counter()
+                action_batch = self.select_action_batch(obs)
+                action_time_total += time.perf_counter() - action_start
 
-                # 2) 交互
-                obs_next_n, r_n, done_n, info_list = self.env.step(a_n)
+                env_step_start = time.perf_counter()
+                next_obs, reward, done, info_list = self.env.step(self.format_env_actions(action_batch))
+                env_step_time_total += time.perf_counter() - env_step_start
 
-                # 3) 记录
-                for env_idx in range(self.args.num_envs):
-                    info = info_list[env_idx]
-                    hist = active_histories[env_idx]
+                for env_idx, info in enumerate(info_list):
+                    step_total = float(np.sum(reward[env_idx]))
+                    active_episode_rewards[env_idx] += step_total
+                    append_step_record(
+                        active_histories[env_idx],
+                        info,
+                        step_total=step_total,
+                        reward_metas=reward_metas,
+                    )
 
-                    hist["price"].append(float(info.get("price", 0.0)))
+                self.replay_buffer.store_transitions_batched(obs, action_batch, reward, next_obs, done)
 
-                    e_req = np.asarray(info["e_bat_req"], dtype=np.float32).reshape(self.args.N)
-                    e_exec = np.asarray(info["e_bat"], dtype=np.float32).reshape(self.args.N)
-                    soc_next = np.asarray(info["soc_next"], dtype=np.float32).reshape(self.args.N)
-
-                    for i in range(self.args.N):
-                        hist["e_bat_req"][i].append(float(e_req[i]))
-                        hist["e_bat_exec"][i].append(float(e_exec[i]))
-                        hist["soc"][i].append(float(soc_next[i]))
-
-                    step_total = sum(self._to_scalar(r_n[a][env_idx]) for a in range(self.args.N))
-                    hist["r_total_sum"].append(step_total)
-                    active_ep_rewards[env_idx] += step_total
-
-                    for meta in reward_metas:
-                        raw = float(np.sum(np.asarray(info[meta.key], dtype=np.float32)))
-                        hist[f"{meta.key}_sum"].append(meta.sign * raw)
-
-                # 4) 存 buffer
-                self.replay_buffer.store_transitions_batched(obs_n, a_n, r_n, obs_next_n, done_n)
-
-                obs_n = obs_next_n
+                obs = next_obs
                 interaction_step += 1
-                self.total_steps += self.args.num_envs
+                self.total_steps += self.cfg.train.num_envs
 
-                # 5) episode 结束
-                for env_idx in range(self.args.num_envs):
-                    if bool(info_list[env_idx].get("episode_done", False)):
-                        if len(self.history) >= 2000:
-                            self.history.pop(0)
-                        self.history.append(active_histories[env_idx])
+                for env_idx, info in enumerate(info_list):
+                    if not bool(info.get("episode_done", False)):
+                        continue
 
-                        ep_reward = float(active_ep_rewards[env_idx])
-                        self.episode_rewards.append(ep_reward)
-                        self.writer.add_scalar("train_episode_total_reward", ep_reward, global_step=self.total_steps)
+                    if len(self.history) >= 2000:
+                        self.history.pop(0)
+                    self.history.append(active_histories[env_idx])
 
-                        active_histories[env_idx] = self._init_env_history()
-                        active_ep_rewards[env_idx] = 0.0
-                        episodes_completed += 1
-                        self.episodes_completed = episodes_completed
+                    episode_reward = float(active_episode_rewards[env_idx])
+                    self.episode_rewards.append(episode_reward)
+                    self.writer.add_scalar(
+                        "train_episode_total_reward",
+                        episode_reward,
+                        global_step=self.total_steps,
+                    )
 
-                # 6) 噪声衰减
-                if self.args.use_noise_decay:
-                    self.noise_std = max(self.noise_std - self.args.noise_std_decay, self.args.noise_std_min)
+                    active_histories[env_idx] = init_episode_record(
+                        n_agents=self.cfg.env.num_agents,
+                        init_soc=float(self.cfg.env.init_soc),
+                        reward_metas=reward_metas,
+                    )
+                    active_episode_rewards[env_idx] = 0.0
+                    episodes_completed += 1
+                    self.episodes_completed = episodes_completed
 
-                # 7) 更新
-                if self.replay_buffer.current_size > self.args.batch_size and interaction_step % self.args.update_interval == 0:
-                    for _ in range(self.args.updates_per_step):
-                        for agent_id in range(self.args.N):
-                            self.agent_n[agent_id].train(self.replay_buffer, self.agent_n)
+                if self.cfg.train.use_noise_decay:
+                    self.noise_std = max(self.noise_std - noise_decay, float(self.cfg.train.noise_std_min))
 
-                pbar.update(1)
-                if len(self.episode_rewards) > 0:
-                    avg_reward = float(np.mean(self.episode_rewards[-50:]))
-                    pbar.set_postfix({"avg_reward": f"{avg_reward:.2f}", "steps": self.total_steps})
+                if (
+                    self.replay_buffer.current_size >= self.cfg.train.batch_size
+                    and interaction_step % self.cfg.train.update_interval == 0
+                ):
+                    update_start = time.perf_counter()
+                    for _ in range(self.cfg.train.updates_per_step):
+                        batch_np = self.replay_buffer.sample()
+                        batch_torch = to_torch_batch(batch_np, self.cfg.runtime.device)
+                        for agent in self.agent_n:
+                            agent.train_on_batch(batch_torch, self.agent_n)
+                        update_calls += 1
+                    update_time_total += time.perf_counter() - update_start
 
+                progress.update(1)
+                if interaction_step % 10 == 0 or interaction_step == target_interactions:
+                    avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+                    elapsed = max(time.perf_counter() - run_start, 1e-6)
+                    progress.set_postfix(
+                        {
+                            "avg_reward": f"{avg_reward:.2f}",
+                            "steps/s": f"{self.total_steps / elapsed:.1f}",
+                            "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
+                            "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
+                            "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
+                        }
+                    )
         finally:
-            pbar.close()
-            self.env.close()
-            self.env_evaluate.close()
-            self.writer.close()
+            progress.close()
 
+        total_elapsed = max(time.perf_counter() - run_start, 1e-6)
+        self.perf_summary = {
+            "total_wall_time_s": total_elapsed,
+            "action_time_s": action_time_total,
+            "env_step_time_s": env_step_time_total,
+            "update_time_s": update_time_total,
+            "update_calls": update_calls,
+            "steps_per_sec": self.total_steps / total_elapsed,
+            "avg_action_ms_per_iter": 1000.0 * action_time_total / max(interaction_step, 1),
+            "avg_env_ms_per_iter": 1000.0 * env_step_time_total / max(interaction_step, 1),
+            "avg_update_ms_per_call": 1000.0 * update_time_total / max(update_calls, 1),
+        }
         self.episodes_completed = episodes_completed
         return episodes_completed
