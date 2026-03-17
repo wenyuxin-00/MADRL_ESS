@@ -200,30 +200,52 @@ class EnergyStorageEnv(gym.Env):
         return self.obs_builder.build(self)
 
     def step(self, actions: List[np.ndarray]) -> Tuple[dict[str, np.ndarray], List[float], List[bool], Dict]:
-        """执行一步环境推进。"""
+        """Execute one environment step.
+        执行一步环境推进。
+
+        Energy balance pipeline / 能量平衡流程:
+            1. Map agent actions [-1, 1] to requested power e_bat_req
+            2. Compute feasible charge/discharge limits from current SoC
+            3. Clip requested power to feasible range -> e_bat (executed power)
+            4. Update stored energy and SoC with efficiency losses
+            5. Compute reward from the reward function
+        """
         t = self.cur_step
 
+        # --- 1. Action mapping: [-1, 1] -> requested battery power ---
+        # 动作映射：将归一化动作转换为请求的电池充放电功率
         action_array = np.asarray(actions, dtype=np.float32).reshape(self.n, -1)[:, 0]
         action_array = np.clip(action_array, -1.0, 1.0)
         e_bat_req = action_array * self.p_max
 
         soc_t = self.soc.copy().astype(np.float32)
-        e_t = soc_t * self.c_bat
+        e_t = soc_t * self.c_bat  # current stored energy (kWh)
         eff = max(self.eff, 1e-6)
 
+        # --- 2. Feasibility projection: compute max charge/discharge power ---
+        # 可行性投影：根据当前储能和容量限制，计算最大充/放电功率
+        # Charge limit: can't exceed capacity (e_max), accounting for efficiency loss
+        # 充电上限 = min(额定功率, (剩余可充容量) / (效率 * 时间步长))
         p_max_chg = np.minimum(
             self.p_max,
             np.maximum(0.0, (self.e_max - e_t) / (eff * self.dt)),
         )
+        # Discharge limit: can't go below minimum (e_min), accounting for efficiency
+        # 放电上限 = min(额定功率, (可放电量) * 效率 / 时间步长)
         p_max_dis = np.minimum(
             self.p_max,
             np.maximum(0.0, (e_t - self.e_min) * eff / self.dt),
         )
 
+        # --- 3. Clip to feasible range ---
+        # 将请求功率裁剪到可行范围 [−p_max_dis, +p_max_chg]
         p_lower = -p_max_dis
         p_upper = p_max_chg
         e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)
 
+        # --- 4. SoC update with efficiency losses ---
+        # 储能更新：充电时损耗 (×eff)，放电时损耗 (÷eff)
+        # delta_e > 0 for charging, < 0 for discharging
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
         e_next = np.clip(e_t + delta_e, self.e_min, self.e_max).astype(np.float32)
         soc_next = (e_next / self.c_bat).astype(np.float32)

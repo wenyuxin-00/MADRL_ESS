@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import algorithms; import configs; import controllers; import core; import datasets; import envs; import evaluation; import forecast; import models; import runners; import common; print\\(''All imports OK''\\)\")",
+      "Bash(python -c \"data = open\\(''datasets/base.py'', ''rb''\\).read\\(\\)[:20]; print\\(data\\)\")",
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

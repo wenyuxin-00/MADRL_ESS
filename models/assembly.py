@@ -1,12 +1,27 @@
-"""Actor / Critic 组装入口。
+"""Actor / Critic network assembly.
+Actor / Critic 网络组装入口。
 
-整体结构保持直观：
-  adapter -> encoder -> head
+Assembly pipeline / 组装流水线::
 
-其中 family 决定输入如何整理与编码：
-  - mlp
-  - transformer
-  - graph
+    structured obs dict
+         |
+         v
+    Adapter (family_adapters.py)
+         |  -- converts structured obs to model-specific input format:
+         |     MLP: flat vector,  Transformer: token sequence,  Graph: node features
+         v
+    Encoder (encoders/)
+         |  -- feature extraction backbone
+         v
+    Head (heads/)
+         |  -- output projection: actions (actor) or Q-values (critic)
+         v
+    output
+
+The ``family`` config field selects which adapter + encoder to use:
+  - ``mlp``         -- fast, simple, good default
+  - ``transformer`` -- self-attention over tokens (local + sequence)
+  - ``graph``       -- message-passing GNN over agent graph
 """
 
 from __future__ import annotations
@@ -104,7 +119,9 @@ def _build_encoder(cfg, input_dim: int):
 
 
 def build_actor_network(cfg, agent_id: int) -> ActorNetwork:
-    """按当前 family 组装一个 actor。"""
+    """Assemble one actor network: adapter -> encoder -> head.
+    按当前 family 组装一个 actor：适配器 -> 编码器 -> 输出头。
+    """
     validate_and_finalize_model_config(cfg)
     adapter_cls = get_adapter_cls(cfg.model.family, "actor")
     actor_head_cls = get_actor_head_cls(cfg.model.actor_head_type)
@@ -121,7 +138,9 @@ def build_actor_network(cfg, agent_id: int) -> ActorNetwork:
 
 
 def build_critic_network(cfg) -> CriticNetwork:
-    """按当前 family 组装一个 critic。"""
+    """Assemble one critic network: adapter -> encoder -> head.
+    按当前 family 组装一个 critic：适配器 -> 编码器 -> 输出头。
+    """
     validate_and_finalize_model_config(cfg)
     adapter_cls = get_adapter_cls(cfg.model.family, "critic")
     critic_head_cls = get_critic_head_cls(cfg.model.critic_head_type)

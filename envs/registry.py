@@ -1,6 +1,16 @@
-"""环境 registry。
+"""Environment registry.
+环境注册表。
 
-当前只注册一个主环境，但保留最小扩展点，方便后续加入新的 RL 环境。
+How to add a new environment / 如何添加新环境:
+    1. Create ``envs/your_env.py`` subclassing ``gym.Env``
+       - Implement ``reset() -> obs_dict`` and ``step(actions) -> (obs, rewards, done, info)``
+       - Accept dataset, reward_fn, forecaster, obs_builder via constructor
+    2. Register here::
+
+           register_env("your_env", YourEnv)
+
+    3. Use in config: ``cfg.env.env_type = "your_env"``
+    4. If needed, update ``core/builder.py:build_env()`` for custom construction logic
 """
 
 from __future__ import annotations

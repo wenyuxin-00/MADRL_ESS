@@ -22,6 +22,9 @@ runs/
 artifacts/
 madrl/saved_models/
 
+# 生成文件
+full_project_code.txt
+
 # 操作系统文件
 .DS_Store
 Thumbs.db

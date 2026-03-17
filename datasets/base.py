@@ -1,18 +1,19 @@
-"""数据集契约。
+"""Dataset contract for episode-level signal data.
 
-环境只依赖“episode 级 signals 数据”，不依赖具体文件格式。
-统一输出格式：
+The environment depends only on episode-level signal dicts, not on any
+specific file format. Unified output format:
 
-{
-    "signals": {
-        "price": np.ndarray,
-        "load": np.ndarray,
-        ...
-    },
-    "meta": {...}
-}
+    {
+        "signals": {
+            "price": np.ndarray,   # shape (T,)   -- electricity price
+            "load":  np.ndarray,   # shape (T, N) -- load per agent
+            ...                    # extensible: "pv", "wind", etc.
+        },
+        "meta": {...}              # optional metadata
+    }
 
-这样后续加入 `pv` 等新信号时，只需要扩展 signals 字典即可。
+To add new signal types (e.g., PV generation), just extend the ``signals``
+dict -- no interface changes needed.
 """
 
 from __future__ import annotations
@@ -21,12 +22,23 @@ from abc import ABC, abstractmethod
 
 
 class BaseEpisodeDataset(ABC):
-    """多 episode signal 数据集的抽象接口。"""
+    """Abstract interface for multi-episode signal datasets.
+
+    See ``datasets/csv_price_load.py`` for a concrete implementation.
+    """
 
     @abstractmethod
     def num_episodes(self) -> int:
-        """返回数据集中可用的 episode 数量。"""
+        """Return the number of available episodes in the dataset."""
 
     @abstractmethod
     def get_episode(self, episode_idx: int) -> dict:
-        """返回一个 episode 的开放式 signals 数据。"""
+        """Return one episode's signal data.
+
+        Args:
+            episode_idx: Zero-based episode index.
+
+        Returns:
+            Dict with ``"signals"`` (containing ``"price"`` and ``"load"``
+            arrays) and optional ``"meta"`` dict.
+        """

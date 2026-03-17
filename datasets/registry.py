@@ -1,7 +1,16 @@
-"""数据集 registry。
+"""Dataset registry and factory.
+数据集注册表与工厂函数。
 
-当前只注册一个最小可用数据集实现，但保留最小 registry 骨架，
-方便未来按 `dataset_type` 扩展新的数据来源。
+How to add a new dataset / 如何添加新数据集:
+    1. Create ``datasets/your_dataset.py`` implementing ``BaseEpisodeDataset``
+       - Must provide ``num_episodes()`` and ``get_episode(idx)``
+       - ``get_episode()`` returns ``{"signals": {"price": ..., "load": ...}, "meta": {...}}``
+    2. Register here::
+
+           register_dataset("your_type", YourDataset)
+
+    3. Update ``build_dataset()`` below if your dataset needs different construction args
+    4. Use in config: ``cfg.data.dataset_type = "your_type"``
 """
 
 from __future__ import annotations

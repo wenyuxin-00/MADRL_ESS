@@ -1,7 +1,14 @@
-"""观测构造器 registry。
+"""Observation builder registry.
+观测构造器注册表。
 
-当前只注册一个默认观测构造器，但保留最小 registry 骨架，
-方便未来按 `builder_type` 扩展新的观测拼装方式。
+How to add a new observation builder / 如何添加新观测构造器:
+    1. Create ``envs/observation/your_builder.py`` implementing ``ObservationBuilder``
+       - Must provide ``get_schema()``, ``get_layout()``, ``build(env)``, ``zeros()``
+    2. Register here::
+
+           register_obs_builder("your_builder", YourObsBuilder)
+
+    3. Use in config: ``cfg.obs.builder_type = "your_builder"``
 """
 
 from __future__ import annotations

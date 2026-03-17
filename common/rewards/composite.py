@@ -3,21 +3,28 @@ from common.rewards.base import RewardFn, ComponentMeta
 
 
 class CompositeReward(RewardFn):
-    """5 分量复合奖励函数（项目默认方案）。
+    """5-component composite reward function (project default).
+    5 分量复合奖励函数（项目默认方案）。
 
+    reward = r_inc - r_pen + r_pbrs - r_soc + r_bonus
     奖励 = r_inc - r_pen + r_pbrs - r_soc + r_bonus
 
-    各分量说明：
-    - r_inc  : 增量成本奖励，衡量"当前动作比闲置多赚了多少"
-    - r_pen  : 动作越限惩罚，软约束边界
-    - r_pbrs : 基于势能的奖励塑形，引导低买高卖的跨步行为
-    - r_soc  : SoC 正则化，鼓励保持中间 SoC 以维持灵活性
-    - r_bonus: 吞吐量奖励，防止智能体退化为永久闲置策略
+    Components / 各分量说明:
+        - r_inc   : Incremental cost — "how much more did this action earn vs. idle?"
+                    增量成本奖励，衡量"当前动作比闲置多赚了多少"
+        - r_pen   : Action infeasibility penalty — soft constraint on battery limits
+                    动作越限惩罚，软约束边界
+        - r_pbrs  : Potential-Based Reward Shaping — guides buy-low-sell-high behavior
+                    基于势能的奖励塑形，引导低买高卖的跨步行为
+        - r_soc   : SoC regularization — encourages mid-range SoC for flexibility
+                    SoC 正则化，鼓励保持中间 SoC 以维持灵活性
+        - r_bonus : Throughput bonus — prevents degenerate always-idle policies
+                    吞吐量奖励，防止智能体退化为永久闲置策略
 
-    新增分量时只需：
-      1. 在 compute() 中计算新分量，加入返回 dict，并更新 total 公式
-      2. 在 component_meta 中追加 ComponentMeta 行
-      → 无需修改 hems_env.py 或 train_madrl.ipynb
+    To add a new reward component / 新增分量时只需:
+        1. Compute it in ``compute()``, add to return dict, update total formula
+        2. Append a ``ComponentMeta`` entry to ``component_meta``
+        -> No changes needed in hems_env.py or notebooks
     """
 
     def __init__(self, cfg):
@@ -49,22 +56,27 @@ class CompositeReward(RewardFn):
         mu_next   = env_state["mu_next"]
         gamma     = env_state["gamma"]
 
-        # (1) 增量成本奖励
+        # (1) Incremental cost reward: negative of net energy cost minus baseline (idle) cost
+        # 增量成本奖励：= -(net_load * price) - (-(load * price)) = -e_bat * price
         e_net  = load_t + e_bat
         r_inc  = (-(e_net * price_t) - (-(load_t * price_t))).astype(np.float32)
 
-        # (2) 动作越限惩罚（绝对值，符号由 sign=-1 管理）
+        # (2) Action infeasibility penalty: penalize gap between requested and executed power
+        # 动作越限惩罚：请求功率与实际执行功率的差距（归一化）
         r_pen  = (self.w_pen * np.abs(e_bat_req - e_bat) / (self.p_max + 1e-6)).astype(np.float32)
 
-        # (3) 基于势能的奖励塑形（PBRS）
+        # (3) Potential-Based Reward Shaping (PBRS): phi(s) = mean_future_price * stored_energy
+        # 基于势能的奖励塑形：phi(s) = 未来均价 × 当前储能
         phi_t    = (mu_t   * e_t).astype(np.float32)
         phi_next = (mu_next * e_next).astype(np.float32)
         r_pbrs   = (gamma * phi_next - phi_t).astype(np.float32)
 
-        # (4) SoC 正则化（绝对值，符号由 sign=-1 管理）
+        # (4) SoC regularization: quadratic penalty for deviation from target SoC
+        # SoC 正则化：偏离目标 SoC 的二次惩罚
         r_soc  = (self.w_soc * (soc_t - self.soc_target) ** 2).astype(np.float32)
 
-        # (5) 吞吐量奖励
+        # (5) Throughput bonus: reward proportional to |power|, discourages idle behavior
+        # 吞吐量奖励：与|功率|成正比，避免智能体"什么都不做"
         r_bonus = (self.lambda_bonus * np.abs(e_bat)).astype(np.float32)
 
         total = (r_inc - r_pen + r_pbrs - r_soc + r_bonus).astype(np.float32)

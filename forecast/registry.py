@@ -1,9 +1,23 @@
-"""预测器构建入口。
+"""Forecaster registry and factory.
+预测器注册表与工厂函数。
 
-注意：
-- 预测器只影响观测中的价格窗口。
-- 环境真实奖励仍然使用真实 price/load 计算。
-- LSTM 预测器默认从统一 artifact 目录加载，保证 forecast notebook 与 runtime 闭环。
+Note / 注意:
+    - Forecasters only affect the price window in observations.
+      预测器只影响观测中的价格窗口。
+    - Environment rewards always use ground-truth price/load signals.
+      环境真实奖励仍然使用真实 price/load 计算。
+    - The LSTM forecaster loads from a unified artifact directory to ensure
+      consistency between forecast notebook training and runtime inference.
+
+How to add a new forecaster / 如何添加新预测器:
+    1. Create ``forecast/your_forecaster.py`` implementing ``Forecaster`` from ``base.py``
+       - Must provide ``predict(history, horizon)`` -> np.ndarray of shape ``(horizon,)``
+    2. Register here::
+
+           register_forecaster("your_type", YourForecaster)
+
+    3. Add construction logic in ``build_forecaster()`` below
+    4. Use in config: ``cfg.forecast.type = "your_type"``
 """
 
 from __future__ import annotations
@@ -25,6 +39,13 @@ FORECASTER_REGISTRY: dict[str, type] = {
     "naive": NaiveForecaster,
     "lstm": LSTMForecaster,
 }
+
+
+def register_forecaster(name: str, forecaster_cls: type) -> None:
+    """Register a new forecaster class.
+    注册一个新的预测器类。
+    """
+    FORECASTER_REGISTRY[name] = forecaster_cls
 
 
 def resolve_lstm_runtime_paths(model_path: str | Path | None) -> tuple[Path, Path, Path]:
