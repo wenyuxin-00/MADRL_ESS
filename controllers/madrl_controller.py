@@ -1,6 +1,10 @@
-"""MADRL controller。
+"""多智能体深度强化学习（MADRL）控制器。
 
-职责只有一件事：把一组训练好的多智能体策略包装成统一的 compare 接口。
+封装 MADRL 算法（MADDPG / MATD3）的高层控制器接口，
+负责多智能体联合动作选择与训练调度。
+
+主要类:
+    MADRLController -- MADRL 控制器
 """
 
 from __future__ import annotations

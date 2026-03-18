@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 
-from common.torch_runtime import STRICT_REPRO_RUNTIME_MODE
-from core.builder import build_train_runner
+from scripts.utils.torch_runtime import STRICT_REPRO_RUNTIME_MODE
+from scripts.builder import build_train_runner
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 

@@ -1,11 +1,20 @@
-"""科研实验使用的统一配置对象。
+"""实验统一配置 dataclass 定义。
 
-模块只保留一层轻量 dataclass，不引入额外配置框架。
-当前主线需要的默认项尽量直观，同时保留少量明确会扩展的轴：
-- `env.env_type`
-- `data.dataset_type`
-- `obs.builder_type`
-- `forecast.type`
+以纯数据结构形式定义所有实验参数（环境、算法、模型、奖励、预测器等），
+不包含任何逻辑，仅供 profiles.py 等组合函数使用。
+
+主要类:
+    ExperimentConfig -- 顶层配置，组合以下子配置
+    EnvConfig       -- 环境参数
+    AlgoConfig      -- MADRL 算法参数
+    ModelConfig      -- 神经网络模型参数
+    RewardConfig     -- 奖励函数参数
+    ObsConfig        -- 观测空间参数
+    ForecastConfig   -- 预测器参数
+    DataConfig       -- 数据集参数
+    TrainConfig      -- 训练循环参数
+    RuntimeConfig    -- 运行时配置
+    GridConfig       -- 电网潮流约束参数
 """
 
 from __future__ import annotations

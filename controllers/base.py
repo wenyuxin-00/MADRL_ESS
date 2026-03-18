@@ -1,10 +1,10 @@
-"""Unified controller interface for evaluation.
-统一控制器评估接口。
+"""控制器抽象基类。
 
-All controllers (MADRL, Zero, MPC, classic DRL) are evaluated through this
-minimal interface, enabling fair comparison in the compare notebook.
+定义所有控制器（MADRL、MPC、经典 DRL 等）的统一接口，
+包含动作选择、模型保存加载等基本方法。
 
-See ``controllers/zero_controller.py`` for the simplest implementation.
+主要类:
+    BaseController -- 控制器抽象基类
 """
 
 from __future__ import annotations

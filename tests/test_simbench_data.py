@@ -1,16 +1,16 @@
 import numpy as np
 import pandas as pd
 
-from datasets.simbench_export import (
+from data.loaders.simbench_export import (
     STEPS_PER_WEEK,
     align_price_series_to_reference,
     build_quarterly_simbench_split,
 )
-from forecast.simbench_data import STEPS_PER_WEEK as LEGACY_STEPS_PER_WEEK
 
 
-def test_simbench_export_canonical_and_legacy_imports_match():
-    assert LEGACY_STEPS_PER_WEEK == STEPS_PER_WEEK
+# Note: legacy import 'from forecast.simbench_data import ...' was removed
+# during project restructuring. The canonical import above now lives in
+# data.loaders.simbench_export.
 
 
 def test_build_quarterly_simbench_split_creates_expected_windows():
@@ -81,4 +81,5 @@ def test_align_price_series_to_reference_handles_dst_duplicate_rows():
 
     aligned = align_price_series_to_reference(reference, price_frame)
 
-    assert np.allclose(aligned, np.array([1, 2, 4, 3, 5, 6], dtype=np.float32))
+    assert np.allclose(aligned, np.array([1, 2, 4, 3, 5, 6], dtype=np.float32))
+

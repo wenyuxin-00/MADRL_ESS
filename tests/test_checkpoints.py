@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from runners.checkpoints import (
+from scripts.checkpoints import (
     LATEST_CHECKPOINT_MANIFEST,
     build_checkpoint_manifest,
     infer_latest_checkpoint_tag,

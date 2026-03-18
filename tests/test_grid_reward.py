@@ -81,7 +81,7 @@ def _make_env_state(n_agents: int = 3, v_violation=None, l_violation: float = 0.
 
 
 def test_component_meta_length() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     cfg = _make_cfg()
     rf = GridCompositeReward(cfg)
@@ -92,7 +92,7 @@ def test_component_meta_length() -> None:
 
 
 def test_component_meta_signs() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     cfg = _make_cfg()
     rf = GridCompositeReward(cfg)
@@ -102,7 +102,7 @@ def test_component_meta_signs() -> None:
 
 
 def test_no_violation_zero_penalty() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     cfg = _make_cfg()
     rf = GridCompositeReward(cfg)
@@ -114,7 +114,7 @@ def test_no_violation_zero_penalty() -> None:
 
 
 def test_voltage_violation_penalty_magnitude() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     w_v = 10.0
     cfg = _make_cfg(w_v_pen=w_v)
@@ -128,7 +128,7 @@ def test_voltage_violation_penalty_magnitude() -> None:
 
 
 def test_line_violation_penalty_broadcast() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     w_l = 5.0
     cfg = _make_cfg(w_l_pen=w_l)
@@ -144,8 +144,8 @@ def test_line_violation_penalty_broadcast() -> None:
 
 
 def test_total_subtracts_penalties() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
-    from common.rewards.composite import CompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.composite import CompositeReward
 
     cfg = _make_cfg(w_v_pen=10.0, w_l_pen=5.0)
     rf_grid = GridCompositeReward(cfg)
@@ -163,7 +163,7 @@ def test_total_subtracts_penalties() -> None:
 
 
 def test_component_keys_match_meta() -> None:
-    from common.rewards.grid_composite import GridCompositeReward
+    from envs.rewards.grid_composite import GridCompositeReward
 
     cfg = _make_cfg()
     rf = GridCompositeReward(cfg)

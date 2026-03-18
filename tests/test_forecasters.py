@@ -9,16 +9,16 @@ from matplotlib import pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 
 from configs.experiment_config import ExperimentConfig
-from forecast.lstm_forecaster import (
+from predictors.lstm_forecaster import (
     LSTMForecaster,
     load_lstm_forecaster_artifacts,
     save_lstm_forecaster_artifacts,
 )
-from forecast.lstm_model import LSTMPricePredictor
-from forecast.naive import NaiveForecaster
-from forecast.oracle import PerfectForecaster
-from forecast.registry import build_forecaster
-from forecast.training import (
+from predictors.lstm_model import LSTMPricePredictor
+from predictors.naive import NaiveForecaster
+from predictors.oracle import PerfectForecaster
+from predictors.registry import build_forecaster
+from predictors.training import (
     SignalForecastEvaluation,
     collect_available_lstm_artifacts,
     compare_lstm_artifact_meta,
@@ -358,7 +358,7 @@ def test_ensure_lstm_artifacts_retrains_incompatible_artifact(tmp_path, monkeypa
         future_horizon=24,
     )
 
-    import forecast.training as training
+    import predictors.training as training
 
     def fake_train_signal_lstm(local_cfg, signal_name, *, device=None, overrides=None, show_progress=False):
         fresh_model = LSTMPricePredictor(hidden_size=64, num_layers=1, dropout=0.0, pred_len=24)

@@ -1,16 +1,10 @@
-"""Environment registry.
-环境注册表。
+"""环境注册表。
 
-How to add a new environment / 如何添加新环境:
-    1. Create ``envs/your_env.py`` subclassing ``gym.Env``
-       - Implement ``reset() -> obs_dict`` and ``step(actions) -> (obs, rewards, done, info)``
-       - Accept dataset, reward_fn, forecaster, obs_builder via constructor
-    2. Register here::
+根据环境类型名称（如 "energy_storage"、"grid_pf"）
+返回对应的环境类。
 
-           register_env("your_env", YourEnv)
-
-    3. Use in config: ``cfg.env.env_type = "your_env"``
-    4. If needed, update ``core/builder.py:build_env()`` for custom construction logic
+主要函数:
+    build_env -- 根据配置创建环境实例
 """
 
 from __future__ import annotations

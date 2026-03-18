@@ -27,7 +27,7 @@ class FakeGridCore:
         pass
 
     def step(self, p_batt_kw, base_load_kw):
-        from grid.core.grid_types import GridStepResult
+        from envs.grid.core.grid_types import GridStepResult
 
         n = len(p_batt_kw)
         return GridStepResult(
@@ -69,12 +69,12 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
 @pytest.fixture(scope="module")
 def grid_env():
     """Build a GridEnv backed by a FakeGridCore."""
-    from datasets.registry import build_dataset
+    from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
-    from common.rewards import get_reward_fn
-    from forecast.registry import build_forecaster
+    from envs.rewards import get_reward_fn
+    from predictors.registry import build_forecaster
     from envs.observation.registry import build_obs_builder
-    from core.builder import _finalize_runtime_from_env
+    from scripts.builder import _finalize_runtime_from_env
     from models import validate_and_finalize_model_config
 
     cfg = _make_cfg()
@@ -176,7 +176,7 @@ def test_soc_stays_in_bounds(grid_env) -> None:
 
 def test_episode_recorder_compatible(grid_env) -> None:
     """append_step_record() must not crash when called with GridEnv's info dict."""
-    from evaluation.episode_recorder import init_episode_record, append_step_record
+    from scripts.recorders.episode_recorder import init_episode_record, append_step_record
 
     reward_metas = grid_env.reward_fn.component_meta
     history = init_episode_record(

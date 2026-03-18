@@ -1,7 +1,7 @@
 import torch
 
-from common.nested import add_batch_dim, to_torch_nested
-from core.builder import build_env
+from scripts.utils.nested import add_batch_dim, to_torch_nested
+from scripts.builder import build_env
 from models import build_actor_network, build_critic_network, validate_and_finalize_model_config
 from tests.support.helpers import make_case_dir, make_smoke_config
 

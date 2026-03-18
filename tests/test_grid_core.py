@@ -24,7 +24,7 @@ import pytest
 
 
 def test_grid_step_result_import() -> None:
-    from grid.core.grid_types import GridStepResult
+    from envs.grid.core.grid_types import GridStepResult
 
     r = GridStepResult(
         converged=True,
@@ -54,8 +54,8 @@ N_AGENTS = 3
 @pytest.fixture(scope="module")
 def agent_deployments():
     """Return 3 AgentDeployment objects with validated bus IDs."""
-    from grid.config.grid_config import AgentDeployment
-    from grid.core.net_builder import build_simbench_net
+    from envs.grid.config.grid_config import AgentDeployment
+    from envs.grid.core.net_builder import build_simbench_net
 
     net = build_simbench_net(SB_CODE)
     all_bus_ids = list(net.bus.index)
@@ -87,7 +87,7 @@ def grid_cfg():
 @pytest.mark.slow
 def test_simbench_net_loads(agent_deployments) -> None:
     """Verify that the SimBench net can be loaded and has expected structure."""
-    from grid.core.net_builder import build_simbench_net
+    from envs.grid.core.net_builder import build_simbench_net
 
     net = build_simbench_net(SB_CODE)
     assert len(net.bus) > 0, "Network has no buses"
@@ -100,7 +100,7 @@ def test_simbench_net_loads(agent_deployments) -> None:
 @pytest.mark.slow
 def test_grid_core_zero_injection(agent_deployments, grid_cfg) -> None:
     """With zero battery injection, power flow should converge and voltages be sane."""
-    from grid.core.grid_core import GridCore
+    from envs.grid.core.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.zeros(N_AGENTS, dtype=np.float32)
@@ -122,7 +122,7 @@ def test_grid_core_zero_injection(agent_deployments, grid_cfg) -> None:
 @pytest.mark.slow
 def test_grid_core_shapes(agent_deployments, grid_cfg) -> None:
     """Shape assertions across all result fields."""
-    from grid.core.grid_core import GridCore
+    from envs.grid.core.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
@@ -144,7 +144,7 @@ def test_grid_core_shapes(agent_deployments, grid_cfg) -> None:
 @pytest.mark.slow
 def test_grid_core_violation_nonneg(agent_deployments, grid_cfg) -> None:
     """Violation metrics must always be >= 0."""
-    from grid.core.grid_core import GridCore
+    from envs.grid.core.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.zeros(N_AGENTS, dtype=np.float32)

@@ -1,4 +1,15 @@
-"""Multi-agent home energy management environment."""
+"""家庭能源管理系统（HEMS）强化学习环境。
+
+封装 Gym 接口的多智能体电池储能调度环境，
+不含电网潮流约束。
+
+主要类:
+    EnergyStorageEnv -- HEMS 多智能体储能环境
+
+典型用法::
+    env = EnergyStorageEnv(cfg, mode="train", dataset=ds)
+    obs = env.reset()
+"""
 
 from __future__ import annotations
 
@@ -55,12 +66,12 @@ class EnergyStorageEnv(gym.Env):
         self.w_soc = float(reward_cfg.w_soc)
         self.lambda_bonus = float(reward_cfg.lambda_bonus)
 
-        from common.rewards import get_reward_fn
+        from envs.rewards import get_reward_fn
 
         self.reward_fn = reward_fn if reward_fn is not None else get_reward_fn(cfg.reward.type, cfg)
 
         if dataset is None:
-            from datasets.csv_price_load import CsvPriceLoadDataset
+            from data.loaders.csv_price_load import CsvPriceLoadDataset
 
             if data_path is None:
                 data_dir = Path(__file__).resolve().parent.parent / "data"
@@ -69,7 +80,7 @@ class EnergyStorageEnv(gym.Env):
         self._dataset = dataset
 
         if forecaster is None:
-            from forecast.oracle import PerfectForecaster
+            from predictors.oracle import PerfectForecaster
 
             forecaster = PerfectForecaster()
         self.forecaster = forecaster

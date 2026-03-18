@@ -1,5 +1,5 @@
-from datasets.csv_price_load import CsvPriceLoadDataset
-from datasets.registry import build_dataset, get_dataset_cls
+from data.loaders.csv_price_load import CsvPriceLoadDataset
+from data.loaders.registry import build_dataset, get_dataset_cls
 from envs.hems_env import EnergyStorageEnv
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.registry import build_obs_builder, get_obs_builder_cls

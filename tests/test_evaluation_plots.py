@@ -8,8 +8,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from evaluation.plots import plot_last_k_episodes_price_action_soc
-from evaluation.reward_plots import plot_reward_decomposition
+from scripts.plots.plots import plot_last_k_episodes_price_action_soc
+from scripts.plots.reward_plots import plot_reward_decomposition
 
 
 def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles():

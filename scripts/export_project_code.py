@@ -1,8 +1,7 @@
-"""Export the repository source snapshot to `full_project_code.txt`.
+"""项目代码导出工具。
 
-This script is a developer utility and is intentionally kept outside the
-training/runtime path. The project root is resolved from the parent directory
-of `scripts/` so the export still covers the whole repository after the move.
+将项目所有源代码文件合并导出为单个文本文件，
+方便代码审查或提交。
 """
 
 from __future__ import annotations
@@ -147,4 +146,5 @@ def export_project_code() -> None:
 
 
 if __name__ == "__main__":
-    export_project_code()
+    export_project_code()
+

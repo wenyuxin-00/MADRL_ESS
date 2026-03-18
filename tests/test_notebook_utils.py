@@ -1,4 +1,4 @@
-from common.experiment_notebook_utils import (
+from scripts.utils.experiment_notebook_utils import (
     build_compare_controller_builders,
     get_lstm_artifact_root,
     sanity_check_runner,

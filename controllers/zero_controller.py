@@ -1,4 +1,10 @@
-"""Zero baseline controller。"""
+"""零动作基线控制器。
+
+始终输出零动作的简单基线控制器，用于与其他算法对比。
+
+主要类:
+    ZeroController -- 零动作基线控制器
+"""
 
 from __future__ import annotations
 

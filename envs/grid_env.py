@@ -1,40 +1,14 @@
-"""Grid-aware multi-agent energy storage environment.
+"""电网潮流环境实现。
 
-``GridEnv`` is a drop-in sibling of ``EnergyStorageEnv``.  It shares the
-same constructor signature and the same downstream contracts (observation
-schema, info dict keys, action space), but additionally:
+在 pandapower 电网模型上封装 Gym 接口，支持多智能体电池调度，
+包含电压和线路负载约束。
 
-1. Calls ``GridCore.step()`` after resolving battery physics to compute
-   bus voltages and line flows.
-2. Passes grid fields into ``env_state`` so that ``GridCompositeReward``
-   can compute voltage and line penalties.
-3. Adds grid-specific keys to the returned ``info`` dict (see docstring in
-   ``step()`` for the full list).
+主要类:
+    GridEnv -- 带潮流约束的多智能体储能环境
 
-Reward strategy (Phase 1)
---------------------------
-Shared reward: the per-agent reward vector is set to the mean total reward
-broadcast to all agents.  This is appropriate for a cooperative energy
-community where grid feasibility is a collective responsibility.
-
-Downstream compatibility
--------------------------
-The following attributes are accessed by training/evaluation infrastructure
-and must be present on every env instance::
-
-    self.n                  int
-    self.soc                np.ndarray (n_agents,)
-    self.obs_builder        ObservationBuilder
-    self.observation_schema dict
-    self.observation_layout dict
-    self.action_space       list[spaces.Box]
-    self.reward_fn          RewardFn
-
-Methods accessed by observation feature lambdas::
-
-    get_signal(signal_name)
-    get_signal_step(signal_name, step=None)
-    get_signal_history(signal_name)
+典型用法::
+    env = GridEnv(cfg, mode="train", dataset=ds)
+    obs = env.reset()
 """
 
 from __future__ import annotations
@@ -94,12 +68,12 @@ class GridEnv(gym.Env):
         self._w_v_pen = float(cfg.grid.w_v_pen)
         self._w_l_pen = float(cfg.grid.w_l_pen)
 
-        from common.rewards import get_reward_fn
+        from envs.rewards import get_reward_fn
 
         self.reward_fn = reward_fn if reward_fn is not None else get_reward_fn(cfg.reward.type, cfg)
 
         if dataset is None:
-            from datasets.csv_price_load import CsvPriceLoadDataset
+            from data.loaders.csv_price_load import CsvPriceLoadDataset
 
             if data_path is None:
                 data_dir = Path(__file__).resolve().parent.parent / "data"
@@ -110,7 +84,7 @@ class GridEnv(gym.Env):
         self._dataset = dataset
 
         if forecaster is None:
-            from forecast.oracle import PerfectForecaster
+            from predictors.oracle import PerfectForecaster
 
             forecaster = PerfectForecaster()
         self.forecaster = forecaster
@@ -342,7 +316,7 @@ class GridEnv(gym.Env):
             self.vm_pu = pf_result.vm_pu
         else:
             # No grid core (e.g. during unit tests) — zero-violation fallback.
-            from grid.core.grid_types import GridStepResult
+            from envs.grid.core.grid_types import GridStepResult
 
             pf_result = GridStepResult(
                 converged=True,

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from common.torch_runtime import (
+from scripts.utils.torch_runtime import (
     PERFORMANCE_RUNTIME_MODE,
     STRICT_REPRO_RUNTIME_MODE,
     configure_torch_runtime,

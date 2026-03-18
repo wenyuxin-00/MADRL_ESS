@@ -1,9 +1,13 @@
-"""Small script entry point for a debug-scale training run."""
+"""快速调试训练入口。
+
+使用 debug profile 快速启动一次小规模训练，
+用于验证训练流程是否正常。
+"""
 
 from __future__ import annotations
 
 from configs import compose_experiment_config
-from core.builder import build_train_runner
+from scripts.builder import build_train_runner
 
 
 def main() -> int:

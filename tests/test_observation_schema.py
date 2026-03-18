@@ -1,9 +1,9 @@
 import numpy as np
 
-from common.subproc_vec_env import SubprocVecEnv
-from common.vec_env import DummyVecEnv
-from core.builder import build_env
-from datasets.registry import build_dataset
+from envs.subproc_vec_env import SubprocVecEnv
+from envs.vec_env import DummyVecEnv
+from scripts.builder import build_env
+from data.loaders.registry import build_dataset
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 

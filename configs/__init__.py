@@ -32,6 +32,7 @@ from configs.experiment_config import (
     TrainConfig,
 )
 from configs.profiles import (
+    apply_grid_profile,
     apply_forecast_profile,
     apply_model_profile,
     apply_observation_profile,
@@ -58,6 +59,7 @@ __all__ = [
     "RuntimeConfig",
     "TrainConfig",
     "apply_forecast_profile",
+    "apply_grid_profile",
     "apply_model_profile",
     "apply_observation_profile",
     "apply_reward_profile",

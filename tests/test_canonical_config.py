@@ -3,8 +3,8 @@ import pytest
 from configs import compose_experiment_config
 from configs.profiles import summarize_experiment
 from configs.experiment_config import ExperimentConfig
-from common.torch_runtime import STRICT_REPRO_RUNTIME_MODE
-from forecast.artifacts import get_default_lstm_artifact_dir
+from scripts.utils.torch_runtime import STRICT_REPRO_RUNTIME_MODE
+from predictors.artifacts import get_default_lstm_artifact_dir
 from models import validate_and_finalize_model_config
 
 

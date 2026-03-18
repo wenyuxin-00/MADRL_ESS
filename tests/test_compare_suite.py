@@ -1,6 +1,6 @@
 from controllers import ClassicDRLController, MPCController, ZeroController
-from core.builder import build_env
-from evaluation import comparison_records_to_rows, evaluate_controller_suite
+from scripts.builder import build_env
+from scripts import comparison_records_to_rows, evaluate_controller_suite
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 

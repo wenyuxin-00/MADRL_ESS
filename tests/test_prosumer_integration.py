@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 
 from configs.experiment_config import ExperimentConfig
-from core.builder import build_env
-from datasets.csv_prosumer import CsvProsumerDataset
-from datasets.registry import build_dataset, get_dataset_cls
+from scripts.builder import build_env
+from data.loaders.csv_prosumer import CsvProsumerDataset
+from data.loaders.registry import build_dataset, get_dataset_cls
 
 
 def _write_prosumer_csv(path: Path, total_steps: int, n_agents: int) -> None:

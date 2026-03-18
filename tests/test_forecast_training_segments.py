@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from configs.experiment_config import ExperimentConfig
-from datasets.csv_prosumer import CsvProsumerDataset
-from forecast.training import (
+from data.loaders.csv_prosumer import CsvProsumerDataset
+from predictors.training import (
     SignalCsvSource,
     evaluate_signal_online_one_week,
     load_signal_segments,
@@ -187,7 +187,7 @@ def test_evaluate_signal_online_one_week_uses_growing_real_history(tmp_path, mon
             calls.append((history_array.copy(), int(horizon)))
             return np.array([history_array[-1], history_array[-1] + 1.0], dtype=np.float32)
 
-    import forecast.training as training
+    import predictors.training as training
 
     monkeypatch.setattr(training, "build_runtime_forecaster_from_model", lambda *args, **kwargs: MockForecaster())
 
