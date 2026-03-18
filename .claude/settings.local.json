@@ -8,7 +8,9 @@
       "Bash(find /d/GithubProject/MADRL_ESS/forecast -name \"*.py\" -type f ! -path \"*/__pycache__/*\" -exec wc -l {} +)",
       "Bash(xargs wc:*)",
       "Bash(find /d/GithubProject/MADRL_ESS/common -name \"*.py\" -type f ! -path \"*/__pycache__/*\" -exec wc -l {} +)",
-      "Bash(wc -l d:GithubProjectMADRL_ESSenvshems_env.py d:GithubProjectMADRL_ESSdatasets*.py d:GithubProjectMADRL_ESScontrollers*.py d:GithubProjectMADRL_ESSmodels*.py d:GithubProjectMADRL_ESScommonrewards*.py d:GithubProjectMADRL_ESSrunnerstrain_runner.py d:GithubProjectMADRL_ESScommonsubproc_vec_env.py)"
+      "Bash(wc -l d:GithubProjectMADRL_ESSenvshems_env.py d:GithubProjectMADRL_ESSdatasets*.py d:GithubProjectMADRL_ESScontrollers*.py d:GithubProjectMADRL_ESSmodels*.py d:GithubProjectMADRL_ESScommonrewards*.py d:GithubProjectMADRL_ESSrunnerstrain_runner.py d:GithubProjectMADRL_ESScommonsubproc_vec_env.py)",
+      "Bash(find d:/GithubProject/MADRL_ESS -maxdepth 1 -name README* -o -name requirements* -o -name setup.py -o -name pyproject.toml)",
+      "Bash(find d:/GithubProject/MADRL_ESS -maxdepth 1 -name *.md -o -name *.txt)"
     ]
   }
 }

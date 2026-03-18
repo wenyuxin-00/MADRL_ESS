@@ -1,0 +1,345 @@
+{
+  "project": {
+    "name": "MADRL_ESS",
+    "description": "Multi-Agent Deep Reinforcement Learning for Energy Storage Systems",
+    "indexed_symbols": 839,
+    "relationships": 1976,
+    "execution_flows": 56
+  },
+
+  "core_execution_chain": {
+    "entry_point": "TrainRunner.run()",
+    "file": "runners/train_runner.py",
+    "lines": "124-249",
+    "flow": [
+      {
+        "step": 1,
+        "name": "Initialize Agents",
+        "code": "agent_n = [MADDPG(cfg, id) for id in range(num_agents)]",
+        "location": "runners/train_runner.py:42-43"
+      },
+      {
+        "step": 2,
+        "name": "Initialize Vectorized Environment",
+        "code": "env = DummyVecEnv(num_envs, EnergyStorageEnv, cfg)",
+        "location": "runners/train_runner.py line 35-39"
+      },
+      {
+        "step": 3,
+        "name": "Reset Environment",
+        "calls": ["DummyVecEnv.reset()", "EnergyStorageEnv.reset()"],
+        "returns": "obs_np {local: (num_envs, n_agents, local_dim), ...}",
+        "location": "runners/train_runner.py:152"
+      },
+      {
+        "step": 4,
+        "name": "Select Actions Batch",
+        "function": "TrainRunner.select_action_batch(obs_np)",
+        "file": "runners/train_runner.py",
+        "lines": "67-75",
+        "process": [
+          "obs_t = to_torch_nested(obs_np, device)",
+          "action_t = torch.stack([agent.act_from_torch_obs(obs_t, noise_std) for agent], dim=1)",
+          "return action_t.cpu().numpy()"
+        ],
+        "output_shape": "(num_envs, n_agents, action_dim)"
+      },
+      {
+        "step": 5,
+        "name": "Format Actions for Environment",
+        "function": "TrainRunner.format_env_actions(action_batch)",
+        "file": "runners/train_runner.py",
+        "lines": "63-65",
+        "output": "List[n_agents] each (num_envs, action_dim)"
+      },
+      {
+        "step": 6,
+        "name": "Execute Environment Step",
+        "function": "DummyVecEnv.step(formatted_actions)",
+        "file": "common/vec_env.py",
+        "lines": "43-61",
+        "substeps": [
+          {
+            "sub": "6a",
+            "name": "Split Batched Actions",
+            "function": "split_batched_actions()",
+            "location": "common/vec_env.py:47",
+            "purpose": "Extract one env's actions from batch"
+          },
+          {
+            "sub": "6b",
+            "name": "Call Single Environment",
+            "function": "EnergyStorageEnv.step(action_n)",
+            "file": "envs/hems_env.py",
+            "lines": "223-312",
+            "key_operations": [
+              "action_array = np.asarray(actions).reshape(n, -1)[:, 0]",
+              "e_bat_req = action_array * agent_p_max",
+              "Calculate battery constraints and update state",
+              "Extract price/load/pv signals",
+              "reward = reward_fn.compute(env_state)",
+              "obs = obs_builder.build(self)"
+            ]
+          },
+          {
+            "sub": "6c",
+            "name": "Stack Outputs",
+            "function": "stack_step_outputs()",
+            "location": "common/vec_env.py:61",
+            "purpose": "Batch results from all environments"
+          }
+        ],
+        "output": "(next_obs, reward, done, info_list)"
+      },
+      {
+        "step": 7,
+        "name": "Store Experience",
+        "code": "replay_buffer.store_transitions_batched(obs, action_batch, reward, next_obs, done)",
+        "location": "runners/train_runner.py:172"
+      },
+      {
+        "step": 8,
+        "name": "Parameter Update (every update_interval)",
+        "condition": "if replay_buffer.current_size >= batch_size and interaction_step % update_interval == 0",
+        "substeps": [
+          {
+            "sub": "8a",
+            "code": "batch_np = replay_buffer.sample()",
+            "location": "runners/train_runner.py:212"
+          },
+          {
+            "sub": "8b",
+            "code": "batch_torch = to_torch_batch(batch_np, device)",
+            "location": "runners/train_runner.py:213"
+          },
+          {
+            "sub": "8c",
+            "name": "Train All Agents",
+            "code": "for agent in agent_n: agent.train_on_batch(batch_torch, agent_n)",
+            "function": "MADDPG.train_on_batch()",
+            "file": "algorithms/maddpg.py",
+            "lines": "67-103",
+            "training_steps": [
+              "Compute next actions from target networks",
+              "Compute target Q-values",
+              "Update critic: MSE(current_q, target_q)",
+              "Update actor: -mean(critic(obs, new_action))",
+              "Soft update target networks"
+            ],
+            "location": "runners/train_runner.py:214-215"
+          }
+        ]
+      },
+      {
+        "step": 9,
+        "name": "Decay Noise",
+        "condition": "if use_noise_decay",
+        "code": "noise_std = max(noise_std - noise_decay, noise_std_min)",
+        "location": "runners/train_runner.py:204"
+      },
+      {
+        "step": 10,
+        "name": "Loop Until Convergence",
+        "condition": "while interaction_step < target_interactions",
+        "location": "runners/train_runner.py:153"
+      }
+    ]
+  },
+
+  "algorithm_action_generation": {
+    "maddpg": {
+      "file": "algorithms/maddpg.py",
+      "method": "choose_action(obs, noise_std)",
+      "lines": "47-55",
+      "flow": [
+        {
+          "step": 1,
+          "code": "obs_t, has_batch_dim = self._prepare_obs(obs)",
+          "description": "Convert to torch, add batch dim if needed"
+        },
+        {
+          "step": 2,
+          "code": "action = self.act_from_torch_obs(obs_t, noise_std).cpu().numpy()",
+          "description": "Get action from torch network",
+          "calls": "act_from_torch_obs()",
+          "location": "line 50"
+        },
+        {
+          "step": 3,
+          "code": "if not has_batch_dim: action = action[0]",
+          "description": "Remove batch dimension if added"
+        },
+        {
+          "step": 4,
+          "code": "return action.astype(np.float32)",
+          "description": "Return numpy action"
+        }
+      ]
+    },
+    "act_from_torch_obs": {
+      "file": "algorithms/maddpg.py",
+      "method": "act_from_torch_obs(obs_t, noise_std)",
+      "lines": "57-61",
+      "flow": [
+        {
+          "step": 1,
+          "code": "action = self.actor(obs_t)",
+          "description": "Forward pass through actor network",
+          "returns": "torch.Tensor (batch, action_dim)"
+        },
+        {
+          "step": 2,
+          "code": "if noise_std > 0.0: action = action + torch.randn_like(action) * float(noise_std)",
+          "description": "Add Gaussian exploration noise"
+        },
+        {
+          "step": 3,
+          "code": "return action.clamp(-self.max_action, self.max_action)",
+          "description": "Clamp action to valid range",
+          "output": "torch.Tensor (batch, action_dim) in [-max_action, max_action]"
+        }
+      ]
+    }
+  },
+
+  "environment_step": {
+    "file": "envs/hems_env.py",
+    "method": "step(actions: List[np.ndarray])",
+    "lines": "223-312",
+    "input": "List of actions, one per agent",
+    "flow": [
+      {
+        "order": 1,
+        "lines": "226-228",
+        "description": "Action Processing",
+        "code": "action_array = np.asarray(actions).reshape(n, -1)[:, 0]\naction_array = np.clip(action_array, -1.0, 1.0)\ne_bat_req = action_array * agent_p_max"
+      },
+      {
+        "order": 2,
+        "lines": "234-245",
+        "description": "Battery Constraint Calculation",
+        "code": "p_max_chg = charge power limit\np_max_dis = discharge power limit\ne_bat = np.clip(e_bat_req, -p_max_dis, p_max_chg)"
+      },
+      {
+        "order": 3,
+        "lines": "247-249",
+        "description": "State Update",
+        "code": "delta_e = battery energy change\ne_next = updated energy\nsoc_next = updated state of charge"
+      },
+      {
+        "order": 4,
+        "lines": "251-256",
+        "description": "Signal Extraction",
+        "code": "price_t = get_signal_step('price', t)\nload_t = get_signal_step('load', t)\nnet_load_t = load_t - pv_t"
+      },
+      {
+        "order": 5,
+        "lines": "276",
+        "description": "Reward Computation",
+        "code": "reward, components = reward_fn.compute(env_state)"
+      },
+      {
+        "order": 6,
+        "lines": "284",
+        "description": "Observation Building",
+        "code": "obs = obs_builder.build(self) if not done else obs_builder.zeros(n)"
+      }
+    ],
+    "output": "(obs, reward, done_n, info)"
+  },
+
+  "vectorized_environment": {
+    "file": "common/vec_env.py",
+    "class": "DummyVecEnv",
+    "method": "step(actions_n_batched)",
+    "lines": "43-61",
+    "input": "actions_n_batched: (num_agents, num_envs, action_dim)",
+    "flow": [
+      {
+        "step": 1,
+        "description": "Initialize lists",
+        "code": "obs_list, reward_list, done_list, info_list = [], [], [], []"
+      },
+      {
+        "step": 2,
+        "description": "Loop through environments",
+        "code": "for env_idx, env in enumerate(self.envs):"
+      },
+      {
+        "step": 3,
+        "description": "Extract actions for this env",
+        "function": "split_batched_actions()",
+        "code": "action_n = split_batched_actions(actions_n_batched, env_idx, num_agents)"
+      },
+      {
+        "step": 4,
+        "description": "Call env.step()",
+        "code": "obs, reward, done, info = env.step(action_n)"
+      },
+      {
+        "step": 5,
+        "description": "Auto-reset on completion",
+        "code": "if all(done): obs = env.reset()"
+      },
+      {
+        "step": 6,
+        "description": "Append to lists",
+        "code": "obs_list.append(obs)\nreward_list.append(reward)\ndone_list.append(done)"
+      },
+      {
+        "step": 7,
+        "description": "Stack outputs",
+        "function": "stack_step_outputs()",
+        "code": "return stack_step_outputs(obs_list, reward_list, done_list, info_list)"
+      }
+    ],
+    "output": "(batched_obs, batched_reward, batched_done, info_list)"
+  },
+
+  "data_shapes": {
+    "observations": {
+      "single_env": "{local: (n_agents, local_dim), global: (...), ...}",
+      "batched": "{local: (num_envs, n_agents, local_dim), ...}",
+      "torch": "Same structure, torch tensors on device"
+    },
+    "actions": {
+      "actor_output": "(batch, action_dim)",
+      "env_input_single": "List[n_agents] each (action_dim,)",
+      "env_input_batch": "List[n_agents] each (num_envs, action_dim)",
+      "raw_numpy": "(num_envs, n_agents, action_dim)",
+      "value_range": "[-1, 1] before env, [-max_action, max_action] after actor"
+    },
+    "rewards": {
+      "single_env": "List[n_agents] floats",
+      "batched": "(num_envs, n_agents, 1)",
+      "accumulated": "float per episode"
+    }
+  },
+
+  "key_files": {
+    "algorithms": [
+      {"name": "MADDPG", "path": "algorithms/maddpg.py", "lines": "17-120"},
+      {"name": "MATD3", "path": "algorithms/matd3.py", "lines": "17-137"},
+      {"name": "BaseAgent", "path": "algorithms/base_agent.py", "lines": "11-92"}
+    ],
+    "environment": [
+      {"name": "EnergyStorageEnv", "path": "envs/hems_env.py", "lines": "13-312"}
+    ],
+    "vectorization": [
+      {"name": "DummyVecEnv", "path": "common/vec_env.py", "lines": "26-66"}
+    ],
+    "control": [
+      {"name": "MADRLController", "path": "controllers/madrl_controller.py", "lines": "13-36"}
+    ],
+    "training": [
+      {"name": "TrainRunner", "path": "runners/train_runner.py", "lines": "31-250"}
+    ]
+  },
+
+  "performance": {
+    "action_selection_time_ms": "0.5-2",
+    "env_step_time_ms": "1-5",
+    "param_update_time_ms": "5-20",
+    "training_speed_steps_per_sec": "50-200"
+  }
+}
