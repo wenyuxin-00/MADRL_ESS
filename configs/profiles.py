@@ -15,8 +15,12 @@ import os
 from pathlib import Path
 from pprint import pprint
 
-import torch
-
+from common.torch_runtime import (
+    PERFORMANCE_RUNTIME_MODE,
+    STRICT_REPRO_RUNTIME_MODE,
+    resolve_device,
+    resolve_runtime_mode,
+)
 from common.project_paths import get_data_root, project_root as resolve_project_root
 from configs.experiment_config import ExperimentConfig
 from forecast.artifacts import get_default_lstm_artifact_dir
@@ -36,9 +40,7 @@ def make_base_config(data_dir: str | Path | None = None, device=None) -> Experim
     """创建适合 notebook 的基础配置。"""
     cfg = ExperimentConfig()
     cfg.data.data_dir = Path(data_dir) if data_dir is not None else default_data_dir()
-    cfg.runtime.device = torch.device(device) if device is not None else (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    cfg.runtime.device = resolve_device(device)
     cfg.train.vec_env_type = "dummy"
     return cfg
 
@@ -61,13 +63,13 @@ def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentC
         return cfg
 
     if profile_name == "fast_train":
-        cpu_workers = max(2, min(8, (os.cpu_count() or 8) // 2))
-        cfg.train.train_episodes = 80
+        cpu_workers = max(4, min(12, max(2, (os.cpu_count() or 8) - 2)))
+        cfg.train.train_episodes = 300
         cfg.train.max_train_steps = None
         cfg.train.num_envs = cpu_workers
-        cfg.train.vec_env_type = "subproc"
-        cfg.train.batch_size = 1024 if str(cfg.runtime.device).startswith("cuda") else 512
-        cfg.train.buffer_size = 50000
+        cfg.train.vec_env_type = "subproc" if cpu_workers > 1 else "dummy"
+        cfg.train.batch_size = 4096 if resolve_device(cfg.runtime.device).type == "cuda" else 1024
+        cfg.train.buffer_size = 100000
         cfg.train.update_interval = 1
         cfg.train.updates_per_step = 1
         cfg.train.use_noise_decay = True
@@ -142,6 +144,19 @@ def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> Experim
     return cfg
 
 
+def apply_runtime_profile(cfg: ExperimentConfig, runtime_mode: str) -> ExperimentConfig:
+    """设置 performance / strict reproducibility 模式。"""
+    cfg.runtime.execution_mode = resolve_runtime_mode(runtime_mode)
+    # 这些字段默认交给统一 runtime 入口根据模式推导，避免局部配置漂移。
+    cfg.runtime.allow_tf32 = None
+    cfg.runtime.cudnn_benchmark = None
+    cfg.runtime.cudnn_deterministic = None
+    cfg.runtime.use_deterministic_algorithms = None
+    cfg.runtime.pin_memory = None
+    cfg.runtime.non_blocking_transfers = None
+    return cfg
+
+
 def compose_experiment_config(
     *,
     profile: str = "base",
@@ -158,10 +173,14 @@ def compose_experiment_config(
     sequence_features: list[str] | None = None,
     data_dir: str | Path | None = None,
     device=None,
+    runtime_mode: str = PERFORMANCE_RUNTIME_MODE,
+    seed: int = 0,
+    require_cuda: bool | None = None,
 ) -> ExperimentConfig:
     """按 notebook 常用开关组合出完整实验配置。"""
     cfg = make_base_config(data_dir=data_dir, device=device)
     apply_train_profile(cfg, profile)
+    apply_runtime_profile(cfg, runtime_mode)
     cfg.algo.name = algorithm
     apply_model_profile(cfg, model_family)
     apply_reward_profile(cfg, reward_type)
@@ -181,11 +200,37 @@ def compose_experiment_config(
         cfg.data.dataset_type = dataset_type
     if obs_builder_type is not None:
         cfg.obs.builder_type = obs_builder_type
+    cfg.runtime.seed = int(seed)
+    if require_cuda is not None:
+        cfg.runtime.require_cuda = bool(require_cuda)
     return cfg
+
+
+def _derive_training_budget(cfg: ExperimentConfig) -> dict[str, int | str | None]:
+    """返回训练预算的关键派生量，方便 notebook 解释 step/episode 的关系。"""
+    episode_limit = max(1, int(cfg.env.episode_limit))
+    num_envs = max(1, int(cfg.train.num_envs))
+    resolved_steps = int(cfg.train.resolved_max_train_steps(episode_limit))
+    target_parallel_iters = resolved_steps // num_envs
+    completed_rounds = target_parallel_iters // episode_limit
+    expected_completed_episodes = completed_rounds * num_envs
+    partial_steps_per_env = target_parallel_iters % episode_limit
+    budget_source = "max_train_steps" if cfg.train.max_train_steps is not None else "train_episodes * episode_limit"
+    return {
+        "episode_limit": episode_limit,
+        "future_horizon": int(cfg.env.future_horizon),
+        "max_train_steps": int(cfg.train.max_train_steps) if cfg.train.max_train_steps is not None else None,
+        "resolved_train_steps": resolved_steps,
+        "parallel_rollout_iterations": int(target_parallel_iters),
+        "expected_completed_episodes_floor": int(expected_completed_episodes),
+        "partial_steps_per_env_at_stop": int(partial_steps_per_env),
+        "budget_source": budget_source,
+    }
 
 
 def summarize_experiment(cfg: ExperimentConfig) -> dict:
     """返回 notebook 最常关心的实验摘要。"""
+    budget = _derive_training_budget(cfg)
     summary = {
         "algo": cfg.algo.name,
         "env_type": cfg.env.env_type,
@@ -200,7 +245,17 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict:
         "num_envs": cfg.train.num_envs,
         "batch_size": cfg.train.batch_size,
         "train_episodes": cfg.train.train_episodes,
+        "episode_limit": budget["episode_limit"],
+        "future_horizon": budget["future_horizon"],
+        "max_train_steps": budget["max_train_steps"],
+        "resolved_train_steps": budget["resolved_train_steps"],
+        "parallel_rollout_iterations": budget["parallel_rollout_iterations"],
+        "expected_completed_episodes_floor": budget["expected_completed_episodes_floor"],
+        "partial_steps_per_env_at_stop": budget["partial_steps_per_env_at_stop"],
+        "train_budget_source": budget["budget_source"],
         "device": str(cfg.runtime.device),
+        "runtime_mode": cfg.runtime.execution_mode,
+        "seed": int(cfg.runtime.seed),
         "data_dir": str(cfg.data.data_dir),
     }
     if cfg.forecast.type == "lstm":
@@ -211,6 +266,8 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict:
         )
         if cfg.forecast.lstm_model_path is not None:
             summary["legacy_lstm_model_path"] = str(cfg.forecast.lstm_model_path)
+    if cfg.runtime.execution_mode == STRICT_REPRO_RUNTIME_MODE:
+        summary["strict_reproducibility"] = True
     return summary
 
 

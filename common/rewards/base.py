@@ -42,7 +42,7 @@ class RewardFn(ABC):
     """
 
     @abstractmethod
-    def compute(self, env_state: dict) -> tuple:
+    def compute(self, env_state: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         计算奖励并返回各分量。
 
@@ -57,7 +57,7 @@ class RewardFn(ABC):
 
     @property
     @abstractmethod
-    def component_meta(self) -> list:
+    def component_meta(self) -> list[ComponentMeta]:
         """
         返回各分量的元数据列表（list[ComponentMeta]）。
         顺序与 compute() 返回的 components dict 中的键顺序一致。

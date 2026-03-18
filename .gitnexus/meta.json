@@ -1,12 +1,13 @@
 {
   "repoPath": "D:\\GithubProject\\MADRL_ESS",
-  "lastCommit": "68fd30c05d8fecad44ea3ed176f239809a6302f6",
-  "indexedAt": "2026-03-17T12:05:57.289Z",
+  "lastCommit": "f2fc0dd020fe948dd310e64811f836f05bad4773",
+  "indexedAt": "2026-03-18T10:12:11.868Z",
   "stats": {
-    "files": 194,
-    "nodes": 679,
-    "edges": 1634,
-    "communities": 47,
-    "processes": 44
+    "files": 223,
+    "nodes": 839,
+    "edges": 1976,
+    "communities": 53,
+    "processes": 56,
+    "embeddings": 0
   }
 }

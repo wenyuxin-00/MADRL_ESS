@@ -1,1 +1,50 @@
-data/15minute_data_austin.csv 
+# --- 系统文件 ---
+.DS_Store
+Thumbs.db
+*.swp
+desktop.ini
+
+# --- 日志与编译输出 ---
+node_modules/
+dist/
+build/
+bin/
+obj/
+out/
+*.log
+*.tmp
+*.temp
+
+# --- 环境变量与私密信息 ---
+.env
+*.env.local
+.venv
+venv/
+env/
+*.pth
+__pycache__/
+*.pyc
+
+# --- 编辑器/IDE 配置 ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- 压缩包与二进制文件 ---
+*.zip
+*.tar.gz
+*.rar
+*.exe
+*.dll
+*.so
+.gitnexus
+
+# --- Notebook / test runtime noise ---
+.jupyter_runtime/
+tests/.tmp/
+test_tmp_cases/
+runs/

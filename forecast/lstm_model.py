@@ -1,8 +1,4 @@
-"""Shared univariate LSTM forecast network.
-
-The class keeps its historical name for compatibility, but it is now used for
-price, load, and pv scalar series alike.
-"""
+"""共享的一维多步 LSTM 预测模型。"""
 
 from __future__ import annotations
 
@@ -10,8 +6,8 @@ import torch
 import torch.nn as nn
 
 
-class LSTMPricePredictor(nn.Module):
-    """Direct multi-step LSTM predictor for one scalar signal."""
+class LSTMForecastModel(nn.Module):
+    """用于 price / load / pv 标量序列的统一 LSTM 主干。"""
 
     def __init__(
         self,
@@ -36,7 +32,7 @@ class LSTMPricePredictor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """输入形状支持 `(B, T)` 或 `(B, T, 1)`。"""
+        """输入形状支持 `(B, T)` 和 `(B, T, 1)`。"""
         if x.dim() == 2:
             x = x.unsqueeze(-1)
         elif x.dim() != 3:
@@ -44,3 +40,12 @@ class LSTMPricePredictor(nn.Module):
 
         out, _ = self.lstm(x)
         return self.head(out[:, -1, :])
+
+
+class LSTMPricePredictor(LSTMForecastModel):
+    """兼容旧名。
+
+    历史上该类只服务于 `price`，现在保留旧名字只是为了兼容测试、旧脚本和旧 artifact。
+    新代码应优先使用 `LSTMForecastModel`。
+    """
+

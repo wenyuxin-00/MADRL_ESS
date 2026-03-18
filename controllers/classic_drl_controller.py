@@ -20,6 +20,8 @@ See ``controllers/madrl_controller.py`` for a similar agent-wrapping pattern.
 
 from __future__ import annotations
 
+import numpy as np
+
 from controllers.base import BaseController
 
 
@@ -31,7 +33,7 @@ class ClassicDRLController(BaseController):
     def reset(self) -> None:
         """No internal state yet. Override when implementing."""
 
-    def act(self, obs, deterministic: bool = True):
+    def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
         raise NotImplementedError(
             "ClassicDRLController is a placeholder. See the module docstring for implementation guidance."
         )

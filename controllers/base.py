@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 
 class BaseController(ABC):
     """Minimal interface for all evaluation controllers.
@@ -24,7 +26,7 @@ class BaseController(ABC):
         """
 
     @abstractmethod
-    def act(self, obs, deterministic: bool = True):
+    def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
         """Return environment-executable actions given structured observations.
         根据结构化观测输出环境可直接执行的动作。
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Any
 
 import numpy as np
 import torch
@@ -32,15 +33,20 @@ from runners.checkpoints import build_checkpoint_manifest, write_checkpoint_mani
 class TrainRunner:
     """轻量、显式的训练循环。"""
 
-    def __init__(self, cfg, train_env, eval_env, env_name: str = "EnergyStorageEnv", number: int = 1, seed: int = 0):
+    def __init__(
+        self,
+        cfg: Any,
+        train_env: Any,
+        eval_env: Any,
+        env_name: str = "EnergyStorageEnv",
+        number: int = 1,
+        seed: int = 0,
+    ) -> None:
         self.cfg = cfg
+        self.seed = int(seed)
         self.env_name = env_name
         self.env = train_env
         self.env_evaluate = eval_env
-
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        self._configure_torch_runtime()
 
         agent_cls = get_agent_cls(self.cfg.algo.name)
         self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
@@ -63,22 +69,11 @@ class TrainRunner:
         self.perf_summary = {}
         self._closed = False
 
-    @staticmethod
-    def _configure_torch_runtime() -> None:
-        """打开几项安全的 PyTorch runtime 优化。"""
-        try:
-            torch.set_float32_matmul_precision("high")
-        except (AttributeError, RuntimeError):
-            pass
-
-        if torch.cuda.is_available() and hasattr(torch.backends, "cudnn"):
-            torch.backends.cudnn.benchmark = True
-
-    def format_env_actions(self, action_batch: np.ndarray):
+    def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
         """把 `(num_envs, n_agents, action_dim)` 转成 vec env 需要的输入格式。"""
         return [action_batch[:, agent_id].copy() for agent_id in range(self.cfg.env.num_agents)]
 
-    def select_action_batch(self, obs_np):
+    def select_action_batch(self, obs_np: dict) -> np.ndarray:
         """把 batched observation 一次性转 torch，并完成所有 actor 推理。"""
         obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
         with torch.no_grad():
@@ -88,7 +83,7 @@ class TrainRunner:
             )
         return action_t.cpu().numpy().astype(np.float32)
 
-    def rollout_once(self, obs_np=None) -> dict:
+    def rollout_once(self, obs_np: dict | None = None) -> dict:
         """执行一次公共调试 rollout，供 notebook 和测试使用。"""
         obs_np = self.env.reset() if obs_np is None else obs_np
         action_batch = self.select_action_batch(obs_np)
@@ -248,6 +243,9 @@ class TrainRunner:
 
         total_elapsed = max(time.perf_counter() - run_start, 1e-6)
         self.perf_summary = {
+            "seed": self.seed,
+            "runtime_mode": str(self.cfg.runtime.execution_mode),
+            "device": str(self.cfg.runtime.device),
             "total_wall_time_s": total_elapsed,
             "action_time_s": action_time_total,
             "env_step_time_s": env_step_time_total,

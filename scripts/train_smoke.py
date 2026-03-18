@@ -1,25 +1,18 @@
-"""最小训练脚本。
+"""Compatibility smoke-training entry point.
 
-保留脚本入口，但不再把它当成唯一可用入口。
-日常实验建议优先使用 `madrl/train_madrl.ipynb`。
+`run_debug_training.py` is the canonical implementation. This wrapper keeps the
+historical script name available without maintaining a second copy of the same
+logic.
 """
 
 from __future__ import annotations
 
-from configs import compose_experiment_config
-from core.builder import build_train_runner
-
-
-def main() -> int:
-    """运行一个极小的 debug 训练任务。"""
-    cfg = compose_experiment_config(profile="debug", algorithm="MADDPG", model_family="mlp")
-    runner = build_train_runner(cfg, seed=0, env_name="SmokeEnv", number=1)
-    try:
-        return runner.run()
-    finally:
-        runner.close()
+try:
+    from scripts.run_debug_training import main
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path
+    from run_debug_training import main
 
 
 if __name__ == "__main__":
     completed = main()
-    print(f"Completed episodes: {completed}")
+    print(f"Completed episodes: {completed}")

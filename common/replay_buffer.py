@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from common.nested import index_nested, stack_nested, to_torch_nested
+import torch
+
+from common.nested import NestedArray, index_nested, stack_nested, to_torch_nested
 
 
 class ReplayBuffer:
     """Simple ring-buffer for canonical transition dictionaries."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: object) -> None:
         self.buffer_size = int(cfg.train.buffer_size)
         self.batch_size = int(cfg.train.batch_size)
         self.storage: list[dict] = []
@@ -25,7 +27,14 @@ class ReplayBuffer:
             self.storage[self.position] = transition
         self.position = (self.position + 1) % self.buffer_size
 
-    def store_transitions_batched(self, obs, action, reward, next_obs, done) -> None:
+    def store_transitions_batched(
+        self,
+        obs: NestedArray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        next_obs: NestedArray,
+        done: np.ndarray,
+    ) -> None:
         """Store one batched env rollout step."""
         num_envs = int(np.asarray(action).shape[0])
         for env_idx in range(num_envs):
@@ -38,7 +47,7 @@ class ReplayBuffer:
             }
             self._store_transition(transition)
 
-    def sample(self) -> dict:
+    def sample(self) -> dict[str, NestedArray]:
         """Sample a canonical transition batch."""
         indices = np.random.choice(
             self.current_size,
@@ -55,7 +64,7 @@ class ReplayBuffer:
         }
 
 
-def to_torch_batch(batch: dict, device) -> dict:
+def to_torch_batch(batch: dict[str, NestedArray], device: torch.device | str) -> dict[str, NestedArray]:
     """Convert a sampled canonical batch to torch tensors."""
     return {
         "obs": to_torch_nested(batch["obs"], device),

@@ -3,30 +3,37 @@
 from __future__ import annotations
 
 import multiprocessing as mp
-from multiprocessing.connection import Client, Connection, Listener
+from multiprocessing.connection import Client, Listener
 
 import numpy as np
 import torch
 
 from common.nested import stack_nested
+from common.torch_runtime import configure_torch_runtime
 from common.vec_env import split_batched_actions, stack_step_outputs
 
 
-def _make_worker_env(cfg, mode: str):
-    """Build one env inside a subprocess without touching notebook state."""
+def _make_worker_env(cfg, mode: str, *, worker_rank: int, seed: int | None):
+    """在子进程里构建环境，并同步 runtime / seed。"""
     from copy import deepcopy
 
     from core.builder import build_env
 
     worker_cfg = deepcopy(cfg)
     worker_cfg.runtime.device = torch.device("cpu")
+    configure_torch_runtime(
+        worker_cfg,
+        device="cpu",
+        seed=seed,
+        worker_rank=worker_rank,
+    )
     return build_env(worker_cfg, mode=mode)
 
 
-def _subproc_worker(address, authkey: bytes, cfg, mode: str) -> None:
-    """Run one env loop in a subprocess."""
+def _subproc_worker(address, authkey: bytes, cfg, mode: str, worker_rank: int, seed: int | None) -> None:
+    """运行一个环境子进程。"""
     remote = Client(address, family="AF_INET", authkey=authkey)
-    env = _make_worker_env(cfg, mode=mode)
+    env = _make_worker_env(cfg, mode=mode, worker_rank=worker_rank, seed=seed)
 
     try:
         while True:
@@ -73,7 +80,7 @@ def _subproc_worker(address, authkey: bytes, cfg, mode: str) -> None:
 class SubprocVecEnv:
     """Spawn one env process per worker for real parallel rollout collection."""
 
-    def __init__(self, num_envs: int, cfg, mode: str = "train"):
+    def __init__(self, num_envs: int, cfg, mode: str = "train", seed: int | None = None):
         self.num_envs = int(num_envs)
         self.closed = False
         self.authkey = b"madrl_subproc_vec_env"
@@ -82,11 +89,11 @@ class SubprocVecEnv:
         self.remotes = []
         self.processes = []
 
-        for _ in range(self.num_envs):
+        for worker_rank in range(self.num_envs):
             listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=self.authkey)
             process = ctx.Process(
                 target=_subproc_worker,
-                args=(listener.address, self.authkey, cfg, mode),
+                args=(listener.address, self.authkey, cfg, mode, worker_rank, seed),
                 daemon=True,
             )
             process.start()

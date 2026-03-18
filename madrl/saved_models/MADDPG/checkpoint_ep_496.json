@@ -1,9 +1,0 @@
-{
-  "algorithm": "MADDPG",
-  "saved_episode_tag": 496,
-  "episodes_completed": 496,
-  "total_steps": 96000,
-  "num_envs": 8,
-  "episode_limit": 192,
-  "save_dir": "D:\\GithubProject\\MADRL_ESS\\madrl\\saved_models\\MADDPG"
-}

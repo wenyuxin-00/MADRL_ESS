@@ -17,7 +17,12 @@ def project_root() -> Path:
 
 
 def get_default_lstm_artifact_dir(root: str | Path | None = None) -> Path:
-    """Return the canonical root directory for LSTM forecast artifacts."""
+    """Return the canonical root directory for LSTM forecast artifacts.
+
+    这里的 `root` 指的是 *forecast/lstm artifact 根目录本身*。
+    如果要从仓库根目录推导标准位置，请直接传 `None`，
+    或先调用 `common.project_paths.get_forecast_artifact_root(...)`。
+    """
     if root is not None:
         return Path(root)
     return get_forecast_artifact_root(root) / DEFAULT_LSTM_ARTIFACT_DIR

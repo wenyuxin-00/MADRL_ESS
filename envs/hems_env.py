@@ -1,13 +1,4 @@
-"""储能多智能体环境。
-
-本环境负责三件事：
-1. 从 dataset 读取一个 episode 的 signals。
-2. 执行动作并更新 SoC 与奖励。
-3. 把内部状态交给 observation builder 组织成结构化观测。
-
-数据层统一采用开放式 `signals` 字典。当前最小实现只依赖 `price` 和 `load`，
-未来可以自然扩展到 `pv` 等新信号。
-"""
+"""Multi-agent home energy management environment."""
 
 from __future__ import annotations
 
@@ -20,7 +11,7 @@ from gym import spaces
 
 
 class EnergyStorageEnv(gym.Env):
-    """面向科研实验的多智能体储能环境。"""
+    """Battery storage environment driven by price/load/pv episode signals."""
 
     metadata = {"render.modes": []}
 
@@ -58,8 +49,6 @@ class EnergyStorageEnv(gym.Env):
             raise ValueError(
                 f"Invalid SoC range: soc_min={self.soc_min}, soc_max={self.soc_max}. Expected 0 <= min <= max <= 1."
             )
-        self.e_min = self.soc_min * self.c_bat
-        self.e_max = self.soc_max * self.c_bat
         self.init_soc = float(np.clip(self.init_soc, self.soc_min, self.soc_max))
 
         self.w_pen = float(reward_cfg.w_pen)
@@ -106,6 +95,14 @@ class EnergyStorageEnv(gym.Env):
         self.episode_meta: dict[str, Any] = {}
         self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
+        self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
+
+        self.agent_c_bat = np.full((self.n,), self.c_bat, dtype=np.float32)
+        self.agent_p_max = np.full((self.n,), self.p_max, dtype=np.float32)
+        self.agent_e_min = self.soc_min * self.agent_c_bat
+        self.agent_e_max = self.soc_max * self.agent_c_bat
+        self.e_min = self.agent_e_min.copy()
+        self.e_max = self.agent_e_max.copy()
 
         self.action_space = [
             spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -119,20 +116,37 @@ class EnergyStorageEnv(gym.Env):
         )
 
     def _canonicalize_signal(self, name: str, value: np.ndarray) -> np.ndarray:
-        """把 dataset 给出的 signal 规范成 float32 numpy。"""
         signal = np.asarray(value, dtype=np.float32)
         if signal.shape[0] != self.episode_length:
             raise ValueError(
-                f"signal '{name}' 的首维长度应为 episode_length={self.episode_length}，实际为 {signal.shape[0]}"
+                f"signal '{name}' first dimension should match episode_length={self.episode_length}, got {signal.shape[0]}"
             )
         return signal
 
+    def _resolve_meta_vector(self, key: str, default_value: float) -> np.ndarray:
+        raw_value = self.episode_meta.get(key)
+        if raw_value is None:
+            return np.full((self.n,), default_value, dtype=np.float32)
+
+        values = np.asarray(raw_value, dtype=np.float32).reshape(-1)
+        if values.size != self.n:
+            raise ValueError(f"episode meta '{key}' should have {self.n} values, got shape {values.shape}")
+        fallback = np.full((self.n,), default_value, dtype=np.float32)
+        return np.where(values > 0.0, values, fallback).astype(np.float32)
+
+    def _apply_episode_storage_config(self) -> None:
+        self.agent_c_bat = self._resolve_meta_vector("ess_capacity_kwh", self.c_bat)
+        self.agent_p_max = self._resolve_meta_vector("ess_power_kw", self.p_max)
+        self.agent_e_min = (self.soc_min * self.agent_c_bat).astype(np.float32)
+        self.agent_e_max = (self.soc_max * self.agent_c_bat).astype(np.float32)
+        self.e_min = self.agent_e_min.copy()
+        self.e_max = self.agent_e_max.copy()
+
     def _load_episode(self, episode_idx: int) -> None:
-        """读取一个 episode，并填充开放式 signals。"""
         episode_data = self._dataset.get_episode(episode_idx)
         raw_signals = episode_data.get("signals", {})
         if "price" not in raw_signals or "load" not in raw_signals:
-            raise KeyError("环境至少需要 signals['price'] 和 signals['load']。")
+            raise KeyError("Environment requires signals['price'] and signals['load'].")
 
         self.signals = {
             name: self._canonicalize_signal(name, signal)
@@ -142,22 +156,31 @@ class EnergyStorageEnv(gym.Env):
 
         self.ep_price = self.get_signal("price")
         self.ep_load = self.get_signal("load")
+        self.ep_pv = (
+            self.get_signal("pv")
+            if "pv" in self.signals
+            else np.zeros((self.episode_length, self.n), dtype=np.float32)
+        )
         if self.ep_price.ndim != 1:
-            raise ValueError(f"signals['price'] 应为 shape (T,)，当前为 {self.ep_price.shape}")
+            raise ValueError(f"signals['price'] must have shape (T,), got {self.ep_price.shape}")
         if self.ep_load.shape != (self.episode_length, self.n):
             raise ValueError(
-                f"signals['load'] 应为 shape {(self.episode_length, self.n)}，当前为 {self.ep_load.shape}"
+                f"signals['load'] must have shape {(self.episode_length, self.n)}, got {self.ep_load.shape}"
+            )
+        if self.ep_pv.shape != (self.episode_length, self.n):
+            raise ValueError(
+                f"signals['pv'] must have shape {(self.episode_length, self.n)}, got {self.ep_pv.shape}"
             )
 
+        self._apply_episode_storage_config()
+
     def get_signal(self, signal_name: str) -> np.ndarray:
-        """读取当前 episode 的某个 signal。"""
         if signal_name not in self.signals:
             available = sorted(self.signals)
-            raise KeyError(f"当前 episode 不包含 signal '{signal_name}'，已有 {available}")
+            raise KeyError(f"Current episode does not contain signal '{signal_name}'. Available: {available}")
         return self.signals[signal_name]
 
     def get_signal_step(self, signal_name: str, step: int | None = None):
-        """读取某个时刻的 signal 值。"""
         step = self.cur_step if step is None else int(step)
         signal = self.get_signal(signal_name)
         value = signal[step]
@@ -166,7 +189,6 @@ class EnergyStorageEnv(gym.Env):
         return np.asarray(value, dtype=np.float32)
 
     def get_signal_history(self, signal_name: str) -> np.ndarray:
-        """读取从 episode 起点到当前步的 signal 历史。"""
         signal = self.get_signal(signal_name)
         return signal[: self.cur_step + 1].copy()
 
@@ -181,7 +203,6 @@ class EnergyStorageEnv(gym.Env):
         return float(np.mean(seg))
 
     def reset(self, episode_idx: Optional[int] = None) -> dict[str, np.ndarray]:
-        """重置到一个新 episode。"""
         if episode_idx is None:
             episode_idx = int(np.random.randint(0, self.num_available_episodes))
         elif episode_idx < 0 or episode_idx >= self.num_available_episodes:
@@ -200,58 +221,37 @@ class EnergyStorageEnv(gym.Env):
         return self.obs_builder.build(self)
 
     def step(self, actions: List[np.ndarray]) -> Tuple[dict[str, np.ndarray], List[float], List[bool], Dict]:
-        """Execute one environment step.
-        执行一步环境推进。
-
-        Energy balance pipeline / 能量平衡流程:
-            1. Map agent actions [-1, 1] to requested power e_bat_req
-            2. Compute feasible charge/discharge limits from current SoC
-            3. Clip requested power to feasible range -> e_bat (executed power)
-            4. Update stored energy and SoC with efficiency losses
-            5. Compute reward from the reward function
-        """
         t = self.cur_step
 
-        # --- 1. Action mapping: [-1, 1] -> requested battery power ---
-        # 动作映射：将归一化动作转换为请求的电池充放电功率
         action_array = np.asarray(actions, dtype=np.float32).reshape(self.n, -1)[:, 0]
         action_array = np.clip(action_array, -1.0, 1.0)
-        e_bat_req = action_array * self.p_max
+        e_bat_req = action_array * self.agent_p_max
 
         soc_t = self.soc.copy().astype(np.float32)
-        e_t = soc_t * self.c_bat  # current stored energy (kWh)
+        e_t = soc_t * self.agent_c_bat
         eff = max(self.eff, 1e-6)
 
-        # --- 2. Feasibility projection: compute max charge/discharge power ---
-        # 可行性投影：根据当前储能和容量限制，计算最大充/放电功率
-        # Charge limit: can't exceed capacity (e_max), accounting for efficiency loss
-        # 充电上限 = min(额定功率, (剩余可充容量) / (效率 * 时间步长))
         p_max_chg = np.minimum(
-            self.p_max,
-            np.maximum(0.0, (self.e_max - e_t) / (eff * self.dt)),
+            self.agent_p_max,
+            np.maximum(0.0, (self.agent_e_max - e_t) / (eff * self.dt)),
         )
-        # Discharge limit: can't go below minimum (e_min), accounting for efficiency
-        # 放电上限 = min(额定功率, (可放电量) * 效率 / 时间步长)
         p_max_dis = np.minimum(
-            self.p_max,
-            np.maximum(0.0, (e_t - self.e_min) * eff / self.dt),
+            self.agent_p_max,
+            np.maximum(0.0, (e_t - self.agent_e_min) * eff / self.dt),
         )
 
-        # --- 3. Clip to feasible range ---
-        # 将请求功率裁剪到可行范围 [−p_max_dis, +p_max_chg]
         p_lower = -p_max_dis
         p_upper = p_max_chg
         e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)
 
-        # --- 4. SoC update with efficiency losses ---
-        # 储能更新：充电时损耗 (×eff)，放电时损耗 (÷eff)
-        # delta_e > 0 for charging, < 0 for discharging
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
-        e_next = np.clip(e_t + delta_e, self.e_min, self.e_max).astype(np.float32)
-        soc_next = (e_next / self.c_bat).astype(np.float32)
+        e_next = np.clip(e_t + delta_e, self.agent_e_min, self.agent_e_max).astype(np.float32)
+        soc_next = (e_next / self.agent_c_bat).astype(np.float32)
 
         price_t = float(self.get_signal_step("price", t))
         load_t = np.asarray(self.get_signal_step("load", t), dtype=np.float32)
+        pv_t = np.asarray(self.ep_pv[t], dtype=np.float32)
+        net_load_t = (load_t - pv_t).astype(np.float32)
 
         mu_t = self._future_mean_price(t)
         mu_next = self._future_mean_price(min(t + 1, self.episode_length - 1))
@@ -263,16 +263,18 @@ class EnergyStorageEnv(gym.Env):
             "soc_next": soc_next,
             "e_t": e_t,
             "e_next": e_next,
-            "e_min": float(self.e_min),
-            "e_max": float(self.e_max),
+            "e_min": self.agent_e_min.copy(),
+            "e_max": self.agent_e_max.copy(),
+            "p_max": self.agent_p_max.copy(),
             "price_t": price_t,
-            "load_t": load_t,
+            "net_load_t": net_load_t,
             "mu_t": mu_t,
             "mu_next": mu_next,
             "gamma": self.gamma,
+            "dt": self.dt,
         }
         reward, components = self.reward_fn.compute(env_state)
-        e_net = load_t + e_bat
+        grid_power = (net_load_t + e_bat).astype(np.float32)
 
         self.soc = soc_next
         self.cur_step += 1
@@ -285,17 +287,22 @@ class EnergyStorageEnv(gym.Env):
             "episode_done": done,
             "t": int(t),
             "price": float(price_t),
+            "load": load_t.astype(np.float32),
+            "pv": pv_t.astype(np.float32),
+            "base_net_load": net_load_t.astype(np.float32),
+            "net_load": grid_power.astype(np.float32),
             "e_bat_req": e_bat_req.astype(np.float32),
             "e_bat": e_bat.astype(np.float32),
             "p_lower": p_lower.astype(np.float32),
             "p_upper": p_upper.astype(np.float32),
-            "e_min": float(self.e_min),
-            "e_max": float(self.e_max),
+            "p_max": self.agent_p_max.astype(np.float32),
+            "e_min": self.agent_e_min.astype(np.float32),
+            "e_max": self.agent_e_max.astype(np.float32),
+            "battery_capacity_kwh": self.agent_c_bat.astype(np.float32),
             "soc_min": float(self.soc_min),
             "soc_max": float(self.soc_max),
             "soc_t": soc_t,
             "soc_next": soc_next,
-            "net_load": e_net.astype(np.float32),
             "available_signals": sorted(self.signals),
             **components,
             "reward": reward,

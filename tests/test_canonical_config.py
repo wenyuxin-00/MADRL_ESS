@@ -1,7 +1,9 @@
 import pytest
 
 from configs import compose_experiment_config
+from configs.profiles import summarize_experiment
 from configs.experiment_config import ExperimentConfig
+from common.torch_runtime import STRICT_REPRO_RUNTIME_MODE
 from forecast.artifacts import get_default_lstm_artifact_dir
 from models import validate_and_finalize_model_config
 
@@ -50,6 +52,29 @@ def test_compose_experiment_config_sets_default_lstm_artifact_root():
     assert cfg.forecast.type == "lstm"
     assert cfg.forecast.lstm_artifact_root == get_default_lstm_artifact_dir()
     assert cfg.forecast.lstm_model_path is None
+
+
+def test_compose_experiment_config_supports_runtime_mode_and_seed():
+    cfg = compose_experiment_config(runtime_mode=STRICT_REPRO_RUNTIME_MODE, seed=7)
+
+    assert cfg.runtime.execution_mode == STRICT_REPRO_RUNTIME_MODE
+    assert cfg.runtime.seed == 7
+
+
+def test_summarize_experiment_reports_parallel_training_budget():
+    cfg = compose_experiment_config(profile="fast_train")
+    cfg.train.train_episodes = 200
+    cfg.train.max_train_steps = None
+    cfg.train.num_envs = 12
+    cfg.env.episode_limit = 96 * 2
+
+    summary = summarize_experiment(cfg)
+
+    assert summary["train_budget_source"] == "train_episodes * episode_limit"
+    assert summary["resolved_train_steps"] == 200 * (96 * 2)
+    assert summary["parallel_rollout_iterations"] == (200 * (96 * 2)) // 12
+    assert summary["expected_completed_episodes_floor"] == 192
+    assert summary["partial_steps_per_env_at_stop"] == 128
 
 
 @pytest.mark.parametrize(

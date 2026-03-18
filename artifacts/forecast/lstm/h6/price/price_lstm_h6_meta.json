@@ -1,0 +1,10 @@
+{
+  "artifact_format": "lstm_forecaster_v2",
+  "signal_name": "price",
+  "future_horizon": 6,
+  "seq_len": 672,
+  "pred_len": 6,
+  "hidden_size": 128,
+  "num_layers": 2,
+  "dropout": 0.1
+}

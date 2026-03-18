@@ -1,4 +1,8 @@
-from madrl.notebook_utils import build_compare_controller_builders, sanity_check_runner
+from common.experiment_notebook_utils import (
+    build_compare_controller_builders,
+    get_lstm_artifact_root,
+    sanity_check_runner,
+)
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -26,3 +30,13 @@ def test_build_compare_controller_builders_supports_baselines(tmp_path):
 
     assert set(builders) == {"zero", "mpc", "classic_drl"}
     assert metadata == {}
+
+
+def test_notebook_utils_import_smoke_uses_common_location(tmp_path):
+    case_dir = make_case_dir(tmp_path, "notebook_utils_import")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    artifact_root = get_lstm_artifact_root(case_dir)
+
+    assert artifact_root.name == "lstm"
+    assert cfg.runtime.device.type == "cpu"

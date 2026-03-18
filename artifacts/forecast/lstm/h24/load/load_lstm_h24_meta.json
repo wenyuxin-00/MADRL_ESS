@@ -2,7 +2,7 @@
   "artifact_format": "lstm_forecaster_v2",
   "signal_name": "load",
   "future_horizon": 24,
-  "seq_len": 96,
+  "seq_len": 672,
   "pred_len": 24,
   "hidden_size": 64,
   "num_layers": 1,

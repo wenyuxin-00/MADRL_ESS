@@ -10,13 +10,13 @@ from controllers.base import BaseController
 class ZeroController(BaseController):
     """始终输出零动作，作为最简单的对照基线。"""
 
-    def __init__(self, action_dim_n=None):
+    def __init__(self, action_dim_n: list[int] | None = None) -> None:
         self.action_dim_n = None if action_dim_n is None else [int(dim) for dim in action_dim_n]
 
     def reset(self) -> None:
         """Zero controller 无状态，无需重置。"""
 
-    def act(self, obs, deterministic: bool = True):
+    def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
         """返回与环境兼容的全零动作列表。"""
         if self.action_dim_n is None:
             num_agents = int(np.asarray(obs["local"]).shape[-2])

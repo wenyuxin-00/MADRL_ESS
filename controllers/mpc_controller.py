@@ -21,6 +21,8 @@ See ``controllers/madrl_controller.py`` for an agent-wrapping example.
 
 from __future__ import annotations
 
+import numpy as np
+
 from controllers.base import BaseController
 
 
@@ -32,7 +34,7 @@ class MPCController(BaseController):
     def reset(self) -> None:
         """No internal state yet. Override when implementing."""
 
-    def act(self, obs, deterministic: bool = True):
+    def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
         raise NotImplementedError(
             "MPCController is a placeholder. See the module docstring for implementation guidance."
         )

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from forecast.base import Forecaster
-from forecast.lstm_model import LSTMPricePredictor
+from forecast.lstm_model import LSTMForecastModel
 
 LSTM_META_SUFFIX = "_meta.json"
 LSTM_SCALER_SUFFIX = "_scaler.pkl"
@@ -193,7 +193,7 @@ class LSTMForecaster(Forecaster):
         scaler,
         device: torch.device,
     ) -> _SignalForecasterRuntime:
-        model = LSTMPricePredictor(
+        model = LSTMForecastModel(
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,

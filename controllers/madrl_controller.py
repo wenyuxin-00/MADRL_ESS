@@ -13,7 +13,7 @@ from controllers.base import BaseController
 class MADRLController(BaseController):
     """包装训练好的 MADRL agents。"""
 
-    def __init__(self, agent_n, noise_std: float = 0.0):
+    def __init__(self, agent_n: list, noise_std: float = 0.0) -> None:
         self.agent_n = list(agent_n)
         self.noise_std = float(noise_std)
 
@@ -21,13 +21,13 @@ class MADRLController(BaseController):
         """当前前馈策略无额外状态。"""
 
     @staticmethod
-    def _format_action(action) -> np.ndarray:
+    def _format_action(action: object) -> np.ndarray:
         action_array = np.asarray(action, dtype=np.float32)
         if action_array.ndim == 0:
             return action_array.reshape(1)
         return action_array
 
-    def act(self, obs, deterministic: bool = True):
+    def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
         """运行所有 agent，并返回环境可执行的动作列表。"""
         noise_std = 0.0 if deterministic else self.noise_std
         return [

@@ -104,6 +104,7 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
+    # 仅保留给历史 price-only 单模型入口，新的主线统一走 artifact_root + target_signals。
     lstm_model_path: str | Path | None = None
 
 
@@ -149,9 +150,20 @@ class TrainConfig:
 
 @dataclass
 class RuntimeConfig:
-    """运行时派生信息。"""
+    """统一的 runtime 配置与派生信息。"""
 
     device: torch.device = field(default_factory=_default_device)
+    seed: int = 0
+    execution_mode: str = "performance"
+    require_cuda: bool = False
+    matmul_precision: str = "high"
+    allow_tf32: bool | None = None
+    cudnn_benchmark: bool | None = None
+    cudnn_deterministic: bool | None = None
+    use_deterministic_algorithms: bool | None = None
+    pin_memory: bool | None = None
+    non_blocking_transfers: bool | None = None
+    worker_rank: int = 0
     observation_schema: dict[str, tuple[int, ...]] | None = None
     observation_layout: dict[str, dict[str, object]] | None = None
     action_dim: int = 1

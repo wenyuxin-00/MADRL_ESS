@@ -2,8 +2,8 @@
   "algorithm": "MADDPG",
   "saved_episode_tag": 80,
   "episodes_completed": 80,
-  "total_steps": 15360,
-  "num_envs": 8,
-  "episode_limit": 192,
-  "save_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MADDPG"
+  "total_steps": 7680,
+  "num_envs": 4,
+  "episode_limit": 96,
+  "save_dir": "D:\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MADDPG"
 }
