@@ -10,7 +10,6 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
-import simbench as sb
 
 DEFAULT_SB_CODE = "1-LV-rural1--0-sw"
 STEPS_PER_DAY = 96
@@ -265,6 +264,7 @@ def build_prosumer_frame(
     n_agents: int = 3,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Build the aligned full-year prosumer frame from SimBench + Germany prices."""
+    import simbench as sb
     net = sb.get_simbench_net(sb_code)
     absolute_frame, load_buses, sgen_buses, prosumers = build_simbench_absolute_frame(net)
     price_frame, price_source_column = load_germany_price_frame(price_path)

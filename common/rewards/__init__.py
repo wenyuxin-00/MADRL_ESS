@@ -19,11 +19,13 @@ for a full implementation example.
 
 from common.rewards.base import RewardFn
 from common.rewards.composite import CompositeReward
+from common.rewards.grid_composite import GridCompositeReward
 from common.rewards.sparse import SparseArbitrageReward
 
 REWARD_REGISTRY: dict[str, type[RewardFn]] = {
-    "composite": CompositeReward,
-    "sparse":    SparseArbitrageReward,
+    "composite":       CompositeReward,
+    "sparse":          SparseArbitrageReward,
+    "grid_composite":  GridCompositeReward,
 }
 
 

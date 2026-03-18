@@ -10,7 +10,19 @@
       "Bash(find /d/GithubProject/MADRL_ESS/common -name \"*.py\" -type f ! -path \"*/__pycache__/*\" -exec wc -l {} +)",
       "Bash(wc -l d:GithubProjectMADRL_ESSenvshems_env.py d:GithubProjectMADRL_ESSdatasets*.py d:GithubProjectMADRL_ESScontrollers*.py d:GithubProjectMADRL_ESSmodels*.py d:GithubProjectMADRL_ESScommonrewards*.py d:GithubProjectMADRL_ESSrunnerstrain_runner.py d:GithubProjectMADRL_ESScommonsubproc_vec_env.py)",
       "Bash(find d:/GithubProject/MADRL_ESS -maxdepth 1 -name README* -o -name requirements* -o -name setup.py -o -name pyproject.toml)",
-      "Bash(find d:/GithubProject/MADRL_ESS -maxdepth 1 -name *.md -o -name *.txt)"
+      "Bash(find d:/GithubProject/MADRL_ESS -maxdepth 1 -name *.md -o -name *.txt)",
+      "Bash(python -m pytest tests/test_encoding_hygiene.py tests/test_grid_reward.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_grid_core.py -v -m \"not slow\" --tb=short)",
+      "Bash(python -m pytest tests/test_grid_env.py -v --tb=short)",
+      "Bash(python -c \"import gym\")",
+      "Bash(python -c \"import gymnasium; print\\(gymnasium.__version__\\)\")",
+      "Bash(python -c \"import gym; print\\(gym.__version__\\)\")",
+      "Bash(pip list:*)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/python.exe -c \"import gym; print\\(gym.__version__\\)\")",
+      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/test_grid_env.py -v --tb=short)",
+      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/ -v -m \"not slow\" --tb=short)",
+      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/ -v -m \"not slow\" --tb=short --ignore=tests/test_entrypoint_smoke.py --ignore=tests/test_simbench_data.py)"
     ]
   }
 }

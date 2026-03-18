@@ -40,6 +40,22 @@ def build_env(
         obs_builder = build_obs_builder(cfg)
 
     env_cls = get_env_cls(cfg.env.env_type)
+
+    if cfg.env.env_type == "grid_pf":
+        from grid.core.grid_core import GridCore
+        from grid.config.grid_config import build_agent_deployments
+
+        grid_core = GridCore(build_agent_deployments(cfg), cfg.grid)
+        return env_cls(
+            cfg,
+            mode=mode,
+            dataset=dataset,
+            reward_fn=reward_fn,
+            forecaster=forecaster,
+            obs_builder=obs_builder,
+            grid_core=grid_core,
+        )
+
     return env_cls(
         cfg,
         mode=mode,

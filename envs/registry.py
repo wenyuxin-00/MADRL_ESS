@@ -15,10 +15,12 @@ How to add a new environment / 如何添加新环境:
 
 from __future__ import annotations
 
+from envs.grid_env import GridEnv
 from envs.hems_env import EnergyStorageEnv
 
 ENV_REGISTRY: dict[str, type] = {
     "energy_storage": EnergyStorageEnv,
+    "grid_pf":        GridEnv,
 }
 
 

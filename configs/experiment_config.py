@@ -170,6 +170,20 @@ class RuntimeConfig:
 
 
 @dataclass
+class GridConfig:
+    """配电网潮流约束配置。"""
+
+    sb_code: str = "1-LV-rural1--0-sw"
+    pf_solver: str = "nr"                                    # "nr"=Newton-Raphson, "dc"=线性化
+    agent_bus_ids: list[int] = field(default_factory=lambda: [10, 6, 12])
+    v_min_pu: float = 0.95                                   # 节点电压下限 (pu)
+    v_max_pu: float = 1.05                                   # 节点电压上限 (pu)
+    line_max_loading_pct: float = 100.0                      # 线路热极限 (%)
+    w_v_pen: float = 10.0                                    # 电压越界 penalty 权重
+    w_l_pen: float = 5.0                                     # 线路越载 penalty 权重
+
+
+@dataclass
 class ExperimentConfig:
     """实验全配置。"""
 
@@ -182,3 +196,4 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    grid: GridConfig = field(default_factory=GridConfig)
