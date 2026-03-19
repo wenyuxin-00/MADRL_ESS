@@ -42,6 +42,9 @@ def build_dataset(cfg, mode: str = "train"):
     else:
         csv_name = "train_prices.csv" if mode == "train" else "test_prices.csv"
     data_path = data_dir / csv_name
+    # Fallback: data files may live in data/raw/ after directory restructuring.
+    if not data_path.exists() and (data_dir / "raw" / csv_name).exists():
+        data_path = data_dir / "raw" / csv_name
 
     build_kwargs = {
         "data_path": data_path,
@@ -49,6 +52,9 @@ def build_dataset(cfg, mode: str = "train"):
         "n_agents": cfg.env.num_agents,
     }
     if dataset_type == "csv_prosumer":
-        build_kwargs["metadata_path"] = data_dir / "simbench_2016_metadata.json"
+        metadata_path = data_dir / "simbench_2016_metadata.json"
+        if not metadata_path.exists() and (data_dir / "raw" / "simbench_2016_metadata.json").exists():
+            metadata_path = data_dir / "raw" / "simbench_2016_metadata.json"
+        build_kwargs["metadata_path"] = metadata_path
 
     return dataset_cls(**build_kwargs)

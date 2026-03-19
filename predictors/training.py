@@ -277,10 +277,14 @@ def _signal_columns_from_header(columns: list[str], signal_name: str) -> list[st
 
 
 def _candidate_signal_file_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
+    raw_dir = data_dir / "raw"
     return [
         (data_dir / "simbench_2016_train.csv", data_dir / "simbench_2016_test.csv"),
+        (raw_dir / "simbench_2016_train.csv", raw_dir / "simbench_2016_test.csv"),
         (data_dir / "simbench_train.csv", data_dir / "simbench_test.csv"),
+        (raw_dir / "simbench_train.csv", raw_dir / "simbench_test.csv"),
         (data_dir / "train_prices.csv", data_dir / "test_prices.csv"),
+        (raw_dir / "train_prices.csv", raw_dir / "test_prices.csv"),
     ]
 
 

@@ -4,7 +4,7 @@ Thumbs.db
 *.swp
 desktop.ini
 
-# --- 日志与编译输出 ---
+# --- 日志与编译输出 (深度学习增强) ---
 node_modules/
 dist/
 build/
@@ -14,6 +14,11 @@ out/
 *.log
 *.tmp
 *.temp
+*.png
+*.pt
+*.pth
+# 忽略 TensorBoard 日志
+events.out.tfevents.*
 
 # --- 环境变量与私密信息 ---
 .env
@@ -21,7 +26,6 @@ out/
 .venv
 venv/
 env/
-*.pth
 __pycache__/
 *.pyc
 
@@ -41,10 +45,27 @@ __pycache__/
 *.exe
 *.dll
 *.so
+# 忽略 GitNexus 索引文件夹和元数据
+.gitnexus/
 .gitnexus
+
+# --- 数据集 (建议忽略大文件) ---
+# *.csv
+# *.xlsx
+# data/raw/
+# data/processed/
 
 # --- Notebook / test runtime noise ---
 .jupyter_runtime/
 tests/.tmp/
+tests/.tmp_*
 test_tmp_cases/
 runs/
+.ipynb_checkpoints/
+
+# --- 自动生成的文件与模型人工制品 (Artifacts) ---
+full_project_code.txt
+execution_flows.json
+_cleanup.py
+# 忽略整个 artifacts 文件夹，这是最稳妥的
+artifacts/
