@@ -1,9 +1,6 @@
 """评估器。
 
-在测试集上评估训练好的控制器性能，收集 episode 统计数据。
-
-主要函数:
-    evaluate_controller -- 评估控制器性能
+在测试集上评估控制器的表现，并按需记录 episode 轨迹。
 """
 
 from __future__ import annotations
@@ -21,21 +18,24 @@ def evaluate_controller(
     episode_indices: list[int] | None = None,
     record_history: bool = True,
 ):
-    """在单个环境实例上评估任意 controller。"""
+    """在单个环境实例上评估任意控制器。"""
     if episode_indices is not None:
         n_episodes = len(episode_indices)
 
+    # 读取奖励元信息，便于轨迹里按奖励子项记录。
     reward_metas = getattr(env.reward_fn, "component_meta", [])
     histories = []
     episode_rewards = []
 
     for episode_offset in range(int(n_episodes)):
+        # 如果显式指定了 episode 索引，就按指定顺序评估。
         episode_idx = None if episode_indices is None else episode_indices[episode_offset]
         obs_n = env.reset(episode_idx=episode_idx)
         controller.reset()
 
         history = None
         if record_history:
+            # 初始化当前 episode 的轨迹容器。
             history = init_episode_record(
                 n_agents=env.n,
                 init_soc=float(env.init_soc),
@@ -45,21 +45,26 @@ def evaluate_controller(
         done = False
         episode_reward = 0.0
         while not done:
+            # 控制器根据观测选择动作。
             action_n = controller.act(obs_n, deterministic=deterministic)
             obs_n, r_n, done_n, info = env.step(action_n)
 
+            # 将所有智能体的当前步奖励求和，得到这一步的总奖励。
             step_total = float(np.sum(np.asarray(r_n, dtype=np.float32)))
             episode_reward += step_total
 
             if history is not None:
+                # 记录环境 info 和奖励拆解结果。
                 append_step_record(history, info, step_total=step_total, reward_metas=reward_metas)
 
+            # 优先用环境自身的 episode_done 标记，不存在时再回退到 all(done_n)。
             done = bool(info.get("episode_done", False) or all(done_n))
 
         episode_rewards.append(float(episode_reward))
         if history is not None:
             histories.append(history)
 
+    # 汇总? episode 的统计指标。
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     results = {
         "episode_rewards": episode_rewards,

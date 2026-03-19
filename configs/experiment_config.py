@@ -78,6 +78,7 @@ class ModelConfig:
     max_action: float = 1.0
     use_orthogonal_init: bool = True
     use_grad_clip: bool = True
+    grad_clip_norm: float = 10.0                                 # 梯度裁剪阈值（max_norm）
     transformer_num_heads: int = 4
     transformer_num_layers: int = 1
     graph_num_layers: int = 2

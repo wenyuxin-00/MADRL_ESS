@@ -70,6 +70,7 @@ def is_environment_dir(path: Path) -> bool:
     if path.name in IGNORE_DIRS:
         return True
 
+    # 仅按目录名过滤不够稳妥，所以再看几个“像虚拟环境/依赖目录”的标志文件。
     return (
         (path / "pyvenv.cfg").exists()
         or (path / "conda-meta").is_dir()
@@ -80,18 +81,21 @@ def is_environment_dir(path: Path) -> bool:
 
 
 def should_export_file(path: Path) -> bool:
+    # 避免把上一次导出的总文件再次读进来，造成内容无限膨胀。
     if path.name == OUTPUT_FILE.name:
         return False
     return path.suffix.lower() in ALLOWED_EXTENSIONS
 
 
 def normalize_source(source: str | list[str]) -> str:
+    # Jupyter 的 `source` 可能是字符串，也可能是按行拆开的列表，这里统一成字符串。
     if isinstance(source, list):
         return "".join(source)
     return source
 
 
 def read_export_content(path: Path) -> str:
+    # 普通文本文件直接读；Notebook 需要把每个 cell 展平成可阅读的文本结构。
     if path.suffix.lower() != ".ipynb":
         return path.read_text(encoding="utf-8")
 
@@ -102,6 +106,7 @@ def read_export_content(path: Path) -> str:
     for index, cell in enumerate(cells, start=1):
         source = normalize_source(cell.get("source", ""))
         if not source.strip():
+            # 空 cell 没有信息量，跳过后导出的总文件会更紧凑。
             continue
 
         cell_type = cell.get("cell_type", "unknown").upper()
@@ -119,6 +124,7 @@ def export_project_code() -> None:
     with OUTPUT_FILE.open("w", encoding="utf-8") as outfile:
         for root, dirs, files in os.walk(PROJECT_ROOT):
             root_path = Path(root)
+            # 原地修改 `dirs` 是 `os.walk` 官方支持的剪枝方式。
             dirs[:] = sorted(
                 [directory for directory in dirs if not is_environment_dir(root_path / directory)]
             )
@@ -136,6 +142,7 @@ def export_project_code() -> None:
                 try:
                     outfile.write(read_export_content(file_path))
                 except Exception as exc:  # pragma: no cover - developer utility fallback
+                    # 这个脚本面向开发辅助，个别文件失败时优先继续导出剩余内容。
                     outfile.write(f"Error reading file: {exc}\n")
 
     message = f"All project code has been exported to {OUTPUT_FILE.name}"

@@ -1,9 +1,13 @@
 """电网拓扑与约束配置。
 
-定义电网 SimBench 编码、求解器类型、电压约束等参数。
+定义电网 SimBench 编码、求解器类型、电压约束等参数，
+以及智能体在电网中的部署位置和设备参数。
 
 主要类:
-    GridConfig -- 电网配置数据类
+    AgentDeployment -- 单个智能体的物理部署参数
+
+主要函数:
+    build_agent_deployments -- 从实验配置解析智能体部署列表
 """
 
 from __future__ import annotations
@@ -17,55 +21,42 @@ if TYPE_CHECKING:
 
 @dataclass
 class AgentDeployment:
-    """Physical placement and device parameters for one RL agent.
+    """单个强化学习智能体的物理部署位置和设备参数。
 
-    Attributes
-    ----------
-    bus_id:
-        Pandapower bus index where this agent's battery is connected.
-    battery_capacity_kwh:
-        Usable battery energy capacity in kWh.
-    battery_power_kw:
-        Maximum charge/discharge power in kW (symmetric).
-    init_soc:
-        Initial state-of-charge at the start of each episode (fraction, 0–1).
-    soc_min:
-        Minimum allowed SoC (fraction).
-    soc_max:
-        Maximum allowed SoC (fraction).
-    efficiency:
-        Round-trip efficiency (applied per half-trip, i.e. sqrt convention is
-        *not* used — same as ``EnergyStorageEnv``).
+    属性:
+        bus_id: 该智能体电池连接的 pandapower 母线索引
+        battery_capacity_kwh: 可用电池能量容量（kWh）
+        battery_power_kw: 最大充放电功率（kW，对称式）
+        init_soc: 每个 episode 开始时的初始荷电状态（0--1 之间的比例值）
+        soc_min: 允许的最低 SoC（比例值）
+        soc_max: 允许的最高 SoC（比例值）
+        efficiency: 充放电效率（按半程计算，即非 sqrt 约定，
+                    与 EnergyStorageEnv 保持一致）
     """
 
-    bus_id: int
-    battery_capacity_kwh: float
-    battery_power_kw: float
-    init_soc: float = 0.5
-    soc_min: float = 0.05
-    soc_max: float = 0.95
-    efficiency: float = 0.95
+    bus_id: int                         # 母线索引
+    battery_capacity_kwh: float         # 电池容量（kWh）
+    battery_power_kw: float             # 最大充放电功率（kW）
+    init_soc: float = 0.5              # 初始 SoC
+    soc_min: float = 0.05             # 最低 SoC
+    soc_max: float = 0.95             # 最高 SoC
+    efficiency: float = 0.95          # 充放电效率
 
 
 def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
-    """Resolve ``AgentDeployment`` list from the experiment config.
+    """从实验配置解析智能体部署列表。
 
-    If ``cfg.grid.agent_bus_ids`` is set, those bus IDs are used with
-    per-agent device parameters derived from the dataset metadata (if
-    available) or from ``cfg.env`` defaults.
+    若 cfg.grid.agent_bus_ids 已设置，则使用指定的母线 ID，
+    设备参数取自数据集元数据（如可用）或 cfg.env 中的默认值。
+    若未配置自定义 ID，则回退到 "1-LV-rural1--0-sw" 的
+    Phase-1 固定拓扑预设。
 
-    Falls back to the Phase-1 fixed topology for
-    ``1-LV-rural1--0-sw`` when no custom IDs are configured.
+    参数:
+        cfg: 完整的 ExperimentConfig 实验配置实例
 
-    Parameters
-    ----------
-    cfg:
-        Full ``ExperimentConfig`` instance.
-
-    Returns
-    -------
-    list[AgentDeployment]
-        One entry per ``cfg.env.num_agents``.
+    返回:
+        list[AgentDeployment]: 每个智能体一个条目，
+                               总数为 cfg.env.num_agents
     """
     from envs.grid.topology.rural1_fixed import RURAL1_AGENT_DEPLOYMENTS
 
@@ -73,10 +64,10 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     bus_ids: list[int] = list(cfg.grid.agent_bus_ids)
 
     if not bus_ids:
-        # No IDs in config — use Phase-1 defaults.
+        # 配置中未指定母线 ID -- 使用 Phase-1 默认部署
         return RURAL1_AGENT_DEPLOYMENTS[:n]
 
-    # Build deployments from config + env defaults.
+    # 从配置和环境默认值构建部署列表
     c_bat = float(cfg.env.battery_capacity)
     p_max = float(cfg.env.max_charge_rate)
     init_soc = float(cfg.env.init_soc)

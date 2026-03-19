@@ -15,17 +15,17 @@ import numpy as np
 class ComponentMeta:
     """奖励分量的元数据，驱动 history 动态初始化和画图自适应。
 
-    Attributes:
-        key:   对应 info dict 的键名，e.g. "r_inc"
-        label: 子图标题，e.g. "+ r_inc (incremental cost)"
-        color: 子图颜色，e.g. "green"
+    属性:
+        key:   对应 info dict 的键名，如 "r_inc"
+        label: 子图标题，如 "+ r_inc (incremental cost)"
+        color: 子图颜色，如 "green"
         sign:  +1 或 -1（该分量在 total 中的贡献符号，用于正确累加历史）
                +1 → total 中是加号；-1 → total 中是减号
     """
-    key: str
-    label: str
-    color: str
-    sign: int  # +1 or -1
+    key: str       # info 字典中的键名
+    label: str     # 可视化子图标题
+    color: str     # 可视化子图颜色
+    sign: int      # 在总奖励中的符号：+1 表示正贡献，-1 表示负贡献（惩罚项）
 
 
 class RewardFn(ABC):

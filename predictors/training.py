@@ -49,7 +49,7 @@ SIGNAL_TRAINING_OVERRIDE_FIELDS = {
 
 @dataclass(frozen=True)
 class SignalCsvSource:
-    """Resolved train/test source files for one signal."""
+    """保存单个信号对应的训练集/测试集 CSV 来源信息。"""
 
     signal_name: str
     train_path: Path
@@ -148,7 +148,7 @@ def resolve_signal_training_settings(
 
 
 def forecast_artifact_root(cfg) -> Path:
-    """Return the configured forecast artifact root."""
+    """返回当前配置的 forecast artifact 根目录。"""
     root = cfg.forecast.lstm_artifact_root
     if root is None:
         return get_default_lstm_artifact_dir()
@@ -289,10 +289,12 @@ def _candidate_signal_file_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
 
 
 def resolve_signal_csv_source(data_dir: str | Path, signal_name: str) -> SignalCsvSource | None:
-    """Resolve the most suitable train/test CSV pair for one signal."""
+    """为单个信号选出最合适的训练/测试 CSV 文件对。"""
     data_dir = Path(data_dir)
     signal_name = _normalize_signal_name(signal_name)
 
+    # 候选文件名可能因数据组织方式不同而有多种版本，
+    # 这里逐个检查，找到“真实存在且列名匹配”的那一对。
     for train_path, test_path in _candidate_signal_file_pairs(data_dir):
         if not train_path.exists() or not test_path.exists():
             continue
@@ -316,8 +318,9 @@ def resolve_signal_csv_source(data_dir: str | Path, signal_name: str) -> SignalC
 
 
 def load_signal_frame(csv_path: str | Path, signal_name: str) -> tuple[pd.DataFrame, tuple[str, ...]]:
-    """Load one CSV and select the columns belonging to one signal."""
+    """读取一个 CSV，并挑出属于指定信号的列。"""
     csv_path = Path(csv_path)
+    # 先整表读入，因为我们需要根据列名判断这个 CSV 是否真的包含该信号。
     df = pd.read_csv(csv_path)
     value_columns = tuple(_signal_columns_from_header(df.columns.tolist(), signal_name))
     if not value_columns:
@@ -326,9 +329,10 @@ def load_signal_frame(csv_path: str | Path, signal_name: str) -> tuple[pd.DataFr
 
 
 def load_signal_matrix(csv_path: str | Path, signal_name: str) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
-    """Load one signal matrix from CSV."""
+    """从 CSV 中读取指定信号的数值矩阵。"""
     df, value_columns = load_signal_frame(csv_path, signal_name)
     values = df.loc[:, list(value_columns)].to_numpy(dtype=np.float32)
+    # 只有一列时压成一维，方便后续统一按“单变量序列”处理。
     if values.ndim == 2 and values.shape[1] == 1:
         values = values.reshape(-1)
     return df, values, value_columns
@@ -347,7 +351,7 @@ def load_signal_segments(
     *,
     drop_warmup: bool = False,
 ) -> tuple[pd.DataFrame, list[np.ndarray], tuple[str, ...]]:
-    """Load one signal CSV and split it into contiguous, segment-safe arrays."""
+    """读取信号 CSV，并按连续 segment 切成安全的数组列表。"""
     frame, value_columns = load_signal_frame(csv_path, signal_name)
     if drop_warmup and "is_warmup" in frame.columns:
         frame = frame.loc[~frame["is_warmup"].astype(bool)].copy()
@@ -376,7 +380,7 @@ def load_signal_segments(
 
 
 def fit_signal_scaler(values: np.ndarray | list[np.ndarray]) -> StandardScaler:
-    """Fit a scalar StandardScaler on all values of one signal family."""
+    """在一类信号的所有数值上拟合 StandardScaler。"""
     if isinstance(values, list):
         flattened = np.concatenate([np.asarray(chunk, dtype=np.float32).reshape(-1) for chunk in values], axis=0)
     else:
@@ -388,7 +392,7 @@ def fit_signal_scaler(values: np.ndarray | list[np.ndarray]) -> StandardScaler:
 
 
 def summarize_signal_values(values: np.ndarray | list[np.ndarray]) -> dict[str, float]:
-    """Return a compact numeric summary for debug logging."""
+    """返回便于调试日志查看的紧凑统计量。"""
     if isinstance(values, list):
         flattened = np.concatenate([np.asarray(chunk, dtype=np.float32).reshape(-1) for chunk in values], axis=0)
     else:
@@ -407,11 +411,13 @@ def temporal_split_matrix(
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
 ) -> dict[str, np.ndarray]:
-    """Temporal train/val/test split for ``(T, D)`` matrices."""
+    """对 ``(T, D)`` 形状的时序矩阵做按时间顺序的 train/val/test 切分。"""
     values = np.asarray(values, dtype=np.float32)
     if values.ndim == 1:
         values = values.reshape(-1, 1)
 
+    # 这里不随机打乱样本，而是严格按时间顺序切分，
+    # 这对时序预测很重要，否则会产生信息泄漏。
     total_steps = values.shape[0]
     train_end = int(total_steps * train_ratio)
     val_end = int(total_steps * (train_ratio + val_ratio))
@@ -434,7 +440,7 @@ def build_supervised_windows_from_matrix(
     pred_len: int,
     scaler: object | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Convert a multi-column signal matrix into pooled univariate windows."""
+    """把多列信号矩阵转成可用于监督学习的滑动窗口样本。"""
     values = _reshape_signal_values(values)
 
     total_window = int(seq_len) + int(pred_len)
@@ -445,6 +451,8 @@ def build_supervised_windows_from_matrix(
 
     x_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
+    # 对每一列单独生成窗口，最后再汇总，
+    # 这样可以把多变量矩阵视为多条可训练的序列来利用。
     for column_idx in range(values.shape[1]):
         series = values[:, column_idx].astype(np.float32)
         if scaler is not None:
@@ -464,11 +472,13 @@ def build_supervised_windows_from_segments(
     pred_len: int,
     scaler: object | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build pooled windows from a list of contiguous signal segments."""
+    """从连续信号 segment 列表中构造滑动窗口样本。"""
     x_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
     skipped_segments = 0
 
+    # 每个 segment 都表示一段连续时间序列，
+    # 不能跨 segment 拼窗口，否则会把断点两边的数据错当成连续规律。
     for segment in segments:
         segment_matrix = _reshape_signal_values(segment)
         if segment_matrix.shape[0] < int(seq_len) + int(pred_len):
@@ -502,7 +512,7 @@ def temporal_split_segments(
     seq_len: int,
     pred_len: int,
 ) -> dict[str, object]:
-    """Temporal split performed independently inside each contiguous segment."""
+    """在每个连续 segment 内部独立执行时间切分。"""
     min_window = int(seq_len) + int(pred_len)
     if train_ratio <= 0.0 or val_ratio <= 0.0 or train_ratio + val_ratio >= 1.0:
         raise ValueError("Expected 0 < train_ratio, val_ratio and train_ratio + val_ratio < 1.")
@@ -559,7 +569,7 @@ def make_matrix_loader(
     device: str | torch.device | TorchRuntimeState = "cpu",
     pin_memory: bool | None = None,
 ) -> DataLoader:
-    """Create a DataLoader from a signal matrix."""
+    """根据信号数据构建可迭代的 DataLoader。"""
     if isinstance(values, list):
         x, y = build_supervised_windows_from_segments(
             values,
@@ -574,6 +584,7 @@ def make_matrix_loader(
             pred_len=pred_len,
             scaler=scaler,
         )
+    # DataLoader 运行前，要先把 numpy 样本包装成 PyTorch Dataset。
     dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
     resolved_device = resolve_device(device)
     return DataLoader(
@@ -595,7 +606,8 @@ def train_lstm_model(
     show_progress: bool = False,
     progress_label: str | None = None,
 ) -> dict[str, object]:
-    """Train one LSTM and return the best state dict plus loss curves."""
+    """训练一个 LSTM，并返回最佳参数以及 loss 曲线。"""
+    # 这里统一解析 CPU/CUDA 运行态，避免训练主循环里到处写设备分支。
     runtime_state = configure_torch_runtime(device)
     resolved_device = runtime_state.device
     model = model.to(resolved_device)
@@ -605,6 +617,8 @@ def train_lstm_model(
     grad_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     non_blocking = runtime_state.non_blocking_transfers and use_amp
 
+    # 训练过程中始终保留验证集表现最好的那份参数，
+    # 这样可以减少后期过拟合对最终模型的影响。
     best_val_loss = float("inf")
     best_state_dict = copy.deepcopy(model.state_dict())
     history = {"train_loss": [], "val_loss": []}
@@ -1351,7 +1365,7 @@ def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> d
 
 
 def _plot_evaluation_curve(axis, evaluation: SignalForecastEvaluation) -> None:
-    """Draw one evaluation panel using English labels to avoid font warnings."""
+    """绘制单个评估子图；图上标签仍保持英文，避免部分环境出现字体警告。"""
     if evaluation.target.ndim == 1:
         target_curve = evaluation.target
         prediction_curve = evaluation.prediction
@@ -1361,6 +1375,7 @@ def _plot_evaluation_curve(axis, evaluation: SignalForecastEvaluation) -> None:
         prediction_curve = evaluation.prediction.sum(axis=0)
         ylabel = f"{evaluation.signal_name} (sum)"
 
+    # 这里的标题仍使用英文，是为了降低 matplotlib 在部分 Windows 环境下的中文字体警告。
     mode_title = {
         "online_aligned": "Online aligned forecast",
         "open_loop": "Open-loop stress test",
@@ -1380,7 +1395,7 @@ def plot_weekly_forecasts(
     *,
     save_path: str | Path,
 ) -> Path:
-    """Save one weekly comparison figure for several signals."""
+    """为多个信号保存一张按周对比图。"""
     if not evaluations:
         raise ValueError("plot_weekly_forecasts requires at least one evaluation result.")
 
@@ -1410,7 +1425,7 @@ def plot_signal_training_report(
     *,
     figsize: tuple[float, float] = (18.0, 4.8),
 ):
-    """Draw loss, online-aligned forecast, and optional open-loop stress test."""
+    """绘制 loss、对齐式在线预测，以及可选的开环 stress test 结果。"""
     history = result["training"]["history"]
     evaluation = result["evaluation"]
     open_loop_evaluation = result.get("open_loop_evaluation")

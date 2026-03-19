@@ -14,13 +14,13 @@ import numpy as np
 
 
 class Forecaster(ABC):
-    """Base class for observation-side forecasters.
+    """观测侧预测器的抽象基类。
 
-    Forecasters only replace the future-looking observation windows. They do
-    not change the environment's ground-truth reward computation.
+    预测器仅替换观测中的前瞻窗口部分，不改变环境的真实奖励计算。
 
-    The contract supports both shared 1-D signals such as ``price`` and
-    per-agent 2-D signals such as ``load`` / ``pv`` stored as ``(T, N)``.
+    接口约定同时支持:
+    - 共享的一维信号（如 ``price``），形状为 ``(T,)``
+    - 每智能体的二维信号（如 ``load`` / ``pv``），形状为 ``(T, N)``
     """
 
     @abstractmethod
@@ -31,23 +31,21 @@ class Forecaster(ABC):
         *,
         signal_name: str = "price",
     ) -> np.ndarray:
-        """Return a look-ahead window for one signal.
+        """对单个信号返回前瞻预测窗口。
 
-        Args:
-            history: Observed signal history up to the current step.
-                Shared signals use shape ``(t + 1,)``.
-                Per-agent signals use shape ``(t + 1, n_agents)``.
-            horizon: Number of values to return. The current value is included
-                in the first position, so ``result[..., 0]`` always represents
-                the current step.
-            signal_name: Canonical signal key such as ``price``, ``load``, or
-                ``pv``.
+        参数:
+            history: 截至当前时刻的观测信号历史。
+                共享信号形状为 ``(t + 1,)``，
+                每智能体信号形状为 ``(t + 1, n_agents)``。
+            horizon: 需要返回的预测值数量。第一个位置包含当前值，
+                即 ``result[..., 0]`` 始终代表当前时刻。
+            signal_name: 信号的标准名称，如 ``price``、``load`` 或 ``pv``。
 
-        Returns:
-            ``(horizon,)`` for shared signals or ``(n_agents, horizon)`` for
-            per-agent signals.
+        返回:
+            共享信号返回形状 ``(horizon,)``，
+            每智能体信号返回形状 ``(n_agents, horizon)``。
         """
 
     def reset(self) -> None:
-        """Reset optional episode-local state."""
+        """重置可选的回合内部状态（每个新回合开始时调用）。"""
         return None

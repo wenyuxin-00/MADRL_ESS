@@ -15,27 +15,36 @@ import numpy as np
 
 
 class BaseController(ABC):
-    """Minimal interface for all evaluation controllers.
-    所有评估控制器都要实现的最小接口。
+    """所有评估控制器的最小统一接口（抽象基类）。
+
+    所有控制器（MADRL、MPC、经典 DRL 等）必须继承此类，
+    并实现 ``reset`` 与 ``act`` 两个抽象方法，以便在统一的
+    评估流程中被调用。
+
+    注意:
+        子类在实现 ``act`` 时，返回的动作列表长度应与环境中
+        智能体数量一致，每个元素为该智能体的动作向量。
     """
 
     @abstractmethod
     def reset(self) -> None:
-        """Reset internal state at the start of a new episode.
-        在新 episode 开始前重置内部状态。
+        """在新 episode 开始前重置控制器内部状态。
+
+        注意:
+            无状态的控制器（如 ZeroController）可以保持空实现。
         """
 
     @abstractmethod
     def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
-        """Return environment-executable actions given structured observations.
-        根据结构化观测输出环境可直接执行的动作。
+        """根据结构化观测输出环境可直接执行的动作。
 
-        Args:
-            obs: Structured observation dict from the environment, with keys
-                like ``"local"``, ``"price_seq"``, ``"adjacency"``, etc.
-            deterministic: If True, suppress exploration noise.
+        参数:
+            obs: 环境返回的结构化观测字典，包含键如
+                ``"local"``（局部观测）、``"price_seq"``（电价序列）、
+                ``"adjacency"``（邻接矩阵）等。
+            deterministic: 若为 True，则抑制探索噪声，使用确定性策略。
 
-        Returns:
-            list[np.ndarray]: One action array per agent, each of shape
-            ``(action_dim,)`` with values in ``[-1, 1]``.
+        返回:
+            list[np.ndarray]: 每个智能体一个动作数组，形状为
+            ``(action_dim,)``，取值范围 ``[-1, 1]``。
         """

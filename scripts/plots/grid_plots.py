@@ -21,7 +21,7 @@ def plot_node_voltages(
     grid_history: dict,
     v_min: float = 0.95,
     v_max: float = 1.05,
-    title: str = "节点电压 (pu)",
+    title: str = "Node Voltage (pu)",
     agent_labels: list[str] | None = None,
 ) -> None:
     """Plot per-agent bus voltages over one episode.
@@ -67,8 +67,8 @@ def plot_node_voltages(
     ax.axhline(v_max, color="red", linestyle="--", linewidth=0.9, label=f"v_max={v_max}")
     ax.fill_between(ts, v_min, v_max, alpha=0.06, color="green", label="Safe band")
 
-    ax.set_xlabel("时间 (h)")
-    ax.set_ylabel("电压 (pu)")
+    ax.set_xlabel("Time (h)")
+    ax.set_ylabel("Voltage (pu)")
     ax.set_title(title)
     ax.legend(loc="lower right", fontsize=8, ncol=min(n_agents + 1, 4))
     ax.grid(True, alpha=0.3)
@@ -143,8 +143,8 @@ def plot_battery_and_grid(
         ax_v.axhline(v_max, color="red", linestyle="--", linewidth=0.8)
         ax_v.fill_between(ts, v_min, v_max, alpha=0.06, color="green")
         ax_v.legend(fontsize=7, ncol=min(n_agents, 4))
-    ax_v.set_ylabel("电压 (pu)")
-    ax_v.set_title(f"{title_prefix}节点电压" if title_prefix else "节点电压")
+    ax_v.set_ylabel("Voltage (pu)")
+    ax_v.set_title(f"{title_prefix}Node Voltage" if title_prefix else "Node Voltage")
     ax_v.grid(True, alpha=0.3)
 
     # ------------------------------------------------------------------
@@ -184,7 +184,7 @@ def plot_battery_and_grid(
         h2, l2 = ax2.get_legend_handles_labels()
         ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper right")
 
-    axes[-1].set_xlabel("时间 (h)")
+    axes[-1].set_xlabel("Time (h)")
     fig.tight_layout()
     plt.show()
 
@@ -196,7 +196,7 @@ def plot_battery_and_grid(
 
 def plot_grid_constraint_summary(
     grid_histories: list[dict],
-    title: str = "每 episode 约束违反统计",
+    title: str = "Constraint Violation Summary per Episode",
 ) -> None:
     """Bar chart showing voltage and line violation counts per episode.
 
@@ -217,11 +217,11 @@ def plot_grid_constraint_summary(
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(max(6, n_eps * 0.8), 3))
-    ax.bar(x - width / 2, v_counts, width, label="电压越界步数", color="tab:red", alpha=0.8)
-    ax.bar(x + width / 2, l_counts, width, label="线路越载步数", color="tab:orange", alpha=0.8)
+    ax.bar(x - width / 2, v_counts, width, label="Voltage Violation Steps", color="tab:red", alpha=0.8)
+    ax.bar(x + width / 2, l_counts, width, label="Line Overload Steps", color="tab:orange", alpha=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels([f"Ep {i}" for i in range(n_eps)])
-    ax.set_ylabel("违规步数")
+    ax.set_ylabel("Violation Steps")
     ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3, axis="y")

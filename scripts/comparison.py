@@ -20,11 +20,25 @@ def evaluate_controller_suite(
     n_episodes: int = 1,
     deterministic: bool = True,
 ) -> list[dict]:
-    """逐个评估 controller，并优雅处理占位符或错误。"""
+    """逐个评估多个控制器，并优雅处理占位符或错误。
+
+    对每个控制器独立创建环境实例，运行评估后关闭。
+    未实现的控制器或运行出错的控制器会被标记状态而非中断流程。
+
+    参数:
+        env_factory: 无参可调用对象，每次调用返回一个新环境实例。
+        controller_builders: 控制器名称到构建函数的映射字典。
+        n_episodes: 每个控制器评估的 episode 数量。
+        deterministic: 是否使用确定性策略。
+
+    返回:
+        评估记录列表，每个记录包含 controller 名称、状态和评估结果。
+    """
     records = []
     for name, build_controller in controller_builders.items():
         env = env_factory()
         try:
+            # 构建控制器并执行评估
             controller = build_controller()
             result = evaluate_controller(
                 env=env,
@@ -43,6 +57,7 @@ def evaluate_controller_suite(
                 }
             )
         except NotImplementedError as exc:
+            # 控制器尚未实现（占位符），记录状态但不中断
             records.append(
                 {
                     "controller": name,
@@ -54,6 +69,7 @@ def evaluate_controller_suite(
                 }
             )
         except Exception as exc:
+            # 其他运行时错误，记录错误信息
             records.append(
                 {
                     "controller": name,
@@ -70,7 +86,14 @@ def evaluate_controller_suite(
 
 
 def comparison_records_to_rows(records: list[dict]) -> list[dict]:
-    """把评估记录整理成 notebook 更易展示的简表。"""
+    """把评估记录整理成 notebook 更易展示的简表行。
+
+    参数:
+        records: evaluate_controller_suite 返回的评估记录列表。
+
+    返回:
+        简化后的行列表，每行包含控制器名、状态、平均奖励和消息。
+    """
     rows = []
     for record in records:
         rows.append(
@@ -85,9 +108,15 @@ def comparison_records_to_rows(records: list[dict]) -> list[dict]:
 
 
 def plot_comparison_bar(records: list[dict], title: str = "Controller Comparison"):
-    """画一张对比均值回报柱状图，忽略未实现项。"""
+    """画一张对比各控制器均值回报的柱状图，忽略未实现项。
+
+    参数:
+        records: evaluate_controller_suite 返回的评估记录列表。
+        title: 图表标题。
+    """
     import matplotlib.pyplot as plt
 
+    # 仅保留评估成功的记录
     valid = [record for record in records if record["status"] == "ok"]
     if not valid:
         print("No valid controller results to plot.")
@@ -96,6 +125,7 @@ def plot_comparison_bar(records: list[dict], title: str = "Controller Comparison
     labels = [record["controller"] for record in valid]
     values = [record["mean_episode_reward"] for record in valid]
 
+    # 为不同控制器分配不同颜色
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(labels, values, color=["#335c67", "#9e2a2b", "#e09f3e", "#540b0e"][: len(valid)])
     ax.set_title(title)

@@ -1,10 +1,7 @@
 """电网核心模型。
 
-封装 pandapower 电网的创建、潮流计算和状态查询，
+封装 pandapower 电网的创建、潮流计算和结果提取，
 供 GridEnv 调用。
-
-主要类:
-    GridCore -- pandapower 电网核心封装
 """
 
 from __future__ import annotations
@@ -23,51 +20,56 @@ if TYPE_CHECKING:
 
 
 class GridCore:
-    """Thin wrapper around a pandapower net for one RL environment instance.
-
-    Parameters
-    ----------
-    deployments:
-        One ``AgentDeployment`` per RL agent, containing the bus index and
-        device parameters.
-    grid_cfg:
-        ``GridConfig`` dataclass with network code, solver choice, and
-        constraint thresholds.
-    """
+    """单个环境实例对应的 pandapower 电网封装。"""
 
     def __init__(
         self,
         deployments: list[AgentDeployment],
-        grid_cfg: Any,  # GridConfig — avoid circular import at module level
+        grid_cfg: Any,  # GridConfig，避免模块级循环导入
     ) -> None:
         self.deployments = deployments
         self.grid_cfg = grid_cfg
         self.n_agents = len(deployments)
         self.agent_bus_ids: list[int] = [d.bus_id for d in deployments]
 
+        # 创建 pandapower 电网。
         self.net = build_simbench_net(grid_cfg.sb_code)
         self.n_buses: int = len(self.net.bus)
         self.n_lines: int = len(self.net.line)
 
-        # Fallback result used when power flow does not converge.
+        # 预构建 bus_id -> 位置索引映射，方便快速取每个 agent 所在母线的结果。
+        bus_index_list = list(self.net.bus.index)
+        self._bus_id_to_pos: dict[int, int] = {
+            bid: pos for pos, bid in enumerate(bus_index_list)
+        }
+        for bid in self.agent_bus_ids:
+            if bid not in self._bus_id_to_pos:
+                raise ValueError(
+                    f"agent_bus_id={bid} 不存在于电网 bus 索引中。"
+                    f"可用的 bus_id: {bus_index_list}"
+                )
+
+        # 保存 agent 节点的原始负荷 / 分布式电源值，避免跨步累积。
+        self._original_load_p_mw: dict[int, float] = {}
+        self._original_sgen_p_mw: dict[int, float] = {}
+        for bid in self.agent_bus_ids:
+            load_mask = self.net.load["bus"] == bid
+            if load_mask.any():
+                self._original_load_p_mw[bid] = float(
+                    self.net.load.at[self.net.load.index[load_mask][0], "p_mw"]
+                )
+            sgen_mask = self.net.sgen["bus"] == bid
+            if sgen_mask.any():
+                self._original_sgen_p_mw[bid] = float(
+                    self.net.sgen.at[self.net.sgen.index[sgen_mask][0], "p_mw"]
+                )
+
+        # 潮流失败时用上一次有效结果回退。
         self._last_valid: GridStepResult = self._make_zero_result()
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
     def reset(self, base_load_kw: np.ndarray, base_pv_kw: np.ndarray) -> None:
-        """Initialise episode state.
-
-        Parameters
-        ----------
-        base_load_kw:
-            Background demand at each agent bus for timestep 0 in kW.
-            Shape ``(n_agents,)``.
-        base_pv_kw:
-            PV generation at each agent bus for timestep 0 in kW.
-            Shape ``(n_agents,)``.
-        """
+        """重置 episode 的电网状态。"""
+        self._restore_agent_buses()
         self._last_valid = self._make_zero_result()
 
     def step(
@@ -75,30 +77,15 @@ class GridCore:
         p_batt_kw: np.ndarray,
         base_load_kw: np.ndarray,
     ) -> GridStepResult:
-        """Run one power-flow step and return the result.
+        """执行一步潮流计算并返回结果。
 
-        The net injection at agent bus *i* is::
-
-            p_inject_kw[i] = -(base_load_kw[i] + p_batt_kw[i])
-
-        Positive ``p_inject_kw`` means the bus is *exporting* to the grid
-        (battery discharging faster than local load).
-
-        Parameters
-        ----------
-        p_batt_kw:
-            Battery power per agent in kW.  Positive = charging (import),
-            negative = discharging (export).  Shape ``(n_agents,)``.
-        base_load_kw:
-            Net background demand (load minus PV) per agent in kW.
-            Shape ``(n_agents,)``.
-
-        Returns
-        -------
-        GridStepResult
-            If power flow converges, fresh result.  If not, last valid
-            result with ``converged=False``.
+        约定：
+            `p_batt_kw > 0` 表示电池充电。
+            `p_batt_kw < 0` 表示电池放电。
         """
+        # 先还原原始工况，再施加本步注入量。
+        self._restore_agent_buses()
+
         p_inject_kw = -(base_load_kw + p_batt_kw)
         bus_id_to_p_kw = {
             self.agent_bus_ids[i]: float(p_inject_kw[i])
@@ -122,26 +109,35 @@ class GridCore:
             return result
 
         except Exception:
-            # Return last known-good values with converged=False.
+            # 潮流失败时返回上一次有效结果，只把 converged 标为 False。
             import dataclasses
 
             return dataclasses.replace(self._last_valid, converged=False)
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
+    def _restore_agent_buses(self) -> None:
+        """将 agent 节点的 load/sgen 还原到初始值。"""
+        for bid in self.agent_bus_ids:
+            load_mask = self.net.load["bus"] == bid
+            if load_mask.any() and bid in self._original_load_p_mw:
+                self.net.load.at[
+                    self.net.load.index[load_mask][0], "p_mw"
+                ] = self._original_load_p_mw[bid]
+            sgen_mask = self.net.sgen["bus"] == bid
+            if sgen_mask.any() and bid in self._original_sgen_p_mw:
+                self.net.sgen.at[
+                    self.net.sgen.index[sgen_mask][0], "p_mw"
+                ] = self._original_sgen_p_mw[bid]
 
     def _extract_result(self, *, converged: bool) -> GridStepResult:
-        """Read pandapower result tables and compute violation metrics."""
+        """从 pandapower 结果表中提取训练会用到的物理量。"""
         vm_pu = self.net.res_bus["vm_pu"].to_numpy(dtype=np.float32)
         va_degree = self.net.res_bus["va_degree"].to_numpy(dtype=np.float32)
         line_loading_pct = self.net.res_line["loading_percent"].to_numpy(dtype=np.float32)
         p_mw_from = self.net.res_line["p_from_mw"].to_numpy(dtype=np.float32)
 
-        # Voltage at agent buses — match by position in net.bus.index.
-        bus_index = list(self.net.bus.index)
+        # 快速取各 agent 所在母线的电压。
         agent_vm_pu = np.array(
-            [float(vm_pu[bus_index.index(bid)]) for bid in self.agent_bus_ids],
+            [float(vm_pu[self._bus_id_to_pos[bid]]) for bid in self.agent_bus_ids],
             dtype=np.float32,
         )
 
@@ -169,7 +165,7 @@ class GridCore:
         )
 
     def _make_zero_result(self) -> GridStepResult:
-        """Fallback result used before the first successful power flow."""
+        """构造潮流未成功时的默认结果。"""
         return GridStepResult(
             converged=False,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -61,7 +62,7 @@ class TrainRunner:
         log_dir.mkdir(parents=True, exist_ok=True)
         self.writer = SummaryWriter(log_dir=str(log_dir))
 
-        self.history = []
+        self.history: deque = deque(maxlen=2000)
         self.episode_rewards = []
         self.total_steps = 0
         self.episodes_completed = 0
@@ -75,8 +76,11 @@ class TrainRunner:
 
     def select_action_batch(self, obs_np: dict) -> np.ndarray:
         """把 batched observation 一次性转 torch，并完成所有 actor 推理。"""
+        # 把 numpy 观测批量移到 torch 设备上，后续 actor 才能直接前向计算。
         obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
         with torch.no_grad():
+            # 每个 agent 都基于同一批观测输出自己的动作，
+            # 再沿着 agent 维拼成 `(num_envs, n_agents, action_dim)`。
             action_t = torch.stack(
                 [agent.act_from_torch_obs(obs_t, noise_std=self.noise_std) for agent in self.agent_n],
                 dim=1,
@@ -132,6 +136,8 @@ class TrainRunner:
 
     def run(self) -> int:
         """执行训练循环，并返回完成的 episode 数。"""
+        # 并行 vec env 每 step 会同时推进 `num_envs` 个环境，
+        # 所以这里先把最大训练 step 换算成“交互轮数”。
         target_interactions = (
             self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit) // self.cfg.train.num_envs
         )
@@ -158,16 +164,20 @@ class TrainRunner:
         progress = tqdm(total=target_interactions, desc="Training", unit="iters")
 
         try:
+            # 训练从所有并行环境同时 reset 开始。
             obs = self.env.reset()
             while interaction_step < target_interactions:
                 action_start = time.perf_counter()
+                # 1. 根据当前观测让所有 agent 一次性决策。
                 action_batch = self.select_action_batch(obs)
                 action_time_total += time.perf_counter() - action_start
 
                 env_step_start = time.perf_counter()
+                # 2. 把动作送入环境，拿到下一步观测、奖励和终止信号。
                 next_obs, reward, done, info_list = self.env.step(self.format_env_actions(action_batch))
                 env_step_time_total += time.perf_counter() - env_step_start
 
+                # 3. 把每个并行环境的 step 级信息写入当前 episode 历史。
                 for env_idx, info in enumerate(info_list):
                     step_total = float(np.sum(reward[env_idx]))
                     active_episode_rewards[env_idx] += step_total
@@ -178,18 +188,19 @@ class TrainRunner:
                         reward_metas=reward_metas,
                     )
 
+                # 4. 把所有并行 env 的转移一起放入经验回放池，
+                # 之后采样 mini-batch 时就能打乱时间相关性。
                 self.replay_buffer.store_transitions_batched(obs, action_batch, reward, next_obs, done)
 
                 obs = next_obs
                 interaction_step += 1
                 self.total_steps += self.cfg.train.num_envs
 
+                # 5. 对已经完成的 episode 做收尾：记录总奖励、写 tensorboard、重置对应缓存。
                 for env_idx, info in enumerate(info_list):
                     if not bool(info.get("episode_done", False)):
                         continue
 
-                    if len(self.history) >= 2000:
-                        self.history.pop(0)
                     self.history.append(active_histories[env_idx])
 
                     episode_reward = float(active_episode_rewards[env_idx])
@@ -209,17 +220,23 @@ class TrainRunner:
                     episodes_completed += 1
                     self.episodes_completed = episodes_completed
 
+                # 6. 探索噪声逐步衰减：训练前期多探索，后期更偏向稳定利用。
                 if self.cfg.train.use_noise_decay:
                     self.noise_std = max(self.noise_std - noise_decay, float(self.cfg.train.noise_std_min))
 
+                # 7. 只有回放池样本足够时才开始更新，
+                # 并按 update_interval 控制“交互多少步更新一次网络”。
                 if (
                     self.replay_buffer.current_size >= self.cfg.train.batch_size
                     and interaction_step % self.cfg.train.update_interval == 0
                 ):
                     update_start = time.perf_counter()
                     for _ in range(self.cfg.train.updates_per_step):
+                        # 先从 replay buffer 采样，再把 batch 移到目标设备上训练。
                         batch_np = self.replay_buffer.sample()
                         batch_torch = to_torch_batch(batch_np, self.cfg.runtime.device)
+                        # 多智能体算法通常需要其他 agent 的信息做联合更新，
+                        # 所以这里把 `self.agent_n` 整体传进去。
                         for agent in self.agent_n:
                             agent.train_on_batch(batch_torch, self.agent_n)
                         update_calls += 1

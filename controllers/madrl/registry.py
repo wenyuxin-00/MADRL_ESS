@@ -16,6 +16,7 @@ from controllers.madrl.matd3 import MATD3
 if TYPE_CHECKING:
     from controllers.madrl.base_agent import BaseAgent
 
+# 算法名称 -> 智能体类的映射注册表
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "MADDPG": MADDPG,
     "MATD3": MATD3,
@@ -23,15 +24,29 @@ AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
 
 
 def register_agent(name: str, agent_cls: type[BaseAgent]) -> None:
-    """Register a new MADRL algorithm class.
-    注册一个新的 MADRL 算法类。
+    """注册一个新的 MADRL 算法类到全局注册表。
+
+    参数:
+        name: 算法名称（如 ``"MADDPG"``、``"MATD3"``），作为注册表的键。
+        agent_cls: 对应的智能体类，必须是 BaseAgent 的子类。
+
+    注意:
+        若名称已存在，会覆盖原有注册。
     """
     AGENT_REGISTRY[name] = agent_cls
 
 
 def get_agent_cls(name: str) -> type[BaseAgent]:
-    """Return the agent class registered under the given algorithm name.
-    按名称返回已注册的算法类。
+    """按算法名称从注册表中获取对应的智能体类。
+
+    参数:
+        name: 算法名称（如 ``"MADDPG"``、``"MATD3"``）。
+
+    返回:
+        type[BaseAgent]: 已注册的智能体类。
+
+    异常:
+        ValueError: 当指定名称未在注册表中找到时抛出。
     """
     if name not in AGENT_REGISTRY:
         raise ValueError(f"Unknown algorithm '{name}', available: {list(AGENT_REGISTRY)}")

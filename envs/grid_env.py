@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import gym
 import numpy as np
@@ -22,7 +22,22 @@ from gym import spaces
 
 
 class GridEnv(gym.Env):
-    """Battery-storage environment with distribution-grid power-flow constraints."""
+    """带配电网潮流约束的多智能体电池储能环境。
+
+    在 EnergyStorageEnv 基础上集成 pandapower 电网模型，
+    每步执行潮流计算并施加电压/线路过载惩罚。
+
+    属性:
+        n: 智能体数量
+        episode_length: 单集最大步数
+        soc: 各智能体当前荷电状态，shape=(n,)
+        vm_pu: 最近一次潮流计算的节点电压 (标幺值)
+        _grid_core: pandapower 电网核心封装（可为 None 以跳过潮流）
+
+    注意:
+        与 EnergyStorageEnv 共享大量电池物理逻辑。
+        # TODO: 后续考虑抽取公共基类消除重复代码。
+    """
 
     metadata = {"render.modes": []}
 
@@ -35,7 +50,7 @@ class GridEnv(gym.Env):
         forecaster: Any | None = None,
         obs_builder: Any | None = None,
         grid_core: Any | None = None,
-        data_path: Optional[str] = None,
+        data_path: str | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -141,6 +156,8 @@ class GridEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _canonicalize_signal(self, name: str, value: np.ndarray) -> np.ndarray:
+        """校验并标准化信号数组的数据类型和第一维长度。"""
+        # TODO: 与 hems_env.py 共享实现，后续考虑抽取基类
         signal = np.asarray(value, dtype=np.float32)
         if signal.shape[0] != self.episode_length:
             raise ValueError(
@@ -238,7 +255,7 @@ class GridEnv(gym.Env):
     # Gym interface
     # ------------------------------------------------------------------
 
-    def reset(self, episode_idx: Optional[int] = None) -> dict[str, np.ndarray]:
+    def reset(self, episode_idx: int | None = None) -> dict[str, np.ndarray]:
         if episode_idx is None:
             episode_idx = int(np.random.randint(0, self.num_available_episodes))
         elif episode_idx < 0 or episode_idx >= self.num_available_episodes:
@@ -262,13 +279,26 @@ class GridEnv(gym.Env):
         return self.obs_builder.build(self)
 
     def step(
-        self, actions: List[np.ndarray]
-    ) -> Tuple[dict[str, np.ndarray], List[float], List[bool], Dict]:
+        self, actions: list[np.ndarray]
+    ) -> tuple[dict[str, np.ndarray], list[float], list[bool], dict]:
+        """执行一步环境交互（含电网潮流计算）。
+
+        参数:
+            actions: 各智能体的动作列表，每个元素为 shape=(1,) 的数组，取值 [-1, 1]
+
+        返回:
+            obs: 下一步的结构化观测字典
+            reward: 各智能体的即时奖励列表（Phase 1 为共享奖励）
+            done: 各智能体的终止标志列表
+            info: 包含详细步骤信息的字典（含电网潮流结果）
+        """
         t = self.cur_step
 
         # ----------------------------------------------------------
-        # Battery physics (identical to EnergyStorageEnv.step())
+        # 电池物理模型（与 EnergyStorageEnv.step() 相同）
+        # TODO: 后续抽取公共基类消除重复
         # ----------------------------------------------------------
+        # 将动作裁剪到 [-1, 1] 并映射为实际功率请求 (kW)
         action_array = np.asarray(actions, dtype=np.float32).reshape(self.n, -1)[:, 0]
         action_array = np.clip(action_array, -1.0, 1.0)
         e_bat_req = action_array * self.agent_p_max
@@ -277,6 +307,7 @@ class GridEnv(gym.Env):
         e_t = soc_t * self.agent_c_bat
         eff = max(self.eff, 1e-6)
 
+        # 计算物理允许的最大充/放电功率
         p_max_chg = np.minimum(
             self.agent_p_max,
             np.maximum(0.0, (self.agent_e_max - e_t) / (eff * self.dt)),
@@ -290,6 +321,7 @@ class GridEnv(gym.Env):
         p_upper = p_max_chg
         e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)
 
+        # 充放电效率模型（详见 hems_env.py 中的注释说明）
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
         e_next = np.clip(e_t + delta_e, self.agent_e_min, self.agent_e_max).astype(np.float32)
         soc_next = (e_next / self.agent_c_bat).astype(np.float32)
@@ -362,7 +394,9 @@ class GridEnv(gym.Env):
         }
         reward_per_agent, components = self.reward_fn.compute(env_state)
 
-        # Phase 1: shared reward — mean broadcast to all agents.
+        # Phase 1 协作奖励设计：将各智能体奖励取均值后广播给所有智能体。
+        # 目的：鼓励团队协作而非个体竞争。
+        # TODO Phase 2：改为个性化奖励（保留 per-agent 差异化信号）。
         shared = float(np.mean(reward_per_agent))
         reward = np.full(self.n, shared, dtype=np.float32)
 

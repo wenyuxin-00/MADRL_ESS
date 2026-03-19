@@ -1,10 +1,24 @@
 """SimBench 电网数据导出与预处理工具。
 
-从 SimBench 电网模型中提取负荷、发电等时间序列数据，
-导出为标准 CSV 格式供训练使用。
+从 SimBench 电网模型中提取负荷、光伏发电等时间序列数据，与德国电力市场现货
+电价对齐后，导出为标准 CSV 格式供强化学习训练和测试使用。
+
+本模块的核心流程：
+1. 从 SimBench 网络中提取归一化负荷/可再生能源配置文件，转换为绝对功率 (kW)
+2. 加载并对齐德国电价数据（支持 CSV 和 XLSX 格式）
+3. 按光伏峰值功率排序选取产消者节点
+4. 按季度划分训练/测试集，包含预热（warmup）窗口
 
 主要函数:
-    export_simbench_data -- 导出 SimBench 数据到 CSV
+    export_simbench_2016_dataset -- 构建并导出完整的 SimBench 2016 数据集
+    build_prosumer_frame -- 构建全年产消者数据帧
+    build_quarterly_simbench_split -- 按季度划分训练/测试集
+    build_simbench_absolute_frame -- 将归一化配置文件展开为绝对功率时间序列
+    load_germany_price_frame -- 加载并归一化德国电价数据
+    align_price_series_to_reference -- 将电价序列对齐到参考时间戳
+
+主要类:
+    SimbenchExportResult -- 导出结果数据类，包含数据帧、元数据和文件路径
 """
 
 from __future__ import annotations
@@ -18,19 +32,38 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 
+# SimBench 电网模型代码（低压农村场景）
 DEFAULT_SB_CODE = "1-LV-rural1--0-sw"
+# 每天的时间步数（15 分钟间隔，96 步 = 24 小时）
 STEPS_PER_DAY = 96
+# 每周的时间步数
 STEPS_PER_WEEK = STEPS_PER_DAY * 7
+# 每季度的测试周数
 DEFAULT_TEST_WEEKS = 2
+# 每季度测试集前的预热周数
 DEFAULT_WARMUP_WEEKS = 1
+# 季度锚点偏移周数（从季度起始日算起）
 DEFAULT_QUARTER_OFFSET_WEEKS = 5
+# SimBench 负荷配置文件名后缀
 LOAD_PROFILE_SUFFIX = "_pload"
+# Excel 序列值日期基准
 EXCEL_EPOCH = pd.Timestamp("1899-12-30")
 
 
 @dataclass(frozen=True)
 class SimbenchExportResult:
-    """Resolved data frames, metadata, and export paths."""
+    """SimBench 数据导出结果，包含数据帧、元数据和导出文件路径。
+
+    属性:
+        full_frame (pd.DataFrame): 完整全年数据帧（含训练和测试数据）
+        train_frame (pd.DataFrame): 训练集数据帧
+        test_frame (pd.DataFrame): 测试集数据帧（含预热行）
+        metadata (dict): 导出元数据（含拆分策略、行数统计等）
+        full_path (Path): 完整数据 CSV 文件路径
+        train_path (Path): 训练集 CSV 文件路径
+        test_path (Path): 测试集 CSV 文件路径
+        metadata_path (Path): 元数据 JSON 文件路径
+    """
 
     full_frame: pd.DataFrame
     train_frame: pd.DataFrame
@@ -43,15 +76,30 @@ class SimbenchExportResult:
 
 
 def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
-    """Read the first xlsx sheet without requiring openpyxl."""
+    """读取 XLSX 文件的第一个工作表，不依赖 openpyxl 库。
+
+    通过直接解析 XLSX 的 ZIP 内部 XML 结构来读取数据，
+    适用于无法安装 openpyxl 的环境。
+
+    Args:
+        path: XLSX 文件路径
+
+    Returns:
+        pd.DataFrame: 第一个工作表的内容，首行作为列名
+
+    Raises:
+        ValueError: 工作簿为空或缺少必要的内部结构
+    """
     path = Path(path)
     with ZipFile(path) as archive:
         names = archive.namelist()
+        # 解析工作簿结构以找到第一个工作表
         workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
         rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
         main_ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         rel_ns = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
 
+        # 定位第一个工作表的关系 ID
         first_sheet = workbook_root.find("a:sheets/a:sheet", main_ns)
         if first_sheet is None:
             raise ValueError(f"Workbook '{path}' does not contain any sheets.")
@@ -59,6 +107,7 @@ def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
         if rel_id is None:
             raise ValueError(f"Workbook '{path}' is missing the first-sheet relationship id.")
 
+        # 根据关系 ID 查找工作表的实际文件路径
         target = None
         for rel in rel_root.findall("r:Relationship", rel_ns):
             if rel.attrib.get("Id") == rel_id:
@@ -68,6 +117,7 @@ def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
             raise ValueError(f"Workbook '{path}' is missing the worksheet target for '{rel_id}'.")
 
         sheet_path = f"xl/{target.lstrip('/')}"
+        # 加载共享字符串表（Excel 用于去重存储字符串值）
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in names:
             shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
@@ -75,6 +125,7 @@ def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
                 texts = [node.text or "" for node in item.findall(".//a:t", main_ns)]
                 shared_strings.append("".join(texts))
 
+        # 逐行解析工作表单元格数据
         sheet_root = ET.fromstring(archive.read(sheet_path))
         rows: list[list[object]] = []
         for row in sheet_root.findall(".//a:sheetData/a:row", main_ns):
@@ -83,6 +134,7 @@ def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
                 raw_value = cell.find("a:v", main_ns)
                 value = raw_value.text if raw_value is not None else ""
                 cell_type = cell.attrib.get("t")
+                # 类型 "s" 表示共享字符串引用，需从共享字符串表中查找
                 if cell_type == "s" and value != "":
                     value = shared_strings[int(value)]
                 values.append(value)
@@ -91,18 +143,34 @@ def _read_xlsx_first_sheet(path: str | Path) -> pd.DataFrame:
     if not rows:
         raise ValueError(f"Workbook '{path}' is empty.")
 
+    # 首行作为列名，其余行作为数据
     header = [str(value).strip() for value in rows[0]]
     body = rows[1:]
     return pd.DataFrame(body, columns=header)
 
 
 def _parse_price_timestamp(series: pd.Series) -> pd.Series:
-    """Parse a timestamp column from strings or Excel serial values."""
+    """解析时间戳列，支持字符串格式和 Excel 序列值两种输入。
+
+    优先尝试将值解析为 Excel 序列日期（浮点数），若失败则按字符串日期格式解析。
+    所有结果均对齐到 15 分钟精度。
+
+    Args:
+        series: 包含时间戳的 pandas Series
+
+    Returns:
+        pd.Series: 解析后的时间戳 Series（精确到 15 分钟）
+
+    Raises:
+        ValueError: 存在无法解析的时间戳值
+    """
+    # 尝试将全部值解析为 Excel 序列日期（从 1899-12-30 起的天数）
     numeric_values = pd.to_numeric(series, errors="coerce")
     if numeric_values.notna().all():
         parsed = EXCEL_EPOCH + pd.to_timedelta(numeric_values, unit="D")
         return parsed.round("15min")
 
+    # 回退方案：按字符串格式解析日期时间
     parsed = pd.to_datetime(series, errors="coerce")
     if parsed.isna().any():
         raise ValueError("Price timestamp column contains unparsable values.")
@@ -110,7 +178,23 @@ def _parse_price_timestamp(series: pd.Series) -> pd.Series:
 
 
 def load_germany_price_frame(price_path: str | Path) -> tuple[pd.DataFrame, str]:
-    """Load Germany power prices and normalize them to EUR/kWh."""
+    """加载德国电力市场现货电价并归一化为 EUR/kWh。
+
+    支持两种输入格式：
+    - XLSX: 第一列为时间戳，第二列为电价（EUR/MWh），自动除以 1000 转换
+    - CSV: 分号分隔，包含 "Start date" 和电价列（EUR/MWh）
+
+    Args:
+        price_path: 电价数据文件路径（.csv 或 .xlsx）
+
+    Returns:
+        tuple: (电价数据帧, 源电价列名)
+            - 数据帧包含 "timestamp" 和 "price"（EUR/kWh）两列
+            - 源列名用于元数据记录
+
+    Raises:
+        ValueError: 文件格式不支持、缺少必要列、或电价数据包含 NaN
+    """
     price_path = Path(price_path)
     suffix = price_path.suffix.lower()
 
@@ -123,14 +207,17 @@ def load_germany_price_frame(price_path: str | Path) -> tuple[pd.DataFrame, str]
         frame = pd.DataFrame(
             {
                 "timestamp": _parse_price_timestamp(raw.iloc[:, 0]),
+                # 从 EUR/MWh 转换为 EUR/kWh
                 "price": pd.to_numeric(raw.iloc[:, 1], errors="coerce") / 1000.0,
             }
         )
         source_column = str(price_column)
     elif suffix == ".csv":
         raw = pd.read_csv(price_path, sep=";")
+        # 尝试使用标准的 ENTSO-E 电价列名
         source_column = "DE/AT/LU [€/MWh] Original resolutions"
         if source_column not in raw.columns:
+            # 回退：使用第一个非时间戳的数值列
             numeric_candidates = [column for column in raw.columns if column != "Start date"]
             if not numeric_candidates:
                 raise ValueError(f"Could not find a numeric price column in '{price_path}'.")
@@ -138,21 +225,37 @@ def load_germany_price_frame(price_path: str | Path) -> tuple[pd.DataFrame, str]
         frame = pd.DataFrame(
             {
                 "timestamp": pd.to_datetime(raw["Start date"], format="%b %d, %Y %I:%M %p"),
+                # 从 EUR/MWh 转换为 EUR/kWh
                 "price": pd.to_numeric(raw[source_column], errors="coerce") / 1000.0,
             }
         )
     else:
         raise ValueError(f"Unsupported price file '{price_path}'. Expected .csv or .xlsx.")
 
+    # 校验电价数据完整性
     if frame["price"].isna().any():
         raise ValueError(f"Price column '{source_column}' in '{price_path}' contains NaN after parsing.")
 
+    # 统一时间戳精度为 15 分钟
     frame["timestamp"] = pd.to_datetime(frame["timestamp"]).dt.round("15min")
     frame["price"] = frame["price"].astype(np.float32)
     return frame, source_column
 
 
 def _resolve_profile_column(profile_name, available_arrays, fallback_column, suffix=""):
+    """解析配置文件列名，找到对应的归一化配置文件数组。
+
+    尝试将 profile_name 加上后缀后在可用数组中查找；若未找到则使用回退列。
+
+    Args:
+        profile_name: SimBench 负荷/发电表中的 profile 字段值
+        available_arrays: 可用的配置文件数组字典（列名 -> 数组）
+        fallback_column: 找不到匹配列时使用的回退列名
+        suffix: 列名后缀（如负荷配置文件的 "_pload"）
+
+    Returns:
+        str: 匹配到的配置文件列名
+    """
     raw_name = "" if pd.isna(profile_name) else str(profile_name).strip()
     candidate = f"{raw_name}{suffix}" if raw_name else ""
     if candidate and candidate in available_arrays:

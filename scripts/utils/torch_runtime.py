@@ -46,6 +46,8 @@ class TorchRuntimeState:
 
 
 def _unwrap_runtime_config(runtime_or_cfg: Any | None):
+    # 把“完整 cfg / 仅 runtime 配置 / 已解析状态对象”三种输入统一拆开，
+    # 让后续主逻辑不用到处写类型分支。
     if runtime_or_cfg is None:
         return None, None
     if isinstance(runtime_or_cfg, TorchRuntimeState):
@@ -58,6 +60,7 @@ def _unwrap_runtime_config(runtime_or_cfg: Any | None):
 
 
 def _runtime_attr(runtime_cfg, name: str, default):
+    # runtime 配置里很多字段允许为 None；这里统一处理“缺省即退回默认值”。
     if runtime_cfg is None or not hasattr(runtime_cfg, name):
         return default
     value = getattr(runtime_cfg, name)
@@ -69,6 +72,7 @@ def resolve_device(device: str | torch.device | TorchRuntimeState | None = None)
     if isinstance(device, TorchRuntimeState):
         return device.device
     if device is None:
+        # 默认策略很朴素：有 CUDA 就优先 GPU，没有就回 CPU。
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
@@ -104,6 +108,7 @@ def derive_worker_seed(base_seed: int | None, *components: int) -> int | None:
     if base_seed is None:
         return None
 
+    # 目标是“可复现且彼此不同”，不是密码学意义上的随机哈希。
     seed = int(base_seed) & 0xFFFFFFFF
     for component in components:
         component = int(component)
@@ -114,6 +119,7 @@ def derive_worker_seed(base_seed: int | None, *components: int) -> int | None:
 
 
 def _seed_everything(seed: int, device: torch.device) -> None:
+    # 同时给 Python、NumPy、PyTorch 设种子，避免只固定其中一层。
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -134,6 +140,7 @@ def configure_torch_runtime(
     """配置统一的 PyTorch runtime，并返回本次生效的状态摘要。"""
     runtime_cfg, runtime_state = _unwrap_runtime_config(runtime_or_cfg)
     if runtime_state is not None:
+        # 已经配置过时直接复用，避免重复修改全局后端状态。
         return runtime_state
 
     requested_device = device
@@ -143,6 +150,7 @@ def configure_torch_runtime(
         else:
             requested_device = _runtime_attr(runtime_cfg, "device", None)
 
+    # 第一步先把“想要什么设备、什么模式”解析清楚。
     resolved_device = resolve_device(requested_device)
     resolved_mode = resolve_runtime_mode(
         mode if mode is not None else _runtime_attr(runtime_cfg, "execution_mode", PERFORMANCE_RUNTIME_MODE)
@@ -159,6 +167,8 @@ def configure_torch_runtime(
     )
     strict_mode = resolved_mode == STRICT_REPRO_RUNTIME_MODE
 
+    # 第二步根据模式推导默认后端参数。
+    # `performance` 更偏向速度，`strict_reproducibility` 更偏向结果稳定复现。
     matmul_precision = str(_runtime_attr(runtime_cfg, "matmul_precision", "high"))
     allow_tf32 = bool(_runtime_attr(runtime_cfg, "allow_tf32", not strict_mode))
     cudnn_deterministic = bool(_runtime_attr(runtime_cfg, "cudnn_deterministic", strict_mode))
@@ -172,6 +182,7 @@ def configure_torch_runtime(
     )
     cuda_available = torch.cuda.is_available()
 
+    # 先做一致性检查，尽早报错，避免训练跑一半才发现设备条件不满足。
     if resolved_require_cuda and (resolved_device.type != "cuda" or not cuda_available):
         raise RuntimeError(
             "CUDA is required for this entry point, but the current PyTorch runtime cannot provide it."
@@ -189,8 +200,11 @@ def configure_torch_runtime(
             resolved_device = torch.device("cuda:0")
 
     if strict_mode and resolved_seed is not None and "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
+        # 某些 CUDA 算子要想更稳定复现，需要额外环境变量配合。
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+    # 下面这些设置都是“尽力而为”。
+    # 不同 PyTorch / CUDA 版本能力不同，所以失败时选择忽略而不是中断主流程。
     try:
         torch.set_float32_matmul_precision(matmul_precision)
     except (AttributeError, RuntimeError, ValueError):
@@ -217,6 +231,7 @@ def configure_torch_runtime(
             pass
 
     if resolved_seed is not None:
+        # 多 worker 情况下，用派生种子避免所有 worker 完全一样。
         worker_seed = derive_worker_seed(resolved_seed, worker_rank)
         if worker_seed is not None:
             _seed_everything(worker_seed, resolved_device)
@@ -224,8 +239,10 @@ def configure_torch_runtime(
         worker_seed = None
 
     if resolved_device.type == "cuda":
+        # 把当前线程的默认 CUDA 设备切到目标卡，后续张量创建才会落到正确位置。
         torch.cuda.set_device(resolved_device)
 
+    # 这个 state 相当于“本次配置最终落地成了什么”，方便日志记录和下游复用。
     state = TorchRuntimeState(
         device=resolved_device,
         mode=resolved_mode,
@@ -241,6 +258,7 @@ def configure_torch_runtime(
     )
 
     if runtime_cfg is not None:
+        # 把解析后的最终值回写到配置对象，保证后面代码看到的是统一结果。
         runtime_cfg.device = state.device
         runtime_cfg.execution_mode = state.mode
         runtime_cfg.seed = int(resolved_seed) if resolved_seed is not None else 0
@@ -268,6 +286,7 @@ def describe_device(device: str | torch.device | TorchRuntimeState) -> dict[str,
     if resolved.type != "cuda" or not torch.cuda.is_available():
         return summary
 
+    # 对 GPU 再补充一层更适合日志展示的硬件摘要。
     device_index = resolved.index if resolved.index is not None else torch.cuda.current_device()
     properties = torch.cuda.get_device_properties(device_index)
     summary.update(
