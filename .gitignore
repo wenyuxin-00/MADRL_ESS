@@ -3,7 +3,7 @@
 Thumbs.db
 *.swp
 desktop.ini
-
+.gitnexus/meta.json
 # --- 日志与编译输出 (深度学习增强) ---
 node_modules/
 dist/
