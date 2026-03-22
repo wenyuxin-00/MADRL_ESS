@@ -1,45 +1,19 @@
-"""电网潮流环境实现。
-
-在 pandapower 电网模型上封装 Gym 接口，支持多智能体电池调度，
-包含电压和线路负载约束。
-
-主要类:
-    GridEnv -- 带潮流约束的多智能体储能环境
-
-典型用法::
-    env = GridEnv(cfg, mode="train", dataset=ds)
-    obs = env.reset()
-"""
+"""Grid-aware multi-agent storage environment."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-import gym
+import gymnasium as gym
 import numpy as np
-from gym import spaces
+from gymnasium import spaces
 
 
 class GridEnv(gym.Env):
-    """带配电网潮流约束的多智能体电池储能环境。
+    """Multi-agent storage environment with power-flow constraints."""
 
-    在 EnergyStorageEnv 基础上集成 pandapower 电网模型，
-    每步执行潮流计算并施加电压/线路过载惩罚。
-
-    属性:
-        n: 智能体数量
-        episode_length: 单集最大步数
-        soc: 各智能体当前荷电状态，shape=(n,)
-        vm_pu: 最近一次潮流计算的节点电压 (标幺值)
-        _grid_core: pandapower 电网核心封装（可为 None 以跳过潮流）
-
-    注意:
-        与 EnergyStorageEnv 共享大量电池物理逻辑。
-        # TODO: 后续考虑抽取公共基类消除重复代码。
-    """
-
-    metadata = {"render.modes": []}
+    metadata = {"render_modes": []}
 
     def __init__(
         self,
@@ -57,8 +31,6 @@ class GridEnv(gym.Env):
         self.mode = mode
 
         env_cfg = cfg.env
-        reward_cfg = cfg.reward
-
         self.n = int(env_cfg.num_agents)
         self.episode_length = int(env_cfg.episode_limit)
         self.future_horizon = int(env_cfg.future_horizon)
@@ -68,6 +40,11 @@ class GridEnv(gym.Env):
         self.gamma = float(cfg.algo.gamma)
         self.init_soc = float(env_cfg.init_soc)
         self.dt = float(env_cfg.dt)
+        self.storage_power_scale = float(getattr(env_cfg, "storage_power_scale", 1.0))
+        self.storage_capacity_scale = float(getattr(env_cfg, "storage_capacity_scale", 1.0))
+        runtime_seed = getattr(getattr(cfg, "runtime", None), "seed", None)
+        self._default_seed = None if runtime_seed is None else int(runtime_seed)
+        self._seeded_once = False
 
         self.soc_min = float(env_cfg.soc_min)
         self.soc_max = float(env_cfg.soc_max)
@@ -78,10 +55,11 @@ class GridEnv(gym.Env):
             )
         self.init_soc = float(np.clip(self.init_soc, self.soc_min, self.soc_max))
 
-        # Grid config.
         self._grid_cfg = cfg.grid
         self._w_v_pen = float(cfg.grid.w_v_pen)
-        self._w_l_pen = float(cfg.grid.w_l_pen)
+        legacy_overload = float(getattr(cfg.grid, "w_l_pen", 0.0))
+        self._w_line_pen = float(getattr(cfg.grid, "w_line_pen", legacy_overload))
+        self._w_trafo_pen = float(getattr(cfg.grid, "w_trafo_pen", legacy_overload))
 
         from envs.rewards import get_reward_fn
 
@@ -117,7 +95,6 @@ class GridEnv(gym.Env):
         self.observation_schema = self.obs_builder.get_schema(self.n)
         self.observation_layout = self.obs_builder.get_layout(self.n)
 
-        # GridCore — may be None in tests where it is not needed.
         self._grid_core = grid_core
 
         self.num_available_episodes = self._dataset.num_episodes()
@@ -126,6 +103,7 @@ class GridEnv(gym.Env):
 
         self.signals: dict[str, np.ndarray] = {}
         self.episode_meta: dict[str, Any] = {}
+        self._last_episode_idx: int | None = None
         self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
@@ -137,8 +115,7 @@ class GridEnv(gym.Env):
         self.e_min = self.agent_e_min.copy()
         self.e_max = self.agent_e_max.copy()
 
-        # Latest power-flow result — updated by step(), used by obs features.
-        self.vm_pu: np.ndarray = np.ones(1, dtype=np.float32)  # placeholder
+        self.vm_pu = np.ones(1, dtype=np.float32)
 
         self.action_space = [
             spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -151,13 +128,7 @@ class GridEnv(gym.Env):
             }
         )
 
-    # ------------------------------------------------------------------
-    # Signal access (called by ObservationBuilder feature lambdas)
-    # ------------------------------------------------------------------
-
     def _canonicalize_signal(self, name: str, value: np.ndarray) -> np.ndarray:
-        """校验并标准化信号数组的数据类型和第一维长度。"""
-        # TODO: 与 hems_env.py 共享实现，后续考虑抽取基类
         signal = np.asarray(value, dtype=np.float32)
         if signal.shape[0] != self.episode_length:
             raise ValueError(
@@ -181,6 +152,8 @@ class GridEnv(gym.Env):
     def _apply_episode_storage_config(self) -> None:
         self.agent_c_bat = self._resolve_meta_vector("ess_capacity_kwh", self.c_bat)
         self.agent_p_max = self._resolve_meta_vector("ess_power_kw", self.p_max)
+        self.agent_c_bat = (self.agent_c_bat * self.storage_capacity_scale).astype(np.float32)
+        self.agent_p_max = (self.agent_p_max * self.storage_power_scale).astype(np.float32)
         self.agent_e_min = (self.soc_min * self.agent_c_bat).astype(np.float32)
         self.agent_e_max = (self.soc_max * self.agent_c_bat).astype(np.float32)
         self.e_min = self.agent_e_min.copy()
@@ -206,9 +179,7 @@ class GridEnv(gym.Env):
             else np.zeros((self.episode_length, self.n), dtype=np.float32)
         )
         if self.ep_price.ndim != 1:
-            raise ValueError(
-                f"signals['price'] must have shape (T,), got {self.ep_price.shape}"
-            )
+            raise ValueError(f"signals['price'] must have shape (T,), got {self.ep_price.shape}")
         if self.ep_load.shape != (self.episode_length, self.n):
             raise ValueError(
                 f"signals['load'] must have shape {(self.episode_length, self.n)}, "
@@ -251,19 +222,43 @@ class GridEnv(gym.Env):
             return float(self.ep_price[min(t, self.episode_length - 1)])
         return float(np.mean(seg))
 
-    # ------------------------------------------------------------------
-    # Gym interface
-    # ------------------------------------------------------------------
+    def _build_reset_info(self, episode_idx: int) -> dict[str, Any]:
+        info = {
+            "episode_idx": int(episode_idx),
+            "available_signals": sorted(self.signals),
+            "battery_capacity_kwh": self.agent_c_bat.astype(np.float32).copy(),
+            "p_max": self.agent_p_max.astype(np.float32).copy(),
+            "episode_meta": dict(self.episode_meta),
+        }
+        if self._grid_core is not None:
+            info["n_buses"] = int(getattr(self._grid_core, "n_buses", 0))
+            info["n_lines"] = int(getattr(self._grid_core, "n_lines", 0))
+            info["n_trafos"] = int(getattr(self._grid_core, "n_trafos", 0))
+        return info
 
-    def reset(self, episode_idx: int | None = None) -> dict[str, np.ndarray]:
+    def reset(
+        self,
+        episode_idx: int | None = None,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        if seed is None and not self._seeded_once:
+            seed = self._default_seed
+        super().reset(seed=seed)
+        if seed is not None:
+            self._seeded_once = True
+        if options is not None and episode_idx is None:
+            episode_idx = options.get("episode_idx")
         if episode_idx is None:
-            episode_idx = int(np.random.randint(0, self.num_available_episodes))
+            episode_idx = int(self.np_random.integers(0, self.num_available_episodes))
         elif episode_idx < 0 or episode_idx >= self.num_available_episodes:
             raise IndexError(
                 f"episode_idx={episode_idx} is out of range [0, {self.num_available_episodes - 1}]"
             )
 
         self._load_episode(int(episode_idx))
+        self._last_episode_idx = int(episode_idx)
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
 
@@ -276,29 +271,13 @@ class GridEnv(gym.Env):
             base_pv = np.asarray(self.ep_pv[0], dtype=np.float32)
             self._grid_core.reset(base_load, base_pv)
 
-        return self.obs_builder.build(self)
+        return self.obs_builder.build(self), self._build_reset_info(int(episode_idx))
 
     def step(
         self, actions: list[np.ndarray]
-    ) -> tuple[dict[str, np.ndarray], list[float], list[bool], dict]:
-        """执行一步环境交互（含电网潮流计算）。
-
-        参数:
-            actions: 各智能体的动作列表，每个元素为 shape=(1,) 的数组，取值 [-1, 1]
-
-        返回:
-            obs: 下一步的结构化观测字典
-            reward: 各智能体的即时奖励列表（Phase 1 为共享奖励）
-            done: 各智能体的终止标志列表
-            info: 包含详细步骤信息的字典（含电网潮流结果）
-        """
+    ) -> tuple[dict[str, np.ndarray], list[float], list[bool], list[bool], dict]:
         t = self.cur_step
 
-        # ----------------------------------------------------------
-        # 电池物理模型（与 EnergyStorageEnv.step() 相同）
-        # TODO: 后续抽取公共基类消除重复
-        # ----------------------------------------------------------
-        # 将动作裁剪到 [-1, 1] 并映射为实际功率请求 (kW)
         action_array = np.asarray(actions, dtype=np.float32).reshape(self.n, -1)[:, 0]
         action_array = np.clip(action_array, -1.0, 1.0)
         e_bat_req = action_array * self.agent_p_max
@@ -307,7 +286,6 @@ class GridEnv(gym.Env):
         e_t = soc_t * self.agent_c_bat
         eff = max(self.eff, 1e-6)
 
-        # 计算物理允许的最大充/放电功率
         p_max_chg = np.minimum(
             self.agent_p_max,
             np.maximum(0.0, (self.agent_e_max - e_t) / (eff * self.dt)),
@@ -316,19 +294,14 @@ class GridEnv(gym.Env):
             self.agent_p_max,
             np.maximum(0.0, (e_t - self.agent_e_min) * eff / self.dt),
         )
-
         p_lower = -p_max_dis
         p_upper = p_max_chg
         e_bat = np.clip(e_bat_req, p_lower, p_upper).astype(np.float32)
 
-        # 充放电效率模型（详见 hems_env.py 中的注释说明）
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
         e_next = np.clip(e_t + delta_e, self.agent_e_min, self.agent_e_max).astype(np.float32)
         soc_next = (e_next / self.agent_c_bat).astype(np.float32)
 
-        # ----------------------------------------------------------
-        # Background signals for this timestep
-        # ----------------------------------------------------------
         price_t = float(self.get_signal_step("price", t))
         load_t = np.asarray(self.get_signal_step("load", t), dtype=np.float32)
         pv_t = np.asarray(self.ep_pv[t], dtype=np.float32)
@@ -337,17 +310,14 @@ class GridEnv(gym.Env):
         mu_t = self._future_mean_price(t)
         mu_next = self._future_mean_price(min(t + 1, self.episode_length - 1))
 
-        # ----------------------------------------------------------
-        # Power flow step
-        # ----------------------------------------------------------
         if self._grid_core is not None:
             pf_result = self._grid_core.step(
                 p_batt_kw=e_bat,
                 base_load_kw=net_load_t,
             )
+            pf_error = getattr(self._grid_core, "last_pf_error", "")
             self.vm_pu = pf_result.vm_pu
         else:
-            # No grid core (e.g. during unit tests) — zero-violation fallback.
             from envs.grid.core.grid_types import GridStepResult
 
             pf_result = GridStepResult(
@@ -355,18 +325,20 @@ class GridEnv(gym.Env):
                 vm_pu=np.ones(1, dtype=np.float32),
                 va_degree=np.zeros(1, dtype=np.float32),
                 line_loading_pct=np.zeros(1, dtype=np.float32),
+                trafo_loading_pct=np.zeros(0, dtype=np.float32),
                 p_mw_from=np.zeros(1, dtype=np.float32),
                 agent_vm_pu=np.ones(self.n, dtype=np.float32),
                 v_violation=np.zeros(self.n, dtype=np.float32),
+                line_violation=0.0,
+                trafo_violation=0.0,
                 l_violation=0.0,
                 n_buses=1,
                 n_lines=1,
+                n_trafos=0,
             )
+            pf_error = ""
             self.vm_pu = pf_result.vm_pu
 
-        # ----------------------------------------------------------
-        # Build env_state and compute reward
-        # ----------------------------------------------------------
         env_state = {
             "e_bat_req": e_bat_req,
             "e_bat": e_bat,
@@ -383,42 +355,46 @@ class GridEnv(gym.Env):
             "mu_next": mu_next,
             "gamma": self.gamma,
             "dt": self.dt,
-            # Grid-specific fields consumed by GridCompositeReward.
             "vm_pu": pf_result.vm_pu,
             "agent_vm_pu": pf_result.agent_vm_pu,
             "v_violation": pf_result.v_violation,
+            "line_violation": pf_result.line_violation,
+            "trafo_violation": pf_result.trafo_violation,
             "l_violation": pf_result.l_violation,
             "w_v_pen": self._w_v_pen,
-            "w_l_pen": self._w_l_pen,
+            "w_line_pen": self._w_line_pen,
+            "w_trafo_pen": self._w_trafo_pen,
             "pf_converged": pf_result.converged,
+            "pf_error": pf_error,
         }
         reward_per_agent, components = self.reward_fn.compute(env_state)
-
-        # Phase 1 协作奖励设计：将各智能体奖励取均值后广播给所有智能体。
-        # 目的：鼓励团队协作而非个体竞争。
-        # TODO Phase 2：改为个性化奖励（保留 per-agent 差异化信号）。
-        shared = float(np.mean(reward_per_agent))
-        reward = np.full(self.n, shared, dtype=np.float32)
+        reward = np.asarray(reward_per_agent, dtype=np.float32)
 
         grid_power = (net_load_t + e_bat).astype(np.float32)
 
-        # ----------------------------------------------------------
-        # Advance state
-        # ----------------------------------------------------------
         self.soc = soc_next
         self.cur_step += 1
         done = self.cur_step >= self.episode_length
-        done_n = [done] * self.n
+        terminated_n = [False] * self.n
+        truncated_n = [done] * self.n
 
         obs = self.obs_builder.zeros(self.n) if done else self.obs_builder.build(self)
 
-        # ----------------------------------------------------------
-        # Build info dict (superset of EnergyStorageEnv info keys)
-        # ----------------------------------------------------------
         n_v_viol = int(np.sum(pf_result.v_violation > 0.0))
-        n_l_viol = int(pf_result.l_violation > 0.0)
+        n_line_viol = int(
+            np.any(
+                np.asarray(pf_result.line_loading_pct, dtype=np.float32)
+                > float(self._grid_cfg.line_max_loading_pct)
+            )
+        )
+        n_trafo_viol = int(
+            np.any(
+                np.asarray(pf_result.trafo_loading_pct, dtype=np.float32)
+                > float(self._grid_cfg.line_max_loading_pct)
+            )
+        )
 
-        info: dict = {
+        info: dict[str, Any] = {
             "episode_done": done,
             "t": int(t),
             "price": float(price_t),
@@ -439,22 +415,31 @@ class GridEnv(gym.Env):
             "soc_t": soc_t,
             "soc_next": soc_next,
             "available_signals": sorted(self.signals),
-            # Reward components (from ComponentMeta keys).
             **components,
             "reward": reward,
             "mu_t": float(mu_t),
             "mu_next": float(mu_next),
-            # Grid-specific fields.
             "pf_converged": pf_result.converged,
+            "pf_error": pf_error,
             "vm_pu": pf_result.vm_pu,
             "agent_vm_pu": pf_result.agent_vm_pu,
             "line_loading_pct": pf_result.line_loading_pct,
+            "trafo_loading_pct": pf_result.trafo_loading_pct,
             "v_violation": pf_result.v_violation,
+            "line_violation": float(pf_result.line_violation),
+            "trafo_violation": float(pf_result.trafo_violation),
             "l_violation": float(pf_result.l_violation),
             "n_v_violations": n_v_viol,
-            "n_l_violations": n_l_viol,
+            "n_l_violations": int(max(n_line_viol, n_trafo_viol)),
+            "n_line_violations": n_line_viol,
+            "n_t_violations": n_trafo_viol,
+            "n_trafo_violations": n_trafo_viol,
+            "n_buses": int(pf_result.n_buses),
+            "n_lines": int(pf_result.n_lines),
+            "n_trafos": int(pf_result.n_trafos),
         }
-        return obs, reward.tolist(), done_n, info
+        return obs, reward.tolist(), terminated_n, truncated_n, info
 
     def close(self) -> None:
         pass
+

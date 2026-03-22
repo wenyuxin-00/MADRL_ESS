@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
 # 模块级缓存: SimBench 编码 -> 模板网络对象
 # 每个环境获取独立的深拷贝，因此可安全修改
 _NET_CACHE: dict[str, "pp.pandapowerNet"] = {}
+
+
+def _ensure_safe_pandapower_imports() -> None:
+    """Disable numba JIT before importing pandapower / simbench.
+
+    In the current MADRL_ESS environment, enabling numba JIT can make
+    pandapower / simbench imports hang and causes power-flow runs to fail
+    consistently. We prefer the slower but stable code path here.
+    """
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 
 def build_simbench_net(sb_code: str) -> "pp.pandapowerNet":
@@ -37,6 +48,7 @@ def build_simbench_net(sb_code: str) -> "pp.pandapowerNet":
         pandapowerNet: 独立的 pandapower 网络对象，可安全修改
     """
     if sb_code not in _NET_CACHE:
+        _ensure_safe_pandapower_imports()
         import simbench as sb
 
         # 首次加载并缓存模板网络
@@ -65,6 +77,7 @@ def apply_bus_injections(
         bus_id_to_q_kvar: 可选的无功功率注入（kVAr）映射，
                           省略时所有母线默认为零
     """
+    _ensure_safe_pandapower_imports()
     import pandapower as pp
 
     if bus_id_to_q_kvar is None:

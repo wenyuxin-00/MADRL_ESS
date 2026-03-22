@@ -1,14 +1,10 @@
-"""入口脚本、评估工具和通用基础设施。
+"""Package exports for top-level script helpers."""
 
-本模块集中了所有执行入口和辅助脚本：
+from scripts.comparison import comparison_records_to_rows, evaluate_controller_suite
+from scripts.evaluate import evaluate_controller
 
-子模块:
-    builder      -- 实验组件构建入口
-    train        -- 训练主循环（TrainRunner）
-    checkpoints  -- checkpoint 保存与加载
-    evaluate     -- 评估器
-    comparison   -- 多控制器对比评估
-    plots/       -- 训练曲线与电网结果可视化
-    recorders/   -- Episode 与电网数据录制
-    utils/       -- 通用工具（路径、tensor 操作、运行时、回放缓冲区）
-"""
+__all__ = [
+    "comparison_records_to_rows",
+    "evaluate_controller",
+    "evaluate_controller_suite",
+]

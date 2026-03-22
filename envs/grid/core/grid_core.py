@@ -1,11 +1,8 @@
-"""电网核心模型。
-
-封装 pandapower 电网的创建、潮流计算和结果提取，
-供 GridEnv 调用。
-"""
+"""Core pandapower wrapper used by GridEnv."""
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -16,128 +13,182 @@ from envs.grid.core.net_builder import apply_bus_injections, build_simbench_net
 
 if TYPE_CHECKING:
     from envs.grid.config.grid_config import AgentDeployment
-    from configs.experiment_config import GridConfig
 
 
 class GridCore:
-    """单个环境实例对应的 pandapower 电网封装。"""
+    """One pandapower network instance for one environment."""
 
     def __init__(
         self,
-        deployments: list[AgentDeployment],
-        grid_cfg: Any,  # GridConfig，避免模块级循环导入
+        deployments: list["AgentDeployment"],
+        grid_cfg: Any,
     ) -> None:
         self.deployments = deployments
         self.grid_cfg = grid_cfg
         self.n_agents = len(deployments)
-        self.agent_bus_ids: list[int] = [d.bus_id for d in deployments]
+        self.agent_bus_ids = [deployment.bus_id for deployment in deployments]
 
-        # 创建 pandapower 电网。
         self.net = build_simbench_net(grid_cfg.sb_code)
-        self.n_buses: int = len(self.net.bus)
-        self.n_lines: int = len(self.net.line)
+        self.n_buses = int(len(self.net.bus))
+        self.n_lines = int(len(self.net.line))
+        self.n_trafos = int(len(getattr(self.net, "trafo", [])))
 
-        # 预构建 bus_id -> 位置索引映射，方便快速取每个 agent 所在母线的结果。
         bus_index_list = list(self.net.bus.index)
-        self._bus_id_to_pos: dict[int, int] = {
-            bid: pos for pos, bid in enumerate(bus_index_list)
-        }
-        for bid in self.agent_bus_ids:
-            if bid not in self._bus_id_to_pos:
+        self._bus_id_to_pos = {bus_id: pos for pos, bus_id in enumerate(bus_index_list)}
+        for bus_id in self.agent_bus_ids:
+            if bus_id not in self._bus_id_to_pos:
                 raise ValueError(
-                    f"agent_bus_id={bid} 不存在于电网 bus 索引中。"
-                    f"可用的 bus_id: {bus_index_list}"
+                    f"agent_bus_id={bus_id} is not present in network bus index. "
+                    f"Available bus ids: {bus_index_list}"
                 )
 
-        # 保存 agent 节点的原始负荷 / 分布式电源值，避免跨步累积。
         self._original_load_p_mw: dict[int, float] = {}
         self._original_sgen_p_mw: dict[int, float] = {}
-        for bid in self.agent_bus_ids:
-            load_mask = self.net.load["bus"] == bid
+        for bus_id in self.agent_bus_ids:
+            load_mask = self.net.load["bus"] == bus_id
             if load_mask.any():
-                self._original_load_p_mw[bid] = float(
+                self._original_load_p_mw[bus_id] = float(
                     self.net.load.at[self.net.load.index[load_mask][0], "p_mw"]
                 )
-            sgen_mask = self.net.sgen["bus"] == bid
+            sgen_mask = self.net.sgen["bus"] == bus_id
             if sgen_mask.any():
-                self._original_sgen_p_mw[bid] = float(
+                self._original_sgen_p_mw[bus_id] = float(
                     self.net.sgen.at[self.net.sgen.index[sgen_mask][0], "p_mw"]
                 )
 
-        # 潮流失败时用上一次有效结果回退。
-        self._last_valid: GridStepResult = self._make_zero_result()
+        self._last_valid = self._make_zero_result()
+        self.last_pf_error = ""
 
     def reset(self, base_load_kw: np.ndarray, base_pv_kw: np.ndarray) -> None:
-        """重置 episode 的电网状态。"""
+        """Reset network state for a new episode."""
+        del base_load_kw, base_pv_kw
         self._restore_agent_buses()
         self._last_valid = self._make_zero_result()
+        self.last_pf_error = ""
 
     def step(
         self,
         p_batt_kw: np.ndarray,
         base_load_kw: np.ndarray,
     ) -> GridStepResult:
-        """执行一步潮流计算并返回结果。
-
-        约定：
-            `p_batt_kw > 0` 表示电池充电。
-            `p_batt_kw < 0` 表示电池放电。
-        """
-        # 先还原原始工况，再施加本步注入量。
+        """Apply the current injections and run one power-flow step."""
         self._restore_agent_buses()
 
         p_inject_kw = -(base_load_kw + p_batt_kw)
         bus_id_to_p_kw = {
-            self.agent_bus_ids[i]: float(p_inject_kw[i])
-            for i in range(self.n_agents)
+            self.agent_bus_ids[i]: float(p_inject_kw[i]) for i in range(self.n_agents)
         }
         apply_bus_injections(self.net, bus_id_to_p_kw)
 
         try:
-            import pandapower as pp
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                pp.runpp(
-                    self.net,
-                    algorithm=self.grid_cfg.pf_solver,
-                    numba=True,
-                    verbose=False,
-                )
+            self._runpp_with_fallback()
             result = self._extract_result(converged=True)
+            self.last_pf_error = ""
             self._last_valid = result
             return result
-
-        except Exception:
-            # 潮流失败时返回上一次有效结果，只把 converged 标为 False。
-            import dataclasses
-
+        except Exception as exc:
+            self.last_pf_error = f"{type(exc).__name__}: {exc}"
             return dataclasses.replace(self._last_valid, converged=False)
 
+    def _runpp_with_fallback(self) -> None:
+        """Run pandapower with several stability-first fallback configurations."""
+        import pandapower as pp
+
+        base_kwargs = {"verbose": False}
+        attempts = (
+            {
+                "algorithm": self.grid_cfg.pf_solver,
+                "numba": False,
+                "lightsim2grid": False,
+                "calculate_voltage_angles": False,
+                "voltage_depend_loads": False,
+                "init": "flat",
+            },
+            {
+                "algorithm": "bfsw",
+                "numba": False,
+                "lightsim2grid": False,
+                "calculate_voltage_angles": False,
+                "voltage_depend_loads": False,
+                "init": "flat",
+            },
+            {
+                "algorithm": self.grid_cfg.pf_solver,
+                "numba": False,
+                "lightsim2grid": False,
+                "calculate_voltage_angles": False,
+                "voltage_depend_loads": False,
+                "init": "auto",
+            },
+            {
+                "algorithm": self.grid_cfg.pf_solver,
+                "numba": True,
+                "lightsim2grid": False,
+                "calculate_voltage_angles": False,
+                "voltage_depend_loads": False,
+                "init": "auto",
+            },
+        )
+        last_exc: Exception | None = None
+        error_messages: list[str] = []
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for extra_kwargs in attempts:
+                try:
+                    pp.runpp(self.net, **base_kwargs, **extra_kwargs)
+                    return
+                except TypeError as exc:
+                    last_exc = exc
+                    error_messages.append(
+                        f"{extra_kwargs.get('algorithm', self.grid_cfg.pf_solver)} / "
+                        f"numba={extra_kwargs.get('numba')} / "
+                        f"lightsim2grid={extra_kwargs.get('lightsim2grid', 'default')} -> "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    if "lightsim2grid" not in str(exc):
+                        continue
+                except Exception as exc:
+                    last_exc = exc
+                    error_messages.append(
+                        f"{extra_kwargs.get('algorithm', self.grid_cfg.pf_solver)} / "
+                        f"numba={extra_kwargs.get('numba')} / "
+                        f"lightsim2grid={extra_kwargs.get('lightsim2grid', 'default')} -> "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        if last_exc is not None:
+            raise RuntimeError(" | ".join(error_messages)) from last_exc
+        raise RuntimeError("pandapower.runpp failed without exposing an exception.")
+
     def _restore_agent_buses(self) -> None:
-        """将 agent 节点的 load/sgen 还原到初始值。"""
-        for bid in self.agent_bus_ids:
-            load_mask = self.net.load["bus"] == bid
-            if load_mask.any() and bid in self._original_load_p_mw:
+        """Restore tracked load/sgen values before writing the next step."""
+        for bus_id in self.agent_bus_ids:
+            load_mask = self.net.load["bus"] == bus_id
+            if load_mask.any() and bus_id in self._original_load_p_mw:
                 self.net.load.at[
                     self.net.load.index[load_mask][0], "p_mw"
-                ] = self._original_load_p_mw[bid]
-            sgen_mask = self.net.sgen["bus"] == bid
-            if sgen_mask.any() and bid in self._original_sgen_p_mw:
+                ] = self._original_load_p_mw[bus_id]
+            sgen_mask = self.net.sgen["bus"] == bus_id
+            if sgen_mask.any() and bus_id in self._original_sgen_p_mw:
                 self.net.sgen.at[
                     self.net.sgen.index[sgen_mask][0], "p_mw"
-                ] = self._original_sgen_p_mw[bid]
+                ] = self._original_sgen_p_mw[bus_id]
 
     def _extract_result(self, *, converged: bool) -> GridStepResult:
-        """从 pandapower 结果表中提取训练会用到的物理量。"""
+        """Extract the subset of pandapower results used by training and plots."""
         vm_pu = self.net.res_bus["vm_pu"].to_numpy(dtype=np.float32)
         va_degree = self.net.res_bus["va_degree"].to_numpy(dtype=np.float32)
         line_loading_pct = self.net.res_line["loading_percent"].to_numpy(dtype=np.float32)
         p_mw_from = self.net.res_line["p_from_mw"].to_numpy(dtype=np.float32)
 
-        # 快速取各 agent 所在母线的电压。
+        if self.n_trafos > 0 and hasattr(self.net, "res_trafo") and not self.net.res_trafo.empty:
+            trafo_loading_pct = self.net.res_trafo["loading_percent"].to_numpy(dtype=np.float32)
+        else:
+            trafo_loading_pct = np.zeros(self.n_trafos, dtype=np.float32)
+
         agent_vm_pu = np.array(
-            [float(vm_pu[self._bus_id_to_pos[bid]]) for bid in self.agent_bus_ids],
+            [float(vm_pu[self._bus_id_to_pos[bus_id]]) for bus_id in self.agent_bus_ids],
             dtype=np.float32,
         )
 
@@ -149,32 +200,44 @@ class GridCore:
         v_violation = v_violation.astype(np.float32)
 
         limit = float(self.grid_cfg.line_max_loading_pct)
-        l_violation = float(max(0.0, float(np.max(line_loading_pct)) - limit) / 100.0)
+        max_line_loading = float(np.max(line_loading_pct)) if line_loading_pct.size else 0.0
+        max_trafo_loading = float(np.max(trafo_loading_pct)) if trafo_loading_pct.size else 0.0
+        line_violation = float(max(0.0, max_line_loading - limit) / 100.0)
+        trafo_violation = float(max(0.0, max_trafo_loading - limit) / 100.0)
+        l_violation = float(max(line_violation, trafo_violation))
 
         return GridStepResult(
             converged=converged,
             vm_pu=vm_pu,
             va_degree=va_degree,
             line_loading_pct=line_loading_pct,
+            trafo_loading_pct=trafo_loading_pct,
             p_mw_from=p_mw_from,
             agent_vm_pu=agent_vm_pu,
             v_violation=v_violation,
+            line_violation=line_violation,
+            trafo_violation=trafo_violation,
             l_violation=l_violation,
             n_buses=self.n_buses,
             n_lines=self.n_lines,
+            n_trafos=self.n_trafos,
         )
 
     def _make_zero_result(self) -> GridStepResult:
-        """构造潮流未成功时的默认结果。"""
+        """Fallback result used before the first converged power flow."""
         return GridStepResult(
             converged=False,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
             va_degree=np.zeros(self.n_buses, dtype=np.float32),
             line_loading_pct=np.zeros(self.n_lines, dtype=np.float32),
+            trafo_loading_pct=np.zeros(self.n_trafos, dtype=np.float32),
             p_mw_from=np.zeros(self.n_lines, dtype=np.float32),
             agent_vm_pu=np.ones(self.n_agents, dtype=np.float32),
             v_violation=np.zeros(self.n_agents, dtype=np.float32),
+            line_violation=0.0,
+            trafo_violation=0.0,
             l_violation=0.0,
             n_buses=self.n_buses,
             n_lines=self.n_lines,
+            n_trafos=self.n_trafos,
         )

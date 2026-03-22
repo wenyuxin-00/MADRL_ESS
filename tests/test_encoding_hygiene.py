@@ -18,6 +18,7 @@ def test_key_notebooks_are_utf8_without_bom():
         repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb",
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl.ipynb",
+        repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
     ]
 
     offenders = [path for path in notebook_paths if path.read_bytes().startswith(b"\xef\xbb\xbf")]
@@ -30,6 +31,7 @@ def test_key_notebooks_do_not_contain_placeholder_text():
         repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb",
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl.ipynb",
+        repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
     ]
 
     for path in notebook_paths:

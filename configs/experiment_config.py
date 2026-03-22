@@ -45,6 +45,8 @@ class EnvConfig:
     soc_min: float = 0.05
     soc_max: float = 0.95
     soc_target: float = 0.5
+    storage_power_scale: float = 1.0
+    storage_capacity_scale: float = 1.0
 
 
 @dataclass

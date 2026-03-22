@@ -337,6 +337,8 @@ def _apply_rural1_phase1(cfg: Any) -> None:
     cfg.env.soc_max = 0.95
     cfg.env.soc_target = 0.5
     cfg.env.dt = 0.25                       # 15-minute intervals
+    cfg.env.storage_power_scale = 12.0
+    cfg.env.storage_capacity_scale = 12.0
 
     # Grid.
     cfg.grid.sb_code = "1-LV-rural1--0-sw"
@@ -346,13 +348,18 @@ def _apply_rural1_phase1(cfg: Any) -> None:
     cfg.grid.v_max_pu = 1.05
     cfg.grid.line_max_loading_pct = 100.0
     cfg.grid.w_v_pen = 10.0
-    cfg.grid.w_l_pen = 5.0
+    cfg.grid.w_l_pen = 10.0
+    cfg.grid.w_line_pen = 10.0
+    cfg.grid.w_trafo_pen = 10.0
 
     # Dataset.
     cfg.data.dataset_type = "csv_prosumer"
 
     # Reward.
     cfg.reward.type = "grid_composite"
+    cfg.reward.w_pen = 6.0
+    cfg.reward.w_soc = 0.30
+    cfg.reward.lambda_bonus = 0.001
 
     # Observation — same as simbench profile.
     cfg.obs.local_features = ["time", "price", "load", "pv", "soc"]

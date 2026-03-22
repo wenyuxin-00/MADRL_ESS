@@ -1,64 +1,67 @@
-"""奖励分量分析图。
+"""Reward decomposition plotting helpers."""
 
-将复合奖励拆分为各分量并可视化，便于调试奖励设计。
+from __future__ import annotations
 
-主要函数:
-    plot_reward_breakdown -- 绘制奖励分量分解图
-"""
-
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
+def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
+    return pd.Series(data).rolling(window=window, min_periods=1).mean().to_numpy()
+
+
 def plot_reward_decomposition(history, episode_rewards, reward_fn, title, window=20):
-    """自适应画图：Total + 各奖励分量（子图数/颜色/标题由 reward_fn.component_meta 驱动）。
-
-    新增奖励分量只需修改 composite.py 的 component_meta，此函数无需改动。
-
-    Parameters
-    ----------
-    history : list[dict]
-        TrainRunner.history，每个元素为一个 episode 的轨迹字典。
-    episode_rewards : list[float]
-        TrainRunner.episode_rewards，每个 episode 的 total reward（sum over agents）。
-    reward_fn : RewardFn
-        env.reward_fn 实例，用于读取 component_meta。
-    title : str
-        图标题。
-    window : int
-        移动平均窗口大小，默认 20。
-    """
+    """Plot total reward, each component, and aggregate grid penalties when available."""
     if len(history) == 0:
         print("No history to plot.")
         return
 
-    metas   = reward_fn.component_meta
-    n_plots = 1 + len(metas)
-
+    metas = list(reward_fn.component_meta)
     ep_total = np.array(episode_rewards, dtype=np.float32)
-    ep_comps = [
-        np.array([np.sum(ep[f"{m.key}_sum"]) for ep in history], dtype=np.float32)
-        for m in metas
-    ]
+    ep_comps = {
+        meta.key: np.array([np.sum(ep[f"{meta.key}_sum"]) for ep in history], dtype=np.float32)
+        for meta in metas
+    }
 
-    fig, axs = plt.subplots(n_plots, 1, figsize=(10, 2 * n_plots), sharex=True)
+    aggregate_key = None
+    grid_penalty_keys = ("r_v_pen", "r_line_pen", "r_trafo_pen")
+    if all(key in ep_comps for key in grid_penalty_keys):
+        aggregate_key = "grid_penalty"
+        ep_comps[aggregate_key] = (
+            ep_comps["r_v_pen"] + ep_comps["r_line_pen"] + ep_comps["r_trafo_pen"]
+        )
+
+    n_plots = 1 + len(metas) + int(aggregate_key is not None)
+    fig, axs = plt.subplots(n_plots, 1, figsize=(10.5, 2.15 * n_plots), sharex=True)
     if n_plots == 1:
         axs = [axs]
     fig.suptitle(title, fontsize=15)
 
     def _plot(ax, data, color, name):
-        ma = pd.Series(data).rolling(window=window, min_periods=1).mean()
+        ma = _moving_average(np.asarray(data, dtype=np.float32), window=window)
         ax.plot(ma, color=color, linewidth=2, label=f"MA({window})")
         ax.set_title(name)
         ax.grid(True, linestyle=":")
         ax.axhline(0, color="black", linewidth=0.5)
         ax.legend(loc="best")
 
-    _plot(axs[0], ep_total, "red", "1) Episode Total Reward (sum over agents)")
-    for i, (ep_c, meta) in enumerate(zip(ep_comps, metas)):
-        _plot(axs[i + 1], ep_c, meta.color, f"{i+2}) {meta.label}")
+    plot_index = 0
+    _plot(axs[plot_index], ep_total, "red", "1) Episode Total Reward (sum over agents)")
+    plot_index += 1
+
+    if aggregate_key is not None:
+        _plot(
+            axs[plot_index],
+            ep_comps[aggregate_key],
+            "#111827",
+            "2) Grid penalty aggregate (signed contribution)",
+        )
+        plot_index += 1
+
+    for meta_idx, meta in enumerate(metas, start=plot_index + 1):
+        _plot(axs[meta_idx - 1], ep_comps[meta.key], meta.color, f"{meta_idx}) {meta.label}")
 
     axs[-1].set_xlabel("Episode")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     plt.show()

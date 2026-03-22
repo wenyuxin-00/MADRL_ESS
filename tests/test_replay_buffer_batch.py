@@ -1,9 +1,9 @@
 import numpy as np
 import torch
 
+from scripts.builder import build_env
 from scripts.utils.nested import stack_nested
 from scripts.utils.replay_buffer import ReplayBuffer, to_torch_batch
-from scripts.builder import build_env
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -15,9 +15,10 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         cfg.runtime.observation_schema = dict(env.observation_schema)
         cfg.runtime.action_dim = int(env.action_space[0].shape[0])
 
-        obs = env.reset(episode_idx=0)
+        obs, _ = env.reset(episode_idx=0)
         action_n = [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
-        next_obs, reward, done, _ = env.step(action_n)
+        next_obs, reward, terminated, truncated, _ = env.step(action_n)
+        done = np.logical_or(np.asarray(terminated), np.asarray(truncated)).astype(np.float32)
 
         batched_obs = stack_nested([obs, obs])
         batched_next_obs = stack_nested([next_obs, next_obs])
@@ -27,7 +28,7 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
             axis=0,
         )
         batched_done = np.stack(
-            [np.asarray(done, dtype=np.float32).reshape(cfg.env.num_agents, 1)] * 2,
+            [done.reshape(cfg.env.num_agents, 1)] * 2,
             axis=0,
         )
 

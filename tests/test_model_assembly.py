@@ -1,8 +1,8 @@
 import torch
 
-from scripts.utils.nested import add_batch_dim, to_torch_nested
-from scripts.builder import build_env
 from models import build_actor_network, build_critic_network, validate_and_finalize_model_config
+from scripts.builder import build_env
+from scripts.utils.nested import add_batch_dim, to_torch_nested
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -12,7 +12,7 @@ def _prepare_runtime(cfg):
         cfg.runtime.observation_schema = dict(env.observation_schema)
         cfg.runtime.observation_layout = dict(env.observation_layout)
         cfg.runtime.action_dim = int(env.action_space[0].shape[0])
-        obs = env.reset(episode_idx=0)
+        obs, _ = env.reset(episode_idx=0)
         return to_torch_nested(add_batch_dim(obs), cfg.runtime.device)
     finally:
         env.close()

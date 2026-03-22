@@ -1,7 +1,4 @@
-"""Jupyter notebook 实验辅助工具。
-
-提供 notebook 中常用的实验管理函数，如结果加载、进度显示等。
-"""
+"""Notebook experiment utilities."""
 
 from __future__ import annotations
 
@@ -11,44 +8,45 @@ from pprint import pprint
 
 import torch
 
-from controllers.madrl.registry import get_agent_cls
-from scripts.utils.nested import add_batch_dim, to_torch_nested
-from scripts.utils.project_paths import get_checkpoint_root, get_forecast_artifact_root, project_root
 from configs.profiles import print_experiment_summary
 from controllers import ClassicDRLController, MADRLController, MPCController, ZeroController
-from scripts.builder import build_env, build_train_runner
-from scripts.evaluate import evaluate_controller
+from controllers.madrl.registry import get_agent_cls
 from predictors.artifacts import get_default_lstm_artifact_dir
-from scripts.utils.torch_runtime import resolve_device
+from scripts.builder import build_env, build_train_runner
 from scripts.checkpoints import resolve_checkpoint_to_load
+from scripts.evaluate import evaluate_controller
+from scripts.utils.nested import add_batch_dim, to_torch_nested
+from scripts.utils.project_paths import get_checkpoint_root, get_forecast_artifact_root, project_root
+from scripts.utils.torch_runtime import resolve_device
 
 
 def summarize_cfg(cfg) -> dict:
-    """打印并返回实验摘要。"""
+    """Print and return a compact experiment summary."""
     return print_experiment_summary(cfg)
 
 
 def get_lstm_artifact_root(root=None) -> Path:
-    """返回多信号 LSTM artifact 根目录。"""
+    """Return the default LSTM artifact root for notebooks."""
     if root is None:
         return get_default_lstm_artifact_dir()
     return get_forecast_artifact_root(root) / "lstm"
 
 
 def get_madrl_checkpoint_root(root=None) -> Path:
-    """返回训练 notebook 默认使用的 checkpoint 根目录。"""
+    """Return the default checkpoint root used by training notebooks."""
     return get_checkpoint_root(root)
 
 
 def build_runner(cfg, seed: int = 0, env_name: str = "NotebookTrain", number: int = 1):
-    """为 notebook 构建训练 runner。"""
+    """Build a TrainRunner for notebook use."""
     return build_train_runner(cfg, seed=seed, env_name=env_name, number=number)
 
 
 def inspect_runner_io(runner, cfg) -> dict:
-    """检查 runner 的 rollout、actor 和 critic 前向接口。"""
-    rollout = runner.rollout_once(runner.env.reset())
-    eval_obs = runner.env_evaluate.reset(episode_idx=0)
+    """Inspect runner rollout, actor, and critic interfaces."""
+    rollout = runner.rollout_once()
+    eval_obs, reset_info = runner.env_evaluate.reset(episode_idx=0)
+    del reset_info
     eval_obs_t = to_torch_nested(add_batch_dim(eval_obs), cfg.runtime.device)
 
     with torch.no_grad():
@@ -64,6 +62,8 @@ def inspect_runner_io(runner, cfg) -> dict:
         "action_batch_shape": tuple(rollout["action_batch"].shape),
         "reward_shape": tuple(rollout["reward"].shape),
         "done_shape": tuple(rollout["done"].shape),
+        "terminated_shape": tuple(rollout["terminated"].shape),
+        "truncated_shape": tuple(rollout["truncated"].shape),
         "info_keys": sorted(rollout["info_list"][0].keys()),
         "actor_action_shape": tuple(actor_action.shape),
         "critic_shape": tuple(
@@ -75,7 +75,7 @@ def inspect_runner_io(runner, cfg) -> dict:
 
 
 def sanity_check_runner(cfg, seed: int = 0) -> dict:
-    """构建临时 runner，完成一轮公共前向检查。"""
+    """Build a temporary runner and run a one-step interface check."""
     sanity_cfg = deepcopy(cfg)
     runner = build_runner(sanity_cfg, seed=seed, env_name="NotebookSanity", number=1)
     try:
@@ -85,7 +85,7 @@ def sanity_check_runner(cfg, seed: int = 0) -> dict:
 
 
 def evaluate_runner(runner, cfg, n_episodes: int = 1, deterministic: bool = True) -> dict:
-    """把训练后的 runner 转成 controller 并执行统一评估。"""
+    """Turn a trained runner into a controller and evaluate it."""
     eval_env = build_env(cfg, mode="test")
     controller = MADRLController(runner.agent_n, noise_std=runner.noise_std)
     try:
@@ -108,7 +108,7 @@ def load_madrl_controller(
     episode_tag: int | None = None,
     device=None,
 ):
-    """从 checkpoint 加载 MADRL controller，供 compare notebook 使用。"""
+    """Load a MADRL controller from checkpoints."""
     load_cfg = deepcopy(cfg)
     load_cfg.algo.name = algorithm or load_cfg.algo.name
     if device is not None:
@@ -120,7 +120,11 @@ def load_madrl_controller(
         load_cfg.runtime.observation_layout = dict(env.observation_layout)
         load_cfg.runtime.action_dim = int(env.action_space[0].shape[0])
 
-        checkpoint_info = resolve_checkpoint_to_load(model_root, load_cfg.algo.name, episode_tag=episode_tag)
+        checkpoint_info = resolve_checkpoint_to_load(
+            model_root,
+            load_cfg.algo.name,
+            episode_tag=episode_tag,
+        )
         agent_cls = get_agent_cls(load_cfg.algo.name)
         agents = [agent_cls(load_cfg, agent_id=i) for i in range(load_cfg.env.num_agents)]
         for agent in agents:
@@ -144,7 +148,7 @@ def build_compare_controller_builders(
     algorithm: str,
     episode_tag: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """为 compare notebook 生成 controller builders 与附加元信息。"""
+    """Build controller factories and metadata for comparison notebooks."""
     model_root = Path(model_root)
     controller_builders: dict[str, object] = {}
     metadata: dict[str, object] = {}

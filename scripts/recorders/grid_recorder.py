@@ -1,10 +1,4 @@
-"""电网潮流数据记录器。
-
-记录每步的电压、线路负载等电网潮流计算结果。
-
-主要类:
-    GridRecorder -- 电网数据记录器
-"""
+"""Helpers for recording grid-related episode traces."""
 
 from __future__ import annotations
 
@@ -12,44 +6,25 @@ import numpy as np
 
 
 def init_grid_record(n_agents: int) -> dict:
-    """Create an empty grid history dict for one episode.
-
-    Parameters
-    ----------
-    n_agents:
-        Number of RL agents (= number of agent buses tracked).
-
-    Returns
-    -------
-    dict with keys:
-        ``agent_vm_pu``     — list of per-agent voltage lists, shape (n_agents, T).
-        ``line_loading_pct``— list of full line-loading arrays, one per step.
-        ``n_v_violations``  — list of violation counts (int) per step.
-        ``n_l_violations``  — list of line-overload flags (int, 0 or 1) per step.
-        ``pf_converged``    — list of convergence bools per step.
-    """
+    """Create an empty grid history dict for one episode."""
     return {
         "agent_vm_pu": [[] for _ in range(int(n_agents))],
         "line_loading_pct": [],
+        "trafo_loading_pct": [],
+        "line_violation": [],
+        "trafo_violation": [],
+        "l_violation": [],
         "n_v_violations": [],
         "n_l_violations": [],
+        "n_line_violations": [],
+        "n_t_violations": [],
+        "n_trafo_violations": [],
         "pf_converged": [],
     }
 
 
 def append_grid_step_record(grid_history: dict, info: dict) -> None:
-    """Append one environment step to a grid history dict.
-
-    Silently skips if ``info`` does not contain ``"agent_vm_pu"`` (e.g.,
-    when called on a non-grid environment).
-
-    Parameters
-    ----------
-    grid_history:
-        Dict created by :func:`init_grid_record`.
-    info:
-        The ``info`` dict returned by ``GridEnv.step()``.
-    """
+    """Append one GridEnv step to a grid history dict."""
     if "agent_vm_pu" not in info:
         return
 
@@ -60,12 +35,22 @@ def append_grid_step_record(grid_history: dict, info: dict) -> None:
 
     line_loading = info.get("line_loading_pct")
     if line_loading is not None:
-        grid_history["line_loading_pct"].append(
-            np.asarray(line_loading, dtype=np.float32).copy()
-        )
+        grid_history["line_loading_pct"].append(np.asarray(line_loading, dtype=np.float32).copy())
     else:
         grid_history["line_loading_pct"].append(np.zeros(0, dtype=np.float32))
 
+    trafo_loading = info.get("trafo_loading_pct")
+    if trafo_loading is not None:
+        grid_history["trafo_loading_pct"].append(np.asarray(trafo_loading, dtype=np.float32).copy())
+    else:
+        grid_history["trafo_loading_pct"].append(np.zeros(0, dtype=np.float32))
+
+    grid_history["line_violation"].append(float(info.get("line_violation", info.get("l_violation", 0.0))))
+    grid_history["trafo_violation"].append(float(info.get("trafo_violation", 0.0)))
+    grid_history["l_violation"].append(float(info.get("l_violation", 0.0)))
     grid_history["n_v_violations"].append(int(info.get("n_v_violations", 0)))
     grid_history["n_l_violations"].append(int(info.get("n_l_violations", 0)))
+    grid_history["n_line_violations"].append(int(info.get("n_line_violations", 0)))
+    grid_history["n_t_violations"].append(int(info.get("n_t_violations", 0)))
+    grid_history["n_trafo_violations"].append(int(info.get("n_trafo_violations", info.get("n_t_violations", 0))))
     grid_history["pf_converged"].append(bool(info.get("pf_converged", True)))

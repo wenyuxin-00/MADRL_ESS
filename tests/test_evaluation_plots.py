@@ -20,10 +20,18 @@ def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(
             "e_bat_req": [[0.1, -0.1, 0.0], [0.0, 0.1, -0.1]],
             "e_bat_exec": [[0.1, -0.05, 0.0], [0.0, 0.1, -0.05]],
             "penalty_sum": [0.2, 0.1],
+            "r_v_pen_sum": [-0.2, -0.1],
+            "r_line_pen_sum": [-0.4, -0.3],
+            "r_trafo_pen_sum": [-0.1, -0.2],
         }
     ]
     reward_fn = SimpleNamespace(
-        component_meta=[SimpleNamespace(key="penalty", label="Penalty", color="tab:red")]
+        component_meta=[
+            SimpleNamespace(key="penalty", label="Penalty", color="tab:red"),
+            SimpleNamespace(key="r_v_pen", label="Voltage penalty", color="red"),
+            SimpleNamespace(key="r_line_pen", label="Line penalty", color="brown"),
+            SimpleNamespace(key="r_trafo_pen", label="Transformer penalty", color="maroon"),
+        ]
     )
 
     with warnings.catch_warnings(record=True) as caught:

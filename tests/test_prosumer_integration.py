@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 
 from configs.experiment_config import ExperimentConfig
-from scripts.builder import build_env
 from data.loaders.csv_prosumer import CsvProsumerDataset
 from data.loaders.registry import build_dataset, get_dataset_cls
+from scripts.builder import build_env
 
 
 def _write_prosumer_csv(path: Path, total_steps: int, n_agents: int) -> None:
@@ -72,10 +72,13 @@ def test_env_uses_pv_net_load_and_agent_storage_sizing(tmp_path):
     env = build_env(cfg, mode="test")
 
     try:
-        obs = env.reset(episode_idx=0)
+        obs, reset_info = env.reset(episode_idx=0)
         assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert "p_max" in reset_info
 
-        _, reward, _, info = env.step([np.array([0.0], dtype=np.float32) for _ in range(cfg.env.num_agents)])
+        _, reward, _, _, info = env.step(
+            [np.array([0.0], dtype=np.float32) for _ in range(cfg.env.num_agents)]
+        )
 
         expected_load = np.array([4.0, 5.0, 6.0], dtype=np.float32)
         expected_pv = np.array([1.0, 1.5, 2.0], dtype=np.float32)
@@ -87,6 +90,6 @@ def test_env_uses_pv_net_load_and_agent_storage_sizing(tmp_path):
         assert np.allclose(info["net_load"], expected_base_net)
         assert np.allclose(info["p_max"], np.array([20.0, 10.0, 5.0], dtype=np.float32))
         assert np.allclose(info["battery_capacity_kwh"], np.array([50.0, 25.0, 12.5], dtype=np.float32))
-        assert np.allclose(reward, np.zeros((cfg.env.num_agents,), dtype=np.float32))
+        assert np.allclose(np.asarray(reward, dtype=np.float32), np.zeros((cfg.env.num_agents,), dtype=np.float32))
     finally:
         env.close()
