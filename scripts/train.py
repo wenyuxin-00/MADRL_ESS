@@ -138,6 +138,7 @@ class TrainRunner:
         update_calls = 0
 
         reward_metas = self.env_evaluate.reward_fn.component_meta
+        progress_postfix_interval = max(1, int(getattr(self.cfg.train, "progress_postfix_interval", 10)))
         active_histories = [
             init_episode_record(
                 n_agents=self.cfg.env.num_agents,
@@ -148,7 +149,12 @@ class TrainRunner:
         ]
         active_episode_rewards = np.zeros(self.cfg.train.num_envs, dtype=np.float32)
 
-        progress = tqdm(total=target_interactions, desc="Training", unit="iters")
+        progress = tqdm(
+            total=target_interactions,
+            desc="Training",
+            unit="iters",
+            disable=not bool(getattr(self.cfg.train, "show_progress", True)),
+        )
 
         try:
             obs, _ = self.env.reset()
@@ -229,7 +235,10 @@ class TrainRunner:
                     update_time_total += time.perf_counter() - update_start
 
                 progress.update(1)
-                if interaction_step % 10 == 0 or interaction_step == target_interactions:
+                if (
+                    interaction_step % progress_postfix_interval == 0
+                    or interaction_step == target_interactions
+                ):
                     avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
                     elapsed = max(time.perf_counter() - run_start, 1e-6)
                     progress.set_postfix(

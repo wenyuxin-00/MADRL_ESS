@@ -10,40 +10,11 @@ import numpy as np
 try:
     import gymnasium as gym
     from gymnasium import spaces
-except ModuleNotFoundError:
-    try:
-        import gym
-        from gym import spaces
-    except ModuleNotFoundError:
-        class _FallbackEnv:
-            def __init__(self) -> None:
-                self.np_random = np.random.default_rng()
-
-            def reset(self, *, seed: int | None = None):
-                self.np_random = np.random.default_rng(seed)
-                return None
-
-        class _FallbackBox:
-            def __init__(self, low, high, shape, dtype) -> None:
-                self.low = low
-                self.high = high
-                self.shape = tuple(shape)
-                self.dtype = dtype
-
-        class _FallbackDict(dict):
-            def __init__(self, mapping) -> None:
-                super().__init__(mapping)
-                self.spaces = dict(mapping)
-
-        class _FallbackSpaces:
-            Box = _FallbackBox
-            Dict = _FallbackDict
-
-        class _FallbackGym:
-            Env = _FallbackEnv
-
-        gym = _FallbackGym()
-        spaces = _FallbackSpaces()
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "GridEnv requires 'gymnasium'. Install gymnasium==0.29.1 in the active environment "
+        "instead of falling back to legacy Gym."
+    ) from exc
 
 
 class GridEnv(gym.Env):

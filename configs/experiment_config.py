@@ -133,6 +133,8 @@ class TrainConfig:
     noise_std_min: float = 0.2
     noise_decay_steps: float = 3e5
     use_noise_decay: bool = True
+    show_progress: bool = True
+    progress_postfix_interval: int = 10
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
         if self.max_train_steps is not None:

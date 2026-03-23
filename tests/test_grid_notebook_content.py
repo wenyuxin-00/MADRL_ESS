@@ -21,9 +21,13 @@ def test_grid_notebook_uses_test_split_and_parallel_training_defaults():
     assert "estimate_static_grid_sensitivity" not in notebook_text
     assert "ZeroController" not in notebook_text
     assert "evaluate_controller(" not in notebook_text
-    assert "cfg.train.num_envs = 16" in notebook_text
+    assert "import gymnasium as gym" in notebook_text
+    assert "sys.executable" in notebook_text
+    assert "cfg.train.show_progress = True" in notebook_text
+    assert "cfg.train.progress_postfix_interval = 10" in notebook_text
+    assert "cfg.train.num_envs = 32" in notebook_text
     assert "cfg.train.vec_env_type = 'subproc'" in notebook_text
-    assert "cfg.train.batch_size = 8192" in notebook_text
+    assert "cfg.train.batch_size = 4096" in notebook_text
     assert "cfg.train.updates_per_step = 8" in notebook_text
     assert "require_cuda = False" in notebook_text
     assert "runner = build_runner(" in notebook_text
