@@ -1,9 +1,9 @@
-"""奖励函数基类。
+"""濂栧姳鍑芥暟鍩虹被銆?
 
-定义所有奖励函数的统一接口。
+瀹氫箟鎵€鏈夊鍔卞嚱鏁扮殑缁熶竴鎺ュ彛銆?
 
-主要类:
-    BaseReward -- 奖励函数抽象基类
+涓昏绫?
+    BaseReward -- 濂栧姳鍑芥暟鎶借薄鍩虹被
 """
 
 from abc import ABC, abstractmethod
@@ -13,53 +13,53 @@ import numpy as np
 
 @dataclass
 class ComponentMeta:
-    """奖励分量的元数据，驱动 history 动态初始化和画图自适应。
+    """濂栧姳鍒嗛噺鐨勫厓鏁版嵁锛岄┍鍔?history 鍔ㄦ€佸垵濮嬪寲鍜岀敾鍥捐嚜閫傚簲銆?
 
-    属性:
-        key:   对应 info dict 的键名，如 "r_inc"
-        label: 子图标题，如 "+ r_inc (incremental cost)"
-        color: 子图颜色，如 "green"
-        sign:  +1 或 -1（该分量在 total 中的贡献符号，用于正确累加历史）
-               +1 → total 中是加号；-1 → total 中是减号
+    灞炴€?
+        key:   瀵瑰簲 info dict 鐨勯敭鍚嶏紝濡?"r_inc"
+        label: 瀛愬浘鏍囬锛屽 "+ r_inc (incremental cost)"
+        color: 瀛愬浘棰滆壊锛屽 "green"
+        sign:  +1 鎴?-1锛堣鍒嗛噺鍦?total 涓殑璐＄尞绗﹀彿锛岀敤浜庢纭疮鍔犲巻鍙诧級
+               +1 鈫?total 涓槸鍔犲彿锛?1 鈫?total 涓槸鍑忓彿
     """
-    key: str       # info 字典中的键名
-    label: str     # 可视化子图标题
-    color: str     # 可视化子图颜色
-    sign: int      # 在总奖励中的符号：+1 表示正贡献，-1 表示负贡献（惩罚项）
+    key: str       # info 瀛楀吀涓殑閿悕
+    label: str     # 鍙鍖栧瓙鍥炬爣棰?
+    color: str     # 鍙鍖栧瓙鍥鹃鑹?
+    sign: int      # 鍦ㄦ€诲鍔变腑鐨勭鍙凤細+1 琛ㄧず姝ｈ础鐚紝-1 琛ㄧず璐熻础鐚紙鎯╃綒椤癸級
 
 
 class RewardFn(ABC):
-    """所有奖励函数的抽象基类。
+    """鎵€鏈夊鍔卞嚱鏁扮殑鎶借薄鍩虹被銆?
 
-    子类需实现两个接口：
-    1. compute()         — 计算奖励，返回 (total, components) 元组
-    2. component_meta   — 声明各分量的元数据（驱动动态画图和 history）
+    瀛愮被闇€瀹炵幇涓や釜鎺ュ彛锛?
+    1. compute()         鈥?璁＄畻濂栧姳锛岃繑鍥?(total, components) 鍏冪粍
+    2. component_meta   鈥?澹版槑鍚勫垎閲忕殑鍏冩暟鎹紙椹卞姩鍔ㄦ€佺敾鍥惧拰 history锛?
 
-    env_state 键说明：
-        e_bat_req  (N,)  — 请求功率（可能越限）
-        e_bat      (N,)  — 执行功率（可行域投影后）
-        soc_t      (N,)  — 本步开始时的 SoC
-        soc_next   (N,)  — 本步结束后的 SoC
-        e_t        (N,)  — 本步开始时的储能量 = soc_t * c_bat
-        e_next     (N,)  — 本步结束后的储能量 = soc_next * c_bat
-        price_t    float — 当前电价
-        load_t     (N,)  — 当前负荷
-        mu_t       float — 未来 K 步平均电价（当前步）
-        mu_next    float — 未来 K 步平均电价（下一步）
-        gamma      float — 折扣因子（PBRS 使用）
+    env_state 閿鏄庯細
+        e_bat_req  (N,)  鈥?璇锋眰鍔熺巼锛堝彲鑳借秺闄愶級
+        e_bat      (N,)  鈥?鎵ц鍔熺巼锛堝彲琛屽煙鎶曞奖鍚庯級
+        soc_t      (N,)  鈥?鏈寮€濮嬫椂鐨?SoC
+        soc_next   (N,)  鈥?鏈缁撴潫鍚庣殑 SoC
+        e_t        (N,)  鈥?鏈寮€濮嬫椂鐨勫偍鑳介噺 = soc_t * c_bat
+        e_next     (N,)  鈥?鏈缁撴潫鍚庣殑鍌ㄨ兘閲?= soc_next * c_bat
+        price_t    float 鈥?褰撳墠鐢典环
+        load_t     (N,)  鈥?褰撳墠璐熻嵎
+        mu_t       float 鈥?鏈潵 K 姝ュ钩鍧囩數浠凤紙褰撳墠姝ワ級
+        mu_next    float 鈥?鏈潵 K 姝ュ钩鍧囩數浠凤紙涓嬩竴姝ワ級
+        gamma      float 鈥?鎶樻墸鍥犲瓙锛圥BRS 浣跨敤锛?
     """
 
     @abstractmethod
     def compute(self, env_state: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
-        计算奖励并返回各分量。
+        璁＄畻濂栧姳骞惰繑鍥炲悇鍒嗛噺銆?
 
         Returns:
             (total_reward, components)
             - total_reward: np.ndarray, shape (N,), dtype float32
-            - components:   dict[str, np.ndarray], 每个值 shape (N,) float32
-                            键名与 component_meta 中的 key 一一对应
-                            存储的是"绝对值"——符号由 ComponentMeta.sign 管理
+            - components:   dict[str, np.ndarray], 姣忎釜鍊?shape (N,) float32
+                            閿悕涓?component_meta 涓殑 key 涓€涓€瀵瑰簲
+                            瀛樺偍鐨勬槸"缁濆鍊?鈥斺€旂鍙风敱 ComponentMeta.sign 绠＄悊
         """
         ...
 
@@ -67,12 +67,13 @@ class RewardFn(ABC):
     @abstractmethod
     def component_meta(self) -> list[ComponentMeta]:
         """
-        返回各分量的元数据列表（list[ComponentMeta]）。
-        顺序与 compute() 返回的 components dict 中的键顺序一致。
-        该列表驱动：
-          - hems_env.py step() 中 info 的动态构建
-          - Runner 中 history dict 的动态初始化
-          - Runner 中每步数据的动态存储
-          - plot_reward_decomposition 的子图数量、颜色、标题
+        杩斿洖鍚勫垎閲忕殑鍏冩暟鎹垪琛紙list[ComponentMeta]锛夈€?
+        椤哄簭涓?compute() 杩斿洖鐨?components dict 涓殑閿『搴忎竴鑷淬€?
+        璇ュ垪琛ㄩ┍鍔細
+          - grid_env.py step() 涓?info 鐨勫姩鎬佹瀯寤?
+          - Runner 涓?history dict 鐨勫姩鎬佸垵濮嬪寲
+          - Runner 涓瘡姝ユ暟鎹殑鍔ㄦ€佸瓨鍌?
+          - plot_reward_decomposition 鐨勫瓙鍥炬暟閲忋€侀鑹层€佹爣棰?
         """
         ...
+

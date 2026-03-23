@@ -1,0 +1,14 @@
+# ? PowerShell ????????????? UTF-8?
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:LANG = 'zh_CN.UTF-8'
+
+try {
+    chcp 65001 > $null
+} catch {
+    # ??????????????????????? UTF-8 ???
+}

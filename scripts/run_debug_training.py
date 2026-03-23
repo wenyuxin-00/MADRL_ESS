@@ -1,8 +1,4 @@
-"""快速调试训练入口。
-
-使用 debug profile 快速启动一次小规模训练，
-用于验证训练流程是否正常。
-"""
+"""Quick debug entry point for the GridEnv training mainline."""
 
 from __future__ import annotations
 
@@ -11,9 +7,8 @@ from scripts.builder import build_train_runner
 
 
 def main() -> int:
-    """Run one small debug experiment from the command line."""
     cfg = compose_experiment_config(profile="debug", algorithm="MADDPG", model_family="mlp")
-    runner = build_train_runner(cfg, seed=0, env_name="SmokeEnv", number=1)
+    runner = build_train_runner(cfg, seed=0, env_name="GridEnvDebug", number=1)
     try:
         return runner.run()
     finally:

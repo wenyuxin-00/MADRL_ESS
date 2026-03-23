@@ -1,13 +1,13 @@
-"""电网拓扑与约束配置。
+"""鐢电綉鎷撴墤涓庣害鏉熼厤缃€?
 
-定义电网 SimBench 编码、求解器类型、电压约束等参数，
-以及智能体在电网中的部署位置和设备参数。
+瀹氫箟鐢电綉 SimBench 缂栫爜銆佹眰瑙ｅ櫒绫诲瀷銆佺數鍘嬬害鏉熺瓑鍙傛暟锛?
+浠ュ強鏅鸿兘浣撳湪鐢电綉涓殑閮ㄧ讲浣嶇疆鍜岃澶囧弬鏁般€?
 
-主要类:
-    AgentDeployment -- 单个智能体的物理部署参数
+涓昏绫?
+    AgentDeployment -- 鍗曚釜鏅鸿兘浣撶殑鐗╃悊閮ㄧ讲鍙傛暟
 
-主要函数:
-    build_agent_deployments -- 从实验配置解析智能体部署列表
+涓昏鍑芥暟:
+    build_agent_deployments -- 浠庡疄楠岄厤缃В鏋愭櫤鑳戒綋閮ㄧ讲鍒楄〃
 """
 
 from __future__ import annotations
@@ -21,42 +21,42 @@ if TYPE_CHECKING:
 
 @dataclass
 class AgentDeployment:
-    """单个强化学习智能体的物理部署位置和设备参数。
+    """鍗曚釜寮哄寲瀛︿範鏅鸿兘浣撶殑鐗╃悊閮ㄧ讲浣嶇疆鍜岃澶囧弬鏁般€?
 
-    属性:
-        bus_id: 该智能体电池连接的 pandapower 母线索引
-        battery_capacity_kwh: 可用电池能量容量（kWh）
-        battery_power_kw: 最大充放电功率（kW，对称式）
-        init_soc: 每个 episode 开始时的初始荷电状态（0--1 之间的比例值）
-        soc_min: 允许的最低 SoC（比例值）
-        soc_max: 允许的最高 SoC（比例值）
-        efficiency: 充放电效率（按半程计算，即非 sqrt 约定，
-                    与 EnergyStorageEnv 保持一致）
+    灞炴€?
+        bus_id: 璇ユ櫤鑳戒綋鐢垫睜杩炴帴鐨?pandapower 姣嶇嚎绱㈠紩
+        battery_capacity_kwh: 鍙敤鐢垫睜鑳介噺瀹归噺锛坘Wh锛?
+        battery_power_kw: 鏈€澶у厖鏀剧數鍔熺巼锛坘W锛屽绉板紡锛?
+        init_soc: 姣忎釜 episode 寮€濮嬫椂鐨勫垵濮嬭嵎鐢电姸鎬侊紙0--1 涔嬮棿鐨勬瘮渚嬪€硷級
+        soc_min: 鍏佽鐨勬渶浣?SoC锛堟瘮渚嬪€硷級
+        soc_max: 鍏佽鐨勬渶楂?SoC锛堟瘮渚嬪€硷級
+        efficiency: 鍏呮斁鐢垫晥鐜囷紙鎸夊崐绋嬭绠楋紝鍗抽潪 sqrt 绾﹀畾锛?
+                    涓?GridEnv 淇濇寔涓€鑷达級
     """
 
-    bus_id: int                         # 母线索引
-    battery_capacity_kwh: float         # 电池容量（kWh）
-    battery_power_kw: float             # 最大充放电功率（kW）
-    init_soc: float = 0.5              # 初始 SoC
-    soc_min: float = 0.05             # 最低 SoC
-    soc_max: float = 0.95             # 最高 SoC
-    efficiency: float = 0.95          # 充放电效率
+    bus_id: int                         # 姣嶇嚎绱㈠紩
+    battery_capacity_kwh: float         # 鐢垫睜瀹归噺锛坘Wh锛?
+    battery_power_kw: float             # 鏈€澶у厖鏀剧數鍔熺巼锛坘W锛?
+    init_soc: float = 0.5              # 鍒濆 SoC
+    soc_min: float = 0.05             # 鏈€浣?SoC
+    soc_max: float = 0.95             # 鏈€楂?SoC
+    efficiency: float = 0.95          # 鍏呮斁鐢垫晥鐜?
 
 
 def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
-    """从实验配置解析智能体部署列表。
+    """浠庡疄楠岄厤缃В鏋愭櫤鑳戒綋閮ㄧ讲鍒楄〃銆?
 
-    若 cfg.grid.agent_bus_ids 已设置，则使用指定的母线 ID，
-    设备参数取自数据集元数据（如可用）或 cfg.env 中的默认值。
-    若未配置自定义 ID，则回退到 "1-LV-rural1--0-sw" 的
-    Phase-1 固定拓扑预设。
+    鑻?cfg.grid.agent_bus_ids 宸茶缃紝鍒欎娇鐢ㄦ寚瀹氱殑姣嶇嚎 ID锛?
+    璁惧鍙傛暟鍙栬嚜鏁版嵁闆嗗厓鏁版嵁锛堝鍙敤锛夋垨 cfg.env 涓殑榛樿鍊笺€?
+    鑻ユ湭閰嶇疆鑷畾涔?ID锛屽垯鍥為€€鍒?"1-LV-rural1--0-sw" 鐨?
+    Phase-1 鍥哄畾鎷撴墤棰勮銆?
 
-    参数:
-        cfg: 完整的 ExperimentConfig 实验配置实例
+    鍙傛暟:
+        cfg: 瀹屾暣鐨?ExperimentConfig 瀹為獙閰嶇疆瀹炰緥
 
-    返回:
-        list[AgentDeployment]: 每个智能体一个条目，
-                               总数为 cfg.env.num_agents
+    杩斿洖:
+        list[AgentDeployment]: 姣忎釜鏅鸿兘浣撲竴涓潯鐩紝
+                               鎬绘暟涓?cfg.env.num_agents
     """
     from envs.grid.topology.rural1_fixed import RURAL1_AGENT_DEPLOYMENTS
 
@@ -64,10 +64,10 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     bus_ids: list[int] = list(cfg.grid.agent_bus_ids)
 
     if not bus_ids:
-        # 配置中未指定母线 ID -- 使用 Phase-1 默认部署
+        # 閰嶇疆涓湭鎸囧畾姣嶇嚎 ID -- 浣跨敤 Phase-1 榛樿閮ㄧ讲
         return RURAL1_AGENT_DEPLOYMENTS[:n]
 
-    # 从配置和环境默认值构建部署列表
+    # 浠庨厤缃拰鐜榛樿鍊兼瀯寤洪儴缃插垪琛?
     c_bat = float(cfg.env.battery_capacity)
     p_max = float(cfg.env.max_charge_rate)
     init_soc = float(cfg.env.init_soc)
@@ -88,3 +88,4 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
         for i in range(n)
     ]
     return deployments
+

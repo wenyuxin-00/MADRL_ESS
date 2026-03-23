@@ -22,7 +22,12 @@
       "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/python.exe -c \"import gym; print\\(gym.__version__\\)\")",
       "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/test_grid_env.py -v --tb=short)",
       "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/ -v -m \"not slow\" --tb=short)",
-      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/ -v -m \"not slow\" --tb=short --ignore=tests/test_entrypoint_smoke.py --ignore=tests/test_simbench_data.py)"
+      "Bash(D:/SOFTWARE/miniconda/envs/MADRL_ESS/Scripts/pytest tests/ -v -m \"not slow\" --tb=short --ignore=tests/test_entrypoint_smoke.py --ignore=tests/test_simbench_data.py)",
+      "Bash(python -m pytest tests/ -v --ignore=tests/test_grid_core.py -x)",
+      "Bash(python -m pytest tests/test_grid_reward.py tests/test_global_safety_reward.py tests/test_grid_notebook_content.py tests/test_grid_env.py -v -x)",
+      "Bash(pip install:*)",
+      "Bash(conda run:*)",
+      "Bash(find d:/GithubProject/MADRL_ESS -name *.ipynb -type f)"
     ]
   }
 }

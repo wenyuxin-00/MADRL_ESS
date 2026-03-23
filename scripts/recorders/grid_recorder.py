@@ -20,6 +20,9 @@ def init_grid_record(n_agents: int) -> dict:
         "n_t_violations": [],
         "n_trafo_violations": [],
         "pf_converged": [],
+        "psi_v_raw": [],
+        "psi_line_raw": [],
+        "psi_trafo_raw": [],
     }
 
 
@@ -54,3 +57,6 @@ def append_grid_step_record(grid_history: dict, info: dict) -> None:
     grid_history["n_t_violations"].append(int(info.get("n_t_violations", 0)))
     grid_history["n_trafo_violations"].append(int(info.get("n_trafo_violations", info.get("n_t_violations", 0))))
     grid_history["pf_converged"].append(bool(info.get("pf_converged", True)))
+    grid_history["psi_v_raw"].append(float(info.get("psi_v_raw", 0.0)))
+    grid_history["psi_line_raw"].append(float(info.get("psi_line_raw", 0.0)))
+    grid_history["psi_trafo_raw"].append(float(info.get("psi_trafo_raw", 0.0)))

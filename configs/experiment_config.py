@@ -1,21 +1,4 @@
-"""实验统一配置 dataclass 定义。
-
-以纯数据结构形式定义所有实验参数（环境、算法、模型、奖励、预测器等），
-不包含任何逻辑，仅供 profiles.py 等组合函数使用。
-
-主要类:
-    ExperimentConfig -- 顶层配置，组合以下子配置
-    EnvConfig       -- 环境参数
-    AlgoConfig      -- MADRL 算法参数
-    ModelConfig      -- 神经网络模型参数
-    RewardConfig     -- 奖励函数参数
-    ObsConfig        -- 观测空间参数
-    ForecastConfig   -- 预测器参数
-    DataConfig       -- 数据集参数
-    TrainConfig      -- 训练循环参数
-    RuntimeConfig    -- 运行时配置
-    GridConfig       -- 电网潮流约束参数
-"""
+"""Dataclass-based experiment configuration for the grid training mainline."""
 
 from __future__ import annotations
 
@@ -31,47 +14,52 @@ def _default_device() -> torch.device:
 
 @dataclass
 class EnvConfig:
-    """环境主配置。"""
+    """Environment settings for the default GridEnv workflow."""
 
-    env_type: str = "energy_storage"
+    env_type: str = "grid_pf"
     num_agents: int = 3
     episode_limit: int = 96 * 2
     future_horizon: int = 24
-    battery_capacity: float = 1.0
-    max_charge_rate: float = 0.5 / 4
+    battery_capacity: float = 5.0
+    max_charge_rate: float = 2.5
     efficiency: float = 0.95
     init_soc: float = 0.5
     dt: float = 0.25
     soc_min: float = 0.05
     soc_max: float = 0.95
     soc_target: float = 0.5
-    storage_power_scale: float = 1.0
-    storage_capacity_scale: float = 1.0
+    storage_power_scale: float = 12.0
+    storage_capacity_scale: float = 12.0
 
 
 @dataclass
 class RewardConfig:
-    """奖励函数配置。"""
+    """Reward selection and weights."""
 
-    type: str = "composite"
-    w_pen: float = 5.0
-    w_soc: float = 0.1
-    lambda_bonus: float = 0.01
+    type: str = "grid_composite"
+    w_pen: float = 6.0
+    w_soc: float = 0.30
+    lambda_bonus: float = 0.001
+    w_global_safe: float = 1.0
+    w_sens_credit: float = 0.2
+    sens_credit_scale: float = 0.05
 
 
 @dataclass
 class ObsConfig:
-    """观测拼装配置。"""
+    """Observation-builder settings."""
 
     builder_type: str = "default"
-    local_features: list[str] = field(default_factory=lambda: ["time", "price", "load", "soc"])
-    sequence_features: list[str] = field(default_factory=lambda: ["price", "load"])
+    local_features: list[str] = field(
+        default_factory=lambda: ["time", "price", "load", "pv", "soc"]
+    )
+    sequence_features: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
     adjacency_type: str = "identity"
 
 
 @dataclass
 class ModelConfig:
-    """模型家族配置。"""
+    """Neural-network family configuration."""
 
     family: str = "mlp"
     actor_head_type: str = "deterministic_continuous"
@@ -80,7 +68,7 @@ class ModelConfig:
     max_action: float = 1.0
     use_orthogonal_init: bool = True
     use_grad_clip: bool = True
-    grad_clip_norm: float = 10.0                                 # 梯度裁剪阈值（max_norm）
+    grad_clip_norm: float = 10.0
     transformer_num_heads: int = 4
     transformer_num_layers: int = 1
     graph_num_layers: int = 2
@@ -88,7 +76,7 @@ class ModelConfig:
 
 @dataclass
 class AlgoConfig:
-    """MADRL 算法配置。"""
+    """MADRL algorithm configuration."""
 
     name: str = "MADDPG"
     gamma: float = 0.999
@@ -100,7 +88,7 @@ class AlgoConfig:
 
 @dataclass
 class ForecastConfig:
-    """预测器配置。"""
+    """Forecasting settings."""
 
     type: str = "perfect"
     naive_window: int = 96
@@ -116,25 +104,24 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
-    # 仅保留给历史 price-only 单模型入口，新的主线统一走 artifact_root + target_signals。
     lstm_model_path: str | Path | None = None
 
 
 @dataclass
 class DataConfig:
-    """数据集配置。"""
+    """Dataset selection."""
 
-    dataset_type: str = "csv_price_load"
+    dataset_type: str = "csv_prosumer"
     data_dir: str | Path | None = None
 
 
 @dataclass
 class TrainConfig:
-    """训练循环配置。"""
+    """Training-loop settings."""
 
     train_episodes: int = 1000
     max_train_steps: int | None = None
-    num_envs: int = 32
+    num_envs: int = 1
     vec_env_type: str = "dummy"
     batch_size: int = 4096
     buffer_size: int = int(1e6)
@@ -148,13 +135,11 @@ class TrainConfig:
     use_noise_decay: bool = True
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
-        """返回显式训练步数，或按 episode 自动推导的默认值。"""
         if self.max_train_steps is not None:
             return int(self.max_train_steps)
         return int(self.train_episodes * episode_limit)
 
     def resolved_noise_std_decay(self) -> float:
-        """返回探索噪声的线性衰减斜率。"""
         if self.noise_decay_steps <= 0:
             return 0.0
         return float((self.noise_std_init - self.noise_std_min) / self.noise_decay_steps)
@@ -162,7 +147,7 @@ class TrainConfig:
 
 @dataclass
 class RuntimeConfig:
-    """统一的 runtime 配置与派生信息。"""
+    """Runtime configuration derived before model construction."""
 
     device: torch.device = field(default_factory=_default_device)
     seed: int = 0
@@ -183,21 +168,30 @@ class RuntimeConfig:
 
 @dataclass
 class GridConfig:
-    """配电网潮流约束配置。"""
+    """Power-flow and topology settings for GridEnv."""
 
     sb_code: str = "1-LV-rural1--0-sw"
-    pf_solver: str = "nr"                                    # "nr"=Newton-Raphson, "dc"=线性化
+    pf_solver: str = "nr"
     agent_bus_ids: list[int] = field(default_factory=lambda: [10, 6, 12])
-    v_min_pu: float = 0.95                                   # 节点电压下限 (pu)
-    v_max_pu: float = 1.05                                   # 节点电压上限 (pu)
-    line_max_loading_pct: float = 100.0                      # 线路热极限 (%)
-    w_v_pen: float = 10.0                                    # 电压越界 penalty 权重
-    w_l_pen: float = 5.0                                     # 线路越载 penalty 权重
+    v_min_pu: float = 0.95
+    v_max_pu: float = 1.05
+    line_max_loading_pct: float = 100.0
+    w_v_pen: float = 10.0
+    w_line_pen: float = 10.0
+    w_trafo_pen: float = 10.0
+    sensitivity_delta_kw: float = 1.0
+    train_compact_info: bool = True
+    sensitivity_trigger_action_delta_kw: float = 1.0
+    sensitivity_trigger_load_delta_kw: float = 2.0
+    sensitivity_trigger_psi_delta: float = 0.001
+    sensitivity_max_staleness_steps: int = 32
+    sensitivity_trigger_on_pf_recovery: bool = True
+    sensitivity_trigger_on_violation_change: bool = True
 
 
 @dataclass
 class ExperimentConfig:
-    """实验全配置。"""
+    """Top-level experiment configuration."""
 
     env: EnvConfig = field(default_factory=EnvConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)

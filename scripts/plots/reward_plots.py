@@ -24,13 +24,15 @@ def plot_reward_decomposition(history, episode_rewards, reward_fn, title, window
         for meta in metas
     }
 
+    # 自动检测全局安全惩罚分量：key 以 "r_safe_" 开头且 sign == -1
+    grid_safety_keys = [
+        meta.key for meta in metas
+        if meta.key.startswith("r_safe_") and getattr(meta, "sign", 0) == -1
+    ]
     aggregate_key = None
-    grid_penalty_keys = ("r_v_pen", "r_line_pen", "r_trafo_pen")
-    if all(key in ep_comps for key in grid_penalty_keys):
-        aggregate_key = "grid_penalty"
-        ep_comps[aggregate_key] = (
-            ep_comps["r_v_pen"] + ep_comps["r_line_pen"] + ep_comps["r_trafo_pen"]
-        )
+    if grid_safety_keys and all(k in ep_comps for k in grid_safety_keys):
+        aggregate_key = "grid_safety_penalty"
+        ep_comps[aggregate_key] = sum(ep_comps[k] for k in grid_safety_keys)
 
     n_plots = 1 + len(metas) + int(aggregate_key is not None)
     fig, axs = plt.subplots(n_plots, 1, figsize=(10.5, 2.15 * n_plots), sharex=True)

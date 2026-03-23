@@ -55,15 +55,7 @@ def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
     assert resolved["saved_episode_tag"] == 5
 
 
-def test_compare_notebook_uses_shared_builder_helper():
-    notebook_path = (
-        Path(__file__).resolve().parents[1]
-        / "notebooks"
-        / "madrl"
-        / "compare_controllers.ipynb"
-    )
-    text = notebook_path.read_text(encoding="utf-8")
-
-    assert "LOAD_EPISODE = 992" not in text
-    assert "resolve_checkpoint_to_load" not in text
-    assert "build_compare_controller_builders" in text
+def test_legacy_compare_notebooks_are_removed():
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not (repo_root / "notebooks" / "madrl" / "compare_controllers.ipynb").exists()
+    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()

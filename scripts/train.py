@@ -28,7 +28,7 @@ class TrainRunner:
         cfg: Any,
         train_env: Any,
         eval_env: Any,
-        env_name: str = "EnergyStorageEnv",
+        env_name: str = "GridEnv",
         number: int = 1,
         seed: int = 0,
     ) -> None:
@@ -60,11 +60,9 @@ class TrainRunner:
         self._closed = False
 
     def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
-        """Convert `(num_envs, n_agents, action_dim)` to vec-env action layout."""
         return [action_batch[:, agent_id].copy() for agent_id in range(self.cfg.env.num_agents)]
 
     def select_action_batch(self, obs_np: dict) -> np.ndarray:
-        """Run all actors on one batched observation."""
         obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
         with torch.no_grad():
             action_t = torch.stack(
@@ -74,7 +72,6 @@ class TrainRunner:
         return action_t.cpu().numpy().astype(np.float32)
 
     def rollout_once(self, obs_np: dict | None = None) -> dict:
-        """Execute one rollout step for notebooks and smoke checks."""
         if obs_np is None:
             obs_np, reset_info = self.env.reset()
         else:
@@ -97,7 +94,6 @@ class TrainRunner:
         }
 
     def save_model(self, model_dir: str, episode: int) -> None:
-        """Save all agent checkpoints and refresh the latest manifest."""
         algo_dir = os.path.join(model_dir, self.cfg.algo.name)
         os.makedirs(algo_dir, exist_ok=True)
         for agent in self.agent_n:
@@ -115,13 +111,11 @@ class TrainRunner:
         write_checkpoint_manifest(algo_dir, manifest)
 
     def load_model(self, model_dir: str, episode: int) -> None:
-        """Load all agent checkpoints from disk."""
         algo_dir = os.path.join(model_dir, self.cfg.algo.name)
         for agent in self.agent_n:
             agent.load_model(algo_dir, episode)
 
     def close(self) -> None:
-        """Close environments and the TensorBoard writer."""
         if self._closed:
             return
         self.env.close()
@@ -130,7 +124,6 @@ class TrainRunner:
         self._closed = True
 
     def run(self) -> int:
-        """Run the training loop and return the number of finished episodes."""
         target_interactions = (
             self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit)
             // self.cfg.train.num_envs

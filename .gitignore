@@ -30,7 +30,7 @@ __pycache__/
 *.pyc
 
 # --- 编辑器/IDE 配置 ---
-.vscode/
+# .vscode/
 .idea/
 *.suo
 *.ntvs*
@@ -45,9 +45,9 @@ __pycache__/
 *.exe
 *.dll
 *.so
-# 忽略 GitNexus 索引文件夹和元数据
-.gitnexus/
-.gitnexus
+# # 忽略 GitNexus 索引文件夹和元数据
+# .gitnexus/
+# .gitnexus
 
 # --- 数据集 (建议忽略大文件) ---
 # *.csv

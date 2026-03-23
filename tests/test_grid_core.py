@@ -62,7 +62,6 @@ def grid_cfg():
         v_max_pu=1.05,
         line_max_loading_pct=100.0,
         w_v_pen=10.0,
-        w_l_pen=5.0,
     )
 
 
@@ -137,3 +136,75 @@ def test_grid_core_violation_nonneg(agent_deployments, grid_cfg) -> None:
     assert result.line_violation >= 0.0
     assert result.trafo_violation >= 0.0
     assert result.l_violation >= 0.0
+
+
+# ------------------------------------------------------------------
+# Phase 2 新增：全局安全势函数字段 + 灵敏度快照
+# ------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_psi_fields_shapes_and_nonneg(agent_deployments, grid_cfg) -> None:
+    """新 psi 字段应为标量且非负，excess 数组形状正确。"""
+    from envs.grid.core.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
+    core.reset(base_load, np.zeros(N_AGENTS))
+
+    result = core.step(p_batt_kw=np.zeros(N_AGENTS), base_load_kw=base_load)
+
+    # psi 标量非负
+    assert isinstance(result.psi_v_raw, float) and result.psi_v_raw >= 0.0
+    assert isinstance(result.psi_line_raw, float) and result.psi_line_raw >= 0.0
+    assert isinstance(result.psi_trafo_raw, float) and result.psi_trafo_raw >= 0.0
+
+    # excess 数组形状
+    assert result.bus_v_excess.shape == (core.n_buses,)
+    assert result.bus_v_signed_indicator.shape == (core.n_buses,)
+    assert result.line_excess.shape == (core.n_lines,)
+    assert result.trafo_excess.shape == (core.n_trafos,)
+
+    # excess 元素非负
+    assert np.all(result.bus_v_excess >= 0.0)
+    assert np.all(result.line_excess >= 0.0)
+    assert np.all(result.trafo_excess >= 0.0)
+
+    # signed indicator 只包含 -1, 0, +1
+    unique_vals = set(np.unique(result.bus_v_signed_indicator))
+    assert unique_vals <= {-1.0, 0.0, 1.0}
+
+    # psi_v_raw == sum(bus_v_excess²)
+    np.testing.assert_allclose(result.psi_v_raw, float(np.sum(result.bus_v_excess ** 2)), rtol=1e-5)
+    np.testing.assert_allclose(result.psi_line_raw, float(np.sum(result.line_excess ** 2)), rtol=1e-5)
+    np.testing.assert_allclose(result.psi_trafo_raw, float(np.sum(result.trafo_excess ** 2)), rtol=1e-5)
+
+
+@pytest.mark.slow
+def test_compute_sensitivity_snapshot_shapes(agent_deployments, grid_cfg) -> None:
+    """compute_sensitivity_snapshot 返回正确形状的灵敏度矩阵。"""
+    from envs.grid.core.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
+    base_pv = np.zeros(N_AGENTS, dtype=np.float32)
+    core.reset(base_load, base_pv)
+
+    # 先跑一步让 net 有结果
+    core.step(p_batt_kw=np.zeros(N_AGENTS), base_load_kw=base_load)
+
+    snapshot = core.compute_sensitivity_snapshot(
+        p_batt_kw=np.zeros(N_AGENTS, dtype=np.float32),
+        base_load_kw=base_load,
+        delta_kw=1.0,
+    )
+
+    assert "dvm_dp" in snapshot
+    assert "dline_loading_dp" in snapshot
+    assert "dtrafo_loading_dp" in snapshot
+
+    assert snapshot["dvm_dp"].shape == (core.n_buses, N_AGENTS)
+    assert snapshot["dline_loading_dp"].shape == (core.n_lines, N_AGENTS)
+    assert snapshot["dtrafo_loading_dp"].shape == (core.n_trafos, N_AGENTS)
+
+    # 灵敏度不应全为零（非退化网络）
+    assert np.any(snapshot["dvm_dp"] != 0.0)
