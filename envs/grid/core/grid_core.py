@@ -12,7 +12,7 @@ from envs.grid.core.grid_types import GridStepResult
 from envs.grid.core.net_builder import apply_bus_injections, build_simbench_net
 
 if TYPE_CHECKING:
-    from envs.grid.config.grid_config import AgentDeployment
+    from envs.grid.deployments import AgentDeployment
 
 
 class GridCore:

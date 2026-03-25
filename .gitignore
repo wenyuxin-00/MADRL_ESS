@@ -45,6 +45,7 @@ __pycache__/
 *.exe
 *.dll
 *.so
+*.hdf5
 # # 忽略 GitNexus 索引文件夹和元数据
 # .gitnexus/
 # .gitnexus

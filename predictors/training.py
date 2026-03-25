@@ -1,11 +1,4 @@
-"""LSTM 预测器训练与数据准备。
-
-提供 LSTM 预测模型的训练循环、数据切分、评估指标计算等功能。
-
-主要函数:
-    ensure_lstm_artifacts -- 确保 LSTM 模型已训练，否则自动训练
-    train_lstm_model     -- 训练 LSTM 预测模型
-"""
+"""Training utilities for the LSTM forecaster used by the grid mainline."""
 
 from __future__ import annotations
 
@@ -14,6 +7,7 @@ import json
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
+from data.loaders.prosumer import ProsumerDataset
 from scripts.utils.torch_runtime import TorchRuntimeState, configure_torch_runtime, resolve_device
 from predictors.artifacts import (
     DEFAULT_SUPPORTED_FORECAST_SIGNALS,
@@ -49,17 +44,19 @@ SIGNAL_TRAINING_OVERRIDE_FIELDS = {
 
 @dataclass(frozen=True)
 class SignalCsvSource:
-    """保存单个信号对应的训练集/测试集 CSV 来源信息。"""
+    """Dataset-backed source information for one forecast signal."""
 
     signal_name: str
-    train_path: Path
-    test_path: Path
+    train_path: Path | None
+    test_path: Path | None
     value_columns: tuple[str, ...]
+    source_kind: str = "prosumer"
+    dataset_kwargs: dict[str, dict[str, object]] | None = None
 
 
 @dataclass(frozen=True)
 class SignalForecastEvaluation:
-    """单个 signal 的周评估结果。"""
+    """Evaluation result for one forecast signal."""
 
     signal_name: str
     evaluation_mode: str
@@ -75,7 +72,7 @@ def _normalize_signal_name(signal_name: str) -> str:
 
 
 def configured_forecast_signals(cfg) -> list[str]:
-    """返回 forecast 主线中声明的目标信号。"""
+    """Return the forecast signals declared in the current config."""
     unique = []
     for signal_name in cfg.forecast.target_signals:
         normalized = _normalize_signal_name(signal_name)
@@ -85,7 +82,7 @@ def configured_forecast_signals(cfg) -> list[str]:
 
 
 def required_forecast_signals(cfg) -> list[str]:
-    """返回当前观测链路真正会消费的 forecast 信号。"""
+    """Return the forecast signals actually consumed by the observation stack."""
     active = []
     configured = set(configured_forecast_signals(cfg))
     for signal_name in cfg.obs.sequence_features:
@@ -96,7 +93,7 @@ def required_forecast_signals(cfg) -> list[str]:
 
 
 def clone_config_with_signal_overrides(cfg, overrides: dict[str, object] | None = None):
-    """为单个 signal 训练生成局部配置副本。"""
+    """Create a config copy for one signal-specific training run."""
     cloned = copy.deepcopy(cfg)
     if not overrides:
         return cloned
@@ -127,7 +124,7 @@ def resolve_signal_training_settings(
     signal_name: str,
     overrides: dict[str, object] | None = None,
 ) -> tuple[object, dict[str, object]]:
-    """解析单个 signal 的有效训练参数。"""
+    """Resolve the effective training settings for one signal."""
     signal_name = _normalize_signal_name(signal_name)
     local_cfg = clone_config_with_signal_overrides(cfg, overrides=overrides)
     settings = {
@@ -148,7 +145,7 @@ def resolve_signal_training_settings(
 
 
 def forecast_artifact_root(cfg) -> Path:
-    """返回当前配置的 forecast artifact 根目录。"""
+    """Return the artifact root for the current forecast config."""
     root = cfg.forecast.lstm_artifact_root
     if root is None:
         return get_default_lstm_artifact_dir()
@@ -160,7 +157,7 @@ def expected_lstm_artifact_meta(
     signal_name: str,
     overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """根据当前配置生成期望的 artifact meta。"""
+    """Build the expected artifact metadata for one signal."""
     _, settings = resolve_signal_training_settings(cfg, signal_name, overrides=overrides)
     future_horizon = int(settings["future_horizon"])
     return {
@@ -179,7 +176,7 @@ def compare_lstm_artifact_meta(
     actual_meta: dict[str, object] | None,
     expected_meta: dict[str, object],
 ) -> dict[str, object]:
-    """比较 artifact meta 与当前配置是否一致，并返回可读差异。"""
+    """Compare saved artifact metadata with the current expected configuration."""
     comparable_fields = (
         "artifact_format",
         "signal_name",
@@ -276,45 +273,170 @@ def _signal_columns_from_header(columns: list[str], signal_name: str) -> list[st
     ]
 
 
-def _candidate_signal_file_pairs(data_dir: Path) -> list[tuple[Path, Path]]:
-    raw_dir = data_dir / "raw"
-    return [
-        (data_dir / "simbench_2016_train.csv", data_dir / "simbench_2016_test.csv"),
-        (raw_dir / "simbench_2016_train.csv", raw_dir / "simbench_2016_test.csv"),
-        (data_dir / "simbench_train.csv", data_dir / "simbench_test.csv"),
-        (raw_dir / "simbench_train.csv", raw_dir / "simbench_test.csv"),
-        (data_dir / "train_prices.csv", data_dir / "test_prices.csv"),
-        (raw_dir / "train_prices.csv", raw_dir / "test_prices.csv"),
-    ]
+def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[str, object]:
+    year = int(cfg.data.train_year if split == "train" else cfg.data.test_year)
+    start_date = cfg.data.train_start_date if split == "train" else cfg.data.test_start_date
+    end_date = cfg.data.train_end_date if split == "train" else cfg.data.test_end_date
+    exclude_start_date = None
+    exclude_end_date = None
+    if (
+        split == "train"
+        and int(cfg.data.train_year) == int(cfg.data.test_year)
+        and not cfg.data.train_start_date
+        and not cfg.data.train_end_date
+        and (cfg.data.test_start_date or cfg.data.test_end_date)
+    ):
+        exclude_start_date = cfg.data.test_start_date
+        exclude_end_date = cfg.data.test_end_date
+
+    return {
+        "data_dir": data_dir,
+        "episode_length": 1,
+        "n_agents": int(cfg.env.num_agents),
+        "agent_profiles": list(cfg.data.agent_profiles),
+        "year": year,
+        "start_date": start_date,
+        "end_date": end_date,
+        "exclude_start_date": exclude_start_date,
+        "exclude_end_date": exclude_end_date,
+        "load_components": list(cfg.data.load_components),
+        "pv_reference": str(cfg.data.pv_reference),
+        "pv_capacity_kw": list(cfg.data.pv_capacity_kw),
+        "load_scale": list(cfg.data.load_scale),
+        "pv_scale": list(cfg.data.pv_scale),
+        "storage_scale": list(cfg.data.storage_scale),
+        "node_ids": list(range(int(cfg.env.num_agents))),
+    }
 
 
-def resolve_signal_csv_source(data_dir: str | Path, signal_name: str) -> SignalCsvSource | None:
-    """为单个信号选出最合适的训练/测试 CSV 文件对。"""
-    data_dir = Path(data_dir)
+def _prosumer_value_columns(agent_profiles: Sequence[str], signal_name: str) -> tuple[str, ...]:
     signal_name = _normalize_signal_name(signal_name)
+    if signal_name == "price":
+        return ("price",)
+    return tuple(f"{signal_name}_{profile}" for profile in agent_profiles)
 
-    # 候选文件名可能因数据组织方式不同而有多种版本，
-    # 这里逐个检查，找到“真实存在且列名匹配”的那一对。
-    for train_path, test_path in _candidate_signal_file_pairs(data_dir):
-        if not train_path.exists() or not test_path.exists():
-            continue
 
-        train_columns = pd.read_csv(train_path, nrows=0).columns.tolist()
-        test_columns = pd.read_csv(test_path, nrows=0).columns.tolist()
-        value_columns = _signal_columns_from_header(train_columns, signal_name)
-        if not value_columns:
-            continue
-        if any(column not in test_columns for column in value_columns):
-            continue
+def _resolve_prosumer_signal_source(cfg, data_dir: Path, signal_name: str) -> SignalCsvSource | None:
+    if signal_name not in {"price", "load", "pv"}:
+        return None
+    agent_profiles = [str(profile) for profile in cfg.data.agent_profiles]
+    return SignalCsvSource(
+        signal_name=signal_name,
+        train_path=None,
+        test_path=None,
+        value_columns=_prosumer_value_columns(agent_profiles, signal_name),
+        source_kind="prosumer",
+        dataset_kwargs={
+            "train": _resolve_prosumer_dataset_kwargs(cfg, data_dir, "train"),
+            "test": _resolve_prosumer_dataset_kwargs(cfg, data_dir, "test"),
+        },
+    )
 
-        return SignalCsvSource(
-            signal_name=signal_name,
-            train_path=train_path,
-            test_path=test_path,
-            value_columns=tuple(value_columns),
+
+def _load_prosumer_signal_frame_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    dataset_kwargs = dict((source.dataset_kwargs or {}).get(split) or {})
+    if not dataset_kwargs:
+        raise ValueError(f"Prosumer signal source is missing dataset kwargs for split='{split}'.")
+
+    dataset = ProsumerDataset(**dataset_kwargs)
+    timestamps = pd.Series(dataset._timestamps).reset_index(drop=True)
+    signal_values = np.asarray(dataset._signals[signal_name], dtype=np.float32)
+
+    if signal_values.ndim == 1:
+        value_columns = ("price",)
+        frame = pd.DataFrame({"timestamp": timestamps, "price": signal_values})
+    else:
+        value_columns = tuple(source.value_columns)
+        frame = pd.DataFrame(signal_values, columns=list(value_columns))
+        frame.insert(0, "timestamp", timestamps)
+    frame["segment_id"] = 0
+    return frame, value_columns
+
+
+def _load_signal_frame_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    if source.source_kind != "prosumer":
+        raise ValueError(f"Unsupported signal source kind '{source.source_kind}'.")
+    return _load_prosumer_signal_frame_from_source(source, signal_name, split=split)
+
+
+def _load_signal_matrix_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
+    frame, value_columns = _load_signal_frame_from_source(source, signal_name, split=split)
+    values = frame.loc[:, list(value_columns)].to_numpy(dtype=np.float32)
+    if values.ndim == 2 and values.shape[1] == 1:
+        values = values.reshape(-1)
+    return frame, values, value_columns
+
+
+def load_signal_matrix_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
+    """Public wrapper for reading one forecast signal from a dataset-backed source."""
+    return _load_signal_matrix_from_source(source, signal_name, split=split)
+
+
+def _load_signal_segments_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+    drop_warmup: bool = False,
+) -> tuple[pd.DataFrame, list[np.ndarray], tuple[str, ...]]:
+    frame, value_columns = _load_signal_frame_from_source(source, signal_name, split=split)
+    if drop_warmup and "is_warmup" in frame.columns:
+        frame = frame.loc[~frame["is_warmup"].astype(bool)].copy()
+
+    if frame.empty:
+        raise ValueError(
+            f"Signal source split='{split}' does not contain any usable rows for signal '{signal_name}'."
         )
 
-    return None
+    working = frame.copy()
+    if "segment_id" not in working.columns:
+        working["segment_id"] = 0
+    working["segment_id"] = pd.to_numeric(working["segment_id"], errors="coerce").fillna(-1).astype(int)
+
+    segments: list[np.ndarray] = []
+    for segment_id in sorted(working["segment_id"].unique()):
+        segment_frame = working.loc[working["segment_id"] == segment_id]
+        if segment_frame.empty:
+            continue
+        segment_values = segment_frame.loc[:, list(value_columns)].to_numpy(dtype=np.float32)
+        if segment_values.ndim == 2 and segment_values.shape[1] == 1:
+            segment_values = segment_values.reshape(-1)
+        segments.append(segment_values)
+
+    if not segments:
+        raise ValueError(
+            f"Signal source split='{split}' does not contain any segments for signal '{signal_name}'."
+        )
+    return working.reset_index(drop=True), segments, value_columns
+
+
+def resolve_signal_csv_source(data_dir: str | Path, signal_name: str, cfg=None) -> SignalCsvSource | None:
+    """Resolve the dataset-backed source for one forecast signal."""
+    if cfg is None:
+        return None
+    data_dir = Path(data_dir)
+    signal_name = _normalize_signal_name(signal_name)
+    return _resolve_prosumer_signal_source(cfg, data_dir, signal_name)
 
 
 def load_signal_frame(csv_path: str | Path, signal_name: str) -> tuple[pd.DataFrame, tuple[str, ...]]:
@@ -834,7 +956,7 @@ def evaluate_signal_open_loop_one_week(
     device: str | torch.device,
 ) -> SignalForecastEvaluation:
     """开环递推一周，用于长期 stress test。"""
-    test_frame, test_values, _ = load_signal_matrix(source.test_path, signal_name)
+    test_frame, test_values, _ = _load_signal_matrix_from_source(source, signal_name, split="test")
     history_seed, target_values, timestamps = _select_week_evaluation_slice(
         test_frame,
         test_values,
@@ -891,7 +1013,7 @@ def evaluate_signal_online_one_week(
     device: str | torch.device,
 ) -> SignalForecastEvaluation:
     """在线滚动评估一周，每个时刻都重新基于真实历史调用预测器。"""
-    test_frame, test_values, _ = load_signal_matrix(source.test_path, signal_name)
+    test_frame, test_values, _ = _load_signal_matrix_from_source(source, signal_name, split="test")
     history_seed, target_values, timestamps = _select_week_evaluation_slice(
         test_frame,
         test_values,
@@ -1133,15 +1255,18 @@ def train_signal_lstm(
         seed=local_cfg.runtime.seed,
     )
     signal_name = _normalize_signal_name(signal_name)
-    source = resolve_signal_csv_source(data_dir, signal_name)
+    source = resolve_signal_csv_source(data_dir, signal_name, cfg=local_cfg)
     if source is None:
         raise FileNotFoundError(
-            f"No train/test CSV pair found for forecast signal '{signal_name}' under '{data_dir}'."
+            f"No train/test source found for forecast signal '{signal_name}' under '{data_dir}'."
         )
+    if int(local_cfg.env.future_horizon) <= 0:
+        raise ValueError("LSTM forecast training requires cfg.env.future_horizon > 0.")
 
-    _, train_segments, value_columns = load_signal_segments(
-        source.train_path,
+    _, train_segments, value_columns = _load_signal_segments_from_source(
+        source,
         signal_name,
+        split="train",
         drop_warmup=True,
     )
 
@@ -1278,23 +1403,7 @@ def collect_available_lstm_artifacts(cfg) -> dict[str, tuple[str, str, str]]:
 
 
 def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> dict[str, object]:
-    """确保当前配置需要的 LSTM artifact 已存在，不兼容时按策略报错或重训。"""
-    if cfg.forecast.lstm_model_path is not None:
-        return {
-            "mode": "legacy_single_model",
-            "artifacts": {
-                "price": (
-                    str(cfg.forecast.lstm_model_path),
-                    None,
-                    None,
-                )
-            },
-            "trained_signals": [],
-            "retrained_signals": [],
-            "mismatched_signals": [],
-            "plot_path": None,
-        }
-
+    """Ensure the managed LSTM artifacts required by the current config exist."""
     artifact_root = forecast_artifact_root(cfg)
     artifact_root.mkdir(parents=True, exist_ok=True)
 
@@ -1317,9 +1426,9 @@ def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> d
         if invalid_validation is not None:
             print(f"[forecast] artifact mismatch detected: {_format_lstm_artifact_issue(invalid_validation)}")
 
-        source = resolve_signal_csv_source(data_dir, signal_name)
+        source = resolve_signal_csv_source(data_dir, signal_name, cfg=cfg)
         if source is None:
-            print(f"[forecast] skip '{signal_name}': no matching train/test CSV source found.")
+            print(f"[forecast] skip '{signal_name}': no matching train/test source found.")
             continue
 
         if not bool(cfg.forecast.auto_train_missing):

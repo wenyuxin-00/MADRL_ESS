@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
+
+from tests.support.helpers import write_prosumer_processed_dataset
 
 N_AGENTS = 3
 EPISODE_LIMIT = 16
@@ -94,26 +99,44 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
         algorithm="MADDPG",
         model_family="mlp",
         reward_type="grid_composite",
-        observation_profile="simbench",
         forecast_type="perfect",
     )
-    cfg.env.env_type = "grid_pf"
     cfg.env.num_agents = n_agents
     cfg.env.episode_limit = episode_limit
-    cfg.data.dataset_type = "csv_prosumer"
-    cfg.obs.local_features = ["time", "price", "load", "pv", "soc"]
+    cfg.obs.local_features = ["time", "soc"]
     cfg.obs.sequence_features = ["price", "load", "pv"]
     cfg.forecast.target_signals = ["price", "load", "pv"]
     cfg.grid.w_line_pen = 5.0
     cfg.grid.w_trafo_pen = 7.5
     cfg.grid.train_compact_info = False
+    cfg.grid.agent_bus_ids = [10, 6, 12][:n_agents]
+    cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16"][:n_agents]
+    cfg.data.load_components = ["household", "heatpump"]
+    cfg.data.pv_reference = "south"
+    cfg.data.data_dir = _ensure_case_data(n_agents=n_agents, total_steps=episode_limit * 3)
     return cfg
+
+
+def _ensure_case_data(*, n_agents: int, total_steps: int) -> Path:
+    data_dir = Path(__file__).resolve().parent / ".tmp" / "grid_env_case" / "data"
+    prosumer_dir = data_dir / "processed" / "prosumer"
+    prosumer_dir.mkdir(parents=True, exist_ok=True)
+
+    household_csv = prosumer_dir / "household.csv"
+    if not household_csv.exists():
+        write_prosumer_processed_dataset(
+            data_dir,
+            agent_profiles=["SFH12", "SFH14", "SFH16"][:n_agents],
+            train_steps=total_steps,
+            test_steps=total_steps,
+        )
+    return data_dir
 
 
 def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None = None):
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
-    from envs.observation.registry import build_obs_builder
+    from envs.observation.default_builder import DefaultObservationBuilder
     from envs.rewards import get_reward_fn
     from models import validate_and_finalize_model_config
     from predictors.registry import build_forecaster
@@ -125,7 +148,12 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     dataset = build_dataset(cfg, mode="test")
     reward_fn = get_reward_fn(cfg.reward.type, cfg)
     forecaster = build_forecaster(cfg)
-    obs_builder = build_obs_builder(cfg)
+    obs_builder = DefaultObservationBuilder(
+        local_features=cfg.obs.local_features,
+        sequence_features=cfg.obs.sequence_features,
+        future_horizon=cfg.env.future_horizon,
+        adjacency_type=cfg.obs.adjacency_type,
+    )
 
     env = GridEnv(
         cfg,
@@ -255,11 +283,12 @@ def test_episode_recorder_compatible(grid_env) -> None:
     assert history["r_safe_trafo_global_per_agent"][0][0] == history["r_safe_trafo_global_per_agent"][2][0]
 
 
-def test_hybrid_reward_is_not_broadcast_when_local_voltage_differs(grid_env) -> None:
+def test_hybrid_reward_tracks_local_voltage_differences(grid_env) -> None:
     grid_env.reset()
     actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
-    _, reward_list, _, _, _ = grid_env.step(actions)
-    assert len(set(np.round(reward_list, 6))) > 1
+    _, reward_list, _, _, info = grid_env.step(actions)
+    assert not np.allclose(info["v_violation"], info["v_violation"][0])
+    assert np.any(np.asarray(reward_list, dtype=np.float32) != 0.0)
 
 
 def test_grid_fields_shapes(grid_env) -> None:

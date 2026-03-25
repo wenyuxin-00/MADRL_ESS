@@ -7,7 +7,6 @@ from pathlib import Path
 from pprint import pprint
 
 from configs.experiment_config import ExperimentConfig
-from envs.grid.config import DEFAULT_GRID_PROFILE, apply_grid_profile
 from predictors.artifacts import get_default_lstm_artifact_dir
 from scripts.utils.project_paths import get_data_root, project_root as resolve_project_root
 from scripts.utils.torch_runtime import (
@@ -78,43 +77,17 @@ def apply_model_profile(cfg: ExperimentConfig, family: str) -> ExperimentConfig:
     raise ValueError(f"Unknown model family: '{family}'")
 
 
-def apply_observation_profile(
-    cfg: ExperimentConfig,
-    profile_name: str = "default",
-    *,
-    local_features: list[str] | None = None,
-    sequence_features: list[str] | None = None,
-) -> ExperimentConfig:
-    if profile_name == "default":
-        cfg.obs.local_features = ["time", "price", "load", "soc"]
-        cfg.obs.sequence_features = ["price", "load"]
-    elif profile_name == "simbench":
-        cfg.obs.local_features = ["time", "price", "load", "pv", "soc"]
-        cfg.obs.sequence_features = ["price", "load", "pv"]
-    elif profile_name == "minimal":
-        cfg.obs.local_features = ["price", "load", "soc"]
-        cfg.obs.sequence_features = ["price", "load"]
-    elif profile_name == "local_only":
-        cfg.obs.local_features = ["time", "price", "load", "soc"]
-        cfg.obs.sequence_features = []
-    else:
-        raise ValueError(f"Unknown observation profile: '{profile_name}'")
-
-    if local_features is not None:
-        cfg.obs.local_features = list(local_features)
-    if sequence_features is not None:
-        cfg.obs.sequence_features = list(sequence_features)
-    return cfg
-
-
 def apply_reward_profile(cfg: ExperimentConfig, reward_type: str) -> ExperimentConfig:
     cfg.reward.type = reward_type
     return cfg
 
 
 def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> ExperimentConfig:
-    cfg.forecast.type = forecast_type
-    if forecast_type == "lstm" and cfg.forecast.lstm_artifact_root is None:
+    normalized = str(forecast_type).strip().lower()
+    if normalized not in {"perfect", "lstm"}:
+        raise ValueError(f"Unknown forecast_type '{forecast_type}'. Available: ['perfect', 'lstm']")
+    cfg.forecast.type = normalized
+    if normalized == "lstm" and cfg.forecast.lstm_artifact_root is None:
         cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
     return cfg
 
@@ -136,13 +109,8 @@ def compose_experiment_config(
     algorithm: str = "MADDPG",
     model_family: str = "mlp",
     reward_type: str | None = None,
-    observation_profile: str | None = None,
     forecast_type: str | None = None,
-    grid_profile: str | None = DEFAULT_GRID_PROFILE,
     vec_env_type: str | None = None,
-    env_type: str | None = None,
-    dataset_type: str | None = None,
-    obs_builder_type: str | None = None,
     local_features: list[str] | None = None,
     sequence_features: list[str] | None = None,
     data_dir: str | Path | None = None,
@@ -154,37 +122,19 @@ def compose_experiment_config(
     cfg = make_base_config(data_dir=data_dir, device=device)
     apply_train_profile(cfg, profile)
     apply_runtime_profile(cfg, runtime_mode)
-    cfg.algo.name = algorithm
     apply_model_profile(cfg, model_family)
-
-    if grid_profile is not None:
-        apply_grid_profile(cfg, grid_profile)
+    cfg.algo.name = algorithm
 
     if reward_type is not None:
         apply_reward_profile(cfg, reward_type)
     if forecast_type is not None:
         apply_forecast_profile(cfg, forecast_type)
-    if observation_profile is not None:
-        apply_observation_profile(
-            cfg,
-            observation_profile,
-            local_features=local_features,
-            sequence_features=sequence_features,
-        )
-    else:
-        if local_features is not None:
-            cfg.obs.local_features = list(local_features)
-        if sequence_features is not None:
-            cfg.obs.sequence_features = list(sequence_features)
-
     if vec_env_type is not None:
         cfg.train.vec_env_type = vec_env_type
-    if env_type is not None:
-        cfg.env.env_type = env_type
-    if dataset_type is not None:
-        cfg.data.dataset_type = dataset_type
-    if obs_builder_type is not None:
-        cfg.obs.builder_type = obs_builder_type
+    if local_features is not None:
+        cfg.obs.local_features = list(local_features)
+    if sequence_features is not None:
+        cfg.obs.sequence_features = list(sequence_features)
 
     cfg.runtime.seed = int(seed)
     if require_cuda is not None:
@@ -221,9 +171,6 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
     budget = _derive_training_budget(cfg)
     summary: dict[str, object] = {
         "algo": cfg.algo.name,
-        "env_type": cfg.env.env_type,
-        "dataset_type": cfg.data.dataset_type,
-        "obs_builder_type": cfg.obs.builder_type,
         "model_family": cfg.model.family,
         "reward": cfg.reward.type,
         "forecast": cfg.forecast.type,
@@ -245,16 +192,23 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
         "runtime_mode": cfg.runtime.execution_mode,
         "seed": int(cfg.runtime.seed),
         "data_dir": str(cfg.data.data_dir),
-        "grid_profile": DEFAULT_GRID_PROFILE,
         "grid_sb_code": cfg.grid.sb_code,
         "grid_agent_bus_ids": list(cfg.grid.agent_bus_ids),
+        "train_year": int(cfg.data.train_year),
+        "test_year": int(cfg.data.test_year),
+        "train_start_date": cfg.data.train_start_date,
+        "train_end_date": cfg.data.train_end_date,
+        "test_start_date": cfg.data.test_start_date,
+        "test_end_date": cfg.data.test_end_date,
+        "agent_profiles": list(cfg.data.agent_profiles),
+        "load_scale": list(cfg.data.load_scale),
+        "pv_scale": list(cfg.data.pv_scale),
+        "storage_scale": list(cfg.data.storage_scale),
     }
     if cfg.forecast.type == "lstm":
         summary["forecast_signals"] = list(cfg.forecast.target_signals)
         summary["history_window"] = int(cfg.forecast.history_window)
         summary["artifact_root"] = str(cfg.forecast.lstm_artifact_root or get_default_lstm_artifact_dir())
-        if cfg.forecast.lstm_model_path is not None:
-            summary["legacy_lstm_model_path"] = str(cfg.forecast.lstm_model_path)
     if cfg.runtime.execution_mode == STRICT_REPRO_RUNTIME_MODE:
         summary["strict_reproducibility"] = True
     return summary

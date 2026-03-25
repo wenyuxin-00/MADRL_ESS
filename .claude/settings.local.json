@@ -27,7 +27,12 @@
       "Bash(python -m pytest tests/test_grid_reward.py tests/test_global_safety_reward.py tests/test_grid_notebook_content.py tests/test_grid_env.py -v -x)",
       "Bash(pip install:*)",
       "Bash(conda run:*)",
-      "Bash(find d:/GithubProject/MADRL_ESS -name *.ipynb -type f)"
+      "Bash(find d:/GithubProject/MADRL_ESS -name *.ipynb -type f)",
+      "Bash(python -c \":*)",
+      "Bash(python -X utf8 -c \":*)",
+      "Bash(where python:*)",
+      "Bash(\"D:/SOFTWARE/miniconda/envs/madrl_ess/python.exe\" -X utf8 -c \":*)",
+      "Bash(find /d/GithubProject/MADRL_ESS/data -type f -name *.csv)"
     ]
   }
 }

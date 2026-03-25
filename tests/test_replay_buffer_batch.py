@@ -42,9 +42,14 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         )
 
         batch = buffer.sample()
+        expected_local_dim = env.observation_schema["local"][1]
 
         assert set(batch.keys()) == {"obs", "action", "reward", "next_obs", "done"}
-        assert batch["obs"]["local"].shape == (cfg.train.batch_size, cfg.env.num_agents, 5)
+        assert batch["obs"]["local"].shape == (
+            cfg.train.batch_size,
+            cfg.env.num_agents,
+            expected_local_dim,
+        )
         assert batch["action"].shape == (cfg.train.batch_size, cfg.env.num_agents, cfg.runtime.action_dim)
         assert batch["reward"].shape == (cfg.train.batch_size, cfg.env.num_agents, 1)
 

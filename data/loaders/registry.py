@@ -1,60 +1,62 @@
-"""数据集注册表。
-
-根据数据集类型名称（如 "csv_price_load"、"csv_prosumer"）
-返回对应的数据集类或实例。
-
-主要函数:
-    build_dataset -- 根据配置构建数据集实例
-"""
+"""Dataset helpers for the processed prosumer mainline."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from data.loaders.csv_price_load import CsvPriceLoadDataset
-from data.loaders.csv_prosumer import CsvProsumerDataset
+from data.loaders.prosumer import ProsumerDataset
 
 DATASET_REGISTRY: dict[str, type] = {
-    "csv_price_load": CsvPriceLoadDataset,
-    "csv_prosumer": CsvProsumerDataset,
+    "prosumer": ProsumerDataset,
 }
 
 
 def register_dataset(name: str, dataset_cls: type) -> None:
-    """Register one dataset class."""
     DATASET_REGISTRY[name] = dataset_cls
 
 
-def get_dataset_cls(name: str) -> type:
-    """Return a dataset class by ``data.dataset_type``."""
+def get_dataset_cls(name: str = "prosumer") -> type:
     if name not in DATASET_REGISTRY:
-        raise ValueError(f"Unknown data.dataset_type '{name}', available: {list(DATASET_REGISTRY)}")
+        raise ValueError(f"Unknown dataset '{name}', available: {list(DATASET_REGISTRY)}")
     return DATASET_REGISTRY[name]
 
 
+def _resolve_split_dates(cfg, mode: str) -> tuple[int, str | None, str | None, str | None, str | None]:
+    selected_year = int(cfg.data.train_year if mode == "train" else cfg.data.test_year)
+    start_date = cfg.data.train_start_date if mode == "train" else cfg.data.test_start_date
+    end_date = cfg.data.train_end_date if mode == "train" else cfg.data.test_end_date
+    exclude_start_date = None
+    exclude_end_date = None
+    if (
+        mode == "train"
+        and int(cfg.data.train_year) == int(cfg.data.test_year)
+        and not cfg.data.train_start_date
+        and not cfg.data.train_end_date
+        and (cfg.data.test_start_date or cfg.data.test_end_date)
+    ):
+        exclude_start_date = cfg.data.test_start_date
+        exclude_end_date = cfg.data.test_end_date
+    return selected_year, start_date, end_date, exclude_start_date, exclude_end_date
+
+
 def build_dataset(cfg, mode: str = "train"):
-    """Build the configured dataset for train/test mode."""
-    dataset_type = str(cfg.data.dataset_type)
-    dataset_cls = get_dataset_cls(dataset_type)
-    data_dir = Path(cfg.data.data_dir or (Path(__file__).resolve().parent.parent / "data"))
-    if dataset_type == "csv_prosumer":
-        csv_name = "simbench_2016_train.csv" if mode == "train" else "simbench_2016_test.csv"
-    else:
-        csv_name = "train_prices.csv" if mode == "train" else "test_prices.csv"
-    data_path = data_dir / csv_name
-    # Fallback: data files may live in data/raw/ after directory restructuring.
-    if not data_path.exists() and (data_dir / "raw" / csv_name).exists():
-        data_path = data_dir / "raw" / csv_name
-
-    build_kwargs = {
-        "data_path": data_path,
-        "episode_length": cfg.env.episode_limit,
-        "n_agents": cfg.env.num_agents,
-    }
-    if dataset_type == "csv_prosumer":
-        metadata_path = data_dir / "simbench_2016_metadata.json"
-        if not metadata_path.exists() and (data_dir / "raw" / "simbench_2016_metadata.json").exists():
-            metadata_path = data_dir / "raw" / "simbench_2016_metadata.json"
-        build_kwargs["metadata_path"] = metadata_path
-
-    return dataset_cls(**build_kwargs)
+    data_dir = Path(cfg.data.data_dir or (Path(__file__).resolve().parents[2] / "data"))
+    selected_year, start_date, end_date, exclude_start_date, exclude_end_date = _resolve_split_dates(cfg, mode)
+    return ProsumerDataset(
+        data_dir=data_dir,
+        episode_length=cfg.env.episode_limit,
+        n_agents=cfg.env.num_agents,
+        agent_profiles=list(cfg.data.agent_profiles),
+        year=selected_year,
+        start_date=start_date,
+        end_date=end_date,
+        exclude_start_date=exclude_start_date,
+        exclude_end_date=exclude_end_date,
+        load_components=list(cfg.data.load_components),
+        pv_reference=str(cfg.data.pv_reference),
+        pv_capacity_kw=list(cfg.data.pv_capacity_kw),
+        load_scale=list(cfg.data.load_scale),
+        pv_scale=list(cfg.data.pv_scale),
+        storage_scale=list(cfg.data.storage_scale),
+        node_ids=list(cfg.grid.agent_bus_ids),
+    )

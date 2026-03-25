@@ -119,18 +119,11 @@ class GridEnv(gym.Env):
         self.reward_fn = reward_fn if reward_fn is not None else get_reward_fn(cfg.reward.type, cfg)
 
         if dataset is None:
-            from data.loaders.csv_prosumer import CsvProsumerDataset
+            from data.loaders.registry import build_dataset
 
-            data_root = Path(__file__).resolve().parent.parent / "data"
-            resolved_data_path = Path(data_path) if data_path is not None else data_root / (
-                "simbench_2016_train.csv" if mode == "train" else "simbench_2016_test.csv"
-            )
-            dataset = CsvProsumerDataset(
-                data_path=resolved_data_path,
-                episode_length=self.episode_length,
-                n_agents=self.n,
-                metadata_path=resolved_data_path.with_name("simbench_2016_metadata.json"),
-            )
+            if data_path is not None:
+                cfg.data.data_dir = str(Path(data_path).parent)
+            dataset = build_dataset(cfg, mode=mode)
         self._dataset = dataset
 
         if forecaster is None:

@@ -1,0 +1,283 @@
+{
+  "dataset_name": "wpuq_processed_2019_2020",
+  "timezone_display": "Europe/Berlin",
+  "timezone_storage": "UTC",
+  "frequency": "15min",
+  "allowlist_profiles": [
+    "SFH3",
+    "SFH4",
+    "SFH5",
+    "SFH7",
+    "SFH9",
+    "SFH12",
+    "SFH14",
+    "SFH16",
+    "SFH18",
+    "SFH19",
+    "SFH20",
+    "SFH21",
+    "SFH22",
+    "SFH27",
+    "SFH28",
+    "SFH29",
+    "SFH30",
+    "SFH32",
+    "SFH34",
+    "SFH36",
+    "SFH38",
+    "SFH39"
+  ],
+  "consumer_profiles": [
+    "SFH3",
+    "SFH4",
+    "SFH5",
+    "SFH7",
+    "SFH9",
+    "SFH12",
+    "SFH14",
+    "SFH16",
+    "SFH18",
+    "SFH19",
+    "SFH20",
+    "SFH21",
+    "SFH22",
+    "SFH27",
+    "SFH28",
+    "SFH29",
+    "SFH30",
+    "SFH32",
+    "SFH34",
+    "SFH36",
+    "SFH38",
+    "SFH39"
+  ],
+  "default_profiles": [
+    "SFH12",
+    "SFH14",
+    "SFH16"
+  ],
+  "consumer_row_count": 70172,
+  "price_row_count": 70172,
+  "pv_row_count": 70176,
+  "consumer_year_row_counts": {
+    "2019": 35036,
+    "2020": 35136
+  },
+  "price_year_row_counts": {
+    "2019": 35036,
+    "2020": 35136
+  },
+  "pv_year_row_counts": {
+    "2019": 35040,
+    "2020": 35136
+  },
+  "user_stats_kw": {
+    "SFH3": {
+      "household_peak_kw": 4.760067462921143,
+      "household_mean_kw": 0.23597736656665802,
+      "heatpump_peak_kw": 6.718491077423096,
+      "heatpump_mean_kw": 0.2988620102405548,
+      "load_peak_kw": 8.594853401184082,
+      "load_mean_kw": 0.5348393321037292
+    },
+    "SFH4": {
+      "household_peak_kw": 5.1591949462890625,
+      "household_mean_kw": 0.3654576539993286,
+      "heatpump_peak_kw": 8.157477378845215,
+      "heatpump_mean_kw": 0.49007484316825867,
+      "load_peak_kw": 9.465124130249023,
+      "load_mean_kw": 0.8555325269699097
+    },
+    "SFH5": {
+      "household_peak_kw": 5.010874271392822,
+      "household_mean_kw": 0.3476742208003998,
+      "heatpump_peak_kw": 6.067672252655029,
+      "heatpump_mean_kw": 0.6325491070747375,
+      "load_peak_kw": 9.908519744873047,
+      "load_mean_kw": 0.9802233576774597
+    },
+    "SFH7": {
+      "household_peak_kw": 5.963083744049072,
+      "household_mean_kw": 0.3575074374675751,
+      "heatpump_peak_kw": 6.477906703948975,
+      "heatpump_mean_kw": 0.3758741021156311,
+      "load_peak_kw": 8.883333206176758,
+      "load_mean_kw": 0.7333815693855286
+    },
+    "SFH9": {
+      "household_peak_kw": 7.088059902191162,
+      "household_mean_kw": 0.5481253862380981,
+      "heatpump_peak_kw": 12.442432403564453,
+      "heatpump_mean_kw": 0.806527316570282,
+      "load_peak_kw": 13.871513366699219,
+      "load_mean_kw": 1.3546526432037354
+    },
+    "SFH12": {
+      "household_peak_kw": 7.506149768829346,
+      "household_mean_kw": 0.3593817949295044,
+      "heatpump_peak_kw": 6.938500881195068,
+      "heatpump_mean_kw": 0.29470884799957275,
+      "load_peak_kw": 9.869758605957031,
+      "load_mean_kw": 0.6540906429290771
+    },
+    "SFH14": {
+      "household_peak_kw": 4.231674671173096,
+      "household_mean_kw": 0.28076931834220886,
+      "heatpump_peak_kw": 11.758049964904785,
+      "heatpump_mean_kw": 0.7417986392974854,
+      "load_peak_kw": 13.769712448120117,
+      "load_mean_kw": 1.0225679874420166
+    },
+    "SFH16": {
+      "household_peak_kw": 4.516761779785156,
+      "household_mean_kw": 0.2551712691783905,
+      "heatpump_peak_kw": 13.242189407348633,
+      "heatpump_mean_kw": 0.3496590852737427,
+      "load_peak_kw": 14.569275856018066,
+      "load_mean_kw": 0.6048303842544556
+    },
+    "SFH18": {
+      "household_peak_kw": 6.6074371337890625,
+      "household_mean_kw": 0.3267662823200226,
+      "heatpump_peak_kw": 9.291807174682617,
+      "heatpump_mean_kw": 0.228471040725708,
+      "load_peak_kw": 11.119072914123535,
+      "load_mean_kw": 0.5552372932434082
+    },
+    "SFH19": {
+      "household_peak_kw": 5.527840614318848,
+      "household_mean_kw": 0.38860782980918884,
+      "heatpump_peak_kw": 5.647902965545654,
+      "heatpump_mean_kw": 0.23649334907531738,
+      "load_peak_kw": 6.7186808586120605,
+      "load_mean_kw": 0.6251012086868286
+    },
+    "SFH20": {
+      "household_peak_kw": 5.456068992614746,
+      "household_mean_kw": 0.3993794620037079,
+      "heatpump_peak_kw": 12.835213661193848,
+      "heatpump_mean_kw": 1.3504258394241333,
+      "load_peak_kw": 15.658846855163574,
+      "load_mean_kw": 1.749805212020874
+    },
+    "SFH21": {
+      "household_peak_kw": 4.451374053955078,
+      "household_mean_kw": 0.3091021180152893,
+      "heatpump_peak_kw": 11.395074844360352,
+      "heatpump_mean_kw": 0.5380212068557739,
+      "load_peak_kw": 11.579936981201172,
+      "load_mean_kw": 0.847123384475708
+    },
+    "SFH22": {
+      "household_peak_kw": 4.869955539703369,
+      "household_mean_kw": 0.38338837027549744,
+      "heatpump_peak_kw": 7.567633628845215,
+      "heatpump_mean_kw": 0.826528787612915,
+      "load_peak_kw": 10.691141128540039,
+      "load_mean_kw": 1.2099171876907349
+    },
+    "SFH27": {
+      "household_peak_kw": 2.5728940963745117,
+      "household_mean_kw": 0.12934814393520355,
+      "heatpump_peak_kw": 6.043308258056641,
+      "heatpump_mean_kw": 0.2663077116012573,
+      "load_peak_kw": 6.526769638061523,
+      "load_mean_kw": 0.3956558406352997
+    },
+    "SFH28": {
+      "household_peak_kw": 4.795629024505615,
+      "household_mean_kw": 0.35848456621170044,
+      "heatpump_peak_kw": 8.033197402954102,
+      "heatpump_mean_kw": 0.7019128203392029,
+      "load_peak_kw": 10.91330337524414,
+      "load_mean_kw": 1.0603973865509033
+    },
+    "SFH29": {
+      "household_peak_kw": 4.586969375610352,
+      "household_mean_kw": 0.1630157083272934,
+      "heatpump_peak_kw": 5.871717929840088,
+      "heatpump_mean_kw": 0.3228379786014557,
+      "load_peak_kw": 8.012535095214844,
+      "load_mean_kw": 0.48585373163223267
+    },
+    "SFH30": {
+      "household_peak_kw": 4.804072856903076,
+      "household_mean_kw": 0.2470368593931198,
+      "heatpump_peak_kw": 7.80302095413208,
+      "heatpump_mean_kw": 0.18263891339302063,
+      "load_peak_kw": 9.905584335327148,
+      "load_mean_kw": 0.42967575788497925
+    },
+    "SFH32": {
+      "household_peak_kw": 5.8784613609313965,
+      "household_mean_kw": 0.3116089999675751,
+      "heatpump_peak_kw": 7.882805824279785,
+      "heatpump_mean_kw": 0.3391062915325165,
+      "load_peak_kw": 9.050779342651367,
+      "load_mean_kw": 0.6507152915000916
+    },
+    "SFH34": {
+      "household_peak_kw": 5.550388336181641,
+      "household_mean_kw": 0.27114546298980713,
+      "heatpump_peak_kw": 6.266268730163574,
+      "heatpump_mean_kw": 0.9292989373207092,
+      "load_peak_kw": 8.241842269897461,
+      "load_mean_kw": 1.2004445791244507
+    },
+    "SFH36": {
+      "household_peak_kw": 5.311598300933838,
+      "household_mean_kw": 0.30618810653686523,
+      "heatpump_peak_kw": 6.052615642547607,
+      "heatpump_mean_kw": 0.3024492561817169,
+      "load_peak_kw": 10.662858963012695,
+      "load_mean_kw": 0.6086373329162598
+    },
+    "SFH38": {
+      "household_peak_kw": 5.945951461791992,
+      "household_mean_kw": 0.4302404522895813,
+      "heatpump_peak_kw": 11.93606185913086,
+      "heatpump_mean_kw": 0.6155485510826111,
+      "load_peak_kw": 12.25817584991455,
+      "load_mean_kw": 1.0457890033721924
+    },
+    "SFH39": {
+      "household_peak_kw": 4.616919040679932,
+      "household_mean_kw": 0.28104156255722046,
+      "heatpump_peak_kw": 6.331497669219971,
+      "heatpump_mean_kw": 0.6128562688827515,
+      "load_peak_kw": 8.767511367797852,
+      "load_mean_kw": 0.8938978910446167
+    }
+  },
+  "pv_reference_peak_kw": {
+    "east": 16.957889556884766,
+    "south": 14.967877388000488,
+    "west": 17.19211196899414,
+    "total": 48.39217758178711
+  },
+  "pv_reference_quality": {
+    "night_zero_enforced": 1488,
+    "south_gap_filled": 386,
+    "missing_any_before": 580
+  },
+  "sources": {
+    "hdf5_paths": {
+      "2019": "data\\raw\\2019_data_15min.hdf5",
+      "2020": "data\\raw\\2020_data_15min.hdf5"
+    },
+    "price_path": "data\\raw\\Germany_price_15_2018-2020.csv"
+  },
+  "time_ranges": {
+    "consumer_start_local": "2019-01-01 01:00:00+01:00",
+    "consumer_end_local": "2020-12-31 23:45:00+01:00",
+    "pv_start_local": "2019-01-01 00:00:00+01:00",
+    "pv_end_local": "2020-12-31 23:45:00+01:00"
+  },
+  "cleaning_rules": {
+    "max_interp_steps": 8,
+    "consumer_interpolation": "time interpolation on UTC axis, up to 8 steps by default",
+    "price_interpolation": "linear interpolation on canonical local axis, up to 8 steps by default",
+    "pv_night_zero": true,
+    "pv_south_gap_fill": "estimate from east+west empirical ratio by month/slot"
+  }
+}

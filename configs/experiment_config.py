@@ -16,7 +16,6 @@ def _default_device() -> torch.device:
 class EnvConfig:
     """Environment settings for the default GridEnv workflow."""
 
-    env_type: str = "grid_pf"
     num_agents: int = 3
     episode_limit: int = 96 * 2
     future_horizon: int = 24
@@ -30,7 +29,6 @@ class EnvConfig:
     soc_target: float = 0.5
     storage_power_scale: float = 12.0
     storage_capacity_scale: float = 12.0
-
 
 @dataclass
 class RewardConfig:
@@ -49,13 +47,9 @@ class RewardConfig:
 class ObsConfig:
     """Observation-builder settings."""
 
-    builder_type: str = "default"
-    local_features: list[str] = field(
-        default_factory=lambda: ["time", "price", "load", "pv", "soc"]
-    )
+    local_features: list[str] = field(default_factory=lambda: ["time", "soc"])
     sequence_features: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
     adjacency_type: str = "identity"
-
 
 @dataclass
 class ModelConfig:
@@ -91,7 +85,6 @@ class ForecastConfig:
     """Forecasting settings."""
 
     type: str = "perfect"
-    naive_window: int = 96
     target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
     history_window: int = 96
     lstm_hidden_size: int = 64
@@ -104,16 +97,40 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
-    lstm_model_path: str | Path | None = None
+
+    @property
+    def lstm_model_path(self) -> None:
+        """Legacy single-model entrypoints are no longer supported."""
+        return None
+
+    @lstm_model_path.setter
+    def lstm_model_path(self, value: str | Path | None) -> None:
+        if value is None:
+            return
+        raise ValueError(
+            "forecast.lstm_model_path has been removed. "
+            "Use managed LSTM artifacts under forecast.lstm_artifact_root instead."
+        )
 
 
 @dataclass
 class DataConfig:
-    """Dataset selection."""
+    """Processed prosumer dataset selection."""
 
-    dataset_type: str = "csv_prosumer"
     data_dir: str | Path | None = None
-
+    agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16"])
+    train_year: int = 2019
+    test_year: int = 2020
+    train_start_date: str | None = None
+    train_end_date: str | None = None
+    test_start_date: str | None = None
+    test_end_date: str | None = None
+    load_components: list[str] = field(default_factory=lambda: ["household", "heatpump"])
+    pv_reference: str = "south"
+    pv_capacity_kw: list[float] = field(default_factory=list)
+    load_scale: list[float] = field(default_factory=list)
+    pv_scale: list[float] = field(default_factory=list)
+    storage_scale: list[float] = field(default_factory=list)
 
 @dataclass
 class TrainConfig:

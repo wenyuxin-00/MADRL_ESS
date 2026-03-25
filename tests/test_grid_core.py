@@ -37,7 +37,7 @@ N_AGENTS = 3
 
 @pytest.fixture(scope="module")
 def agent_deployments():
-    from envs.grid.config.grid_config import AgentDeployment
+    from envs.grid.deployments import AgentDeployment
     from envs.grid.core.net_builder import build_simbench_net
 
     net = build_simbench_net(SB_CODE)

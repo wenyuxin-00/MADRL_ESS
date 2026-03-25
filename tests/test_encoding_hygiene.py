@@ -2,6 +2,14 @@ import json
 from pathlib import Path
 
 
+def _load_notebook_text(path: Path) -> str:
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    return "\n".join(
+        "".join(cell.get("source", [])) if isinstance(cell.get("source", []), list) else str(cell.get("source", ""))
+        for cell in notebook["cells"]
+    )
+
+
 def test_python_files_are_utf8_without_bom():
     repo_root = Path(__file__).resolve().parents[1]
     offenders = []
@@ -15,7 +23,6 @@ def test_python_files_are_utf8_without_bom():
 def test_key_notebooks_are_utf8_without_bom():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_paths = [
-        repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb",
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
         repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
@@ -28,7 +35,6 @@ def test_key_notebooks_are_utf8_without_bom():
 def test_key_notebooks_do_not_contain_placeholder_text():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_paths = [
-        repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb",
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
         repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
@@ -42,26 +48,30 @@ def test_key_notebooks_do_not_contain_placeholder_text():
 
 def test_notebook_defaults_stay_portable():
     repo_root = Path(__file__).resolve().parents[1]
-    forecast_nb = json.loads(
-        (repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb").read_text(encoding="utf-8")
-    )
-    madrl_nb = json.loads(
-        (repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb").read_text(encoding="utf-8")
-    )
+    forecast_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb")
+    madrl_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb")
+    grid_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb")
 
-    forecast_root_cell = "".join(forecast_nb["cells"][1]["source"])
-    forecast_runtime_cell = "".join(forecast_nb["cells"][4]["source"])
-    madrl_runtime_cell = str(madrl_nb["cells"][3]["source"])
+    assert 'while project_root != project_root.parent and not (project_root / "configs").exists()' in forecast_text
+    assert 'device_request = None' in forecast_text
+    assert 'require_cuda = False' in forecast_text
+    assert 'cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16"]' in forecast_text
 
-    assert 'while project_root != project_root.parent and not (project_root / "configs").exists()' in forecast_root_cell
-    assert 'device_request = None' in forecast_runtime_cell
-    assert 'require_cuda = False' in forecast_runtime_cell
+    assert 'experiment_controls = {' in madrl_text
+    assert 'data_controls = {' in madrl_text
+    assert 'train_controls = {' in madrl_text
+    assert '"vec_env_type": "subproc"' in madrl_text
+    assert '"prediction_mode": "perfect"' in madrl_text
+    assert '"require_cuda": False' in madrl_text
 
-    assert "profile='debug'" in madrl_runtime_cell
-    assert "vec_env_type='subproc'" in madrl_runtime_cell
-    assert "require_cuda = False" in madrl_runtime_cell
+    assert 'ProsumerDataset(' in grid_text
+    assert 'build_simbench_net(cfg.grid.sb_code)' in grid_text
+    assert 'simbench_2016_full.csv' not in grid_text
+    assert 'observation_profile=' not in grid_text
 
 
-def test_legacy_madrl_notebook_is_removed():
+def test_removed_legacy_notebooks_are_gone():
     repo_root = Path(__file__).resolve().parents[1]
-    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()
+    assert not (repo_root / "notebooks" / "data" / "data_process.ipynb").exists()
+    assert not (repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb").exists()
+    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()

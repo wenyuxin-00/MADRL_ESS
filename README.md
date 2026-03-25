@@ -1,140 +1,113 @@
-# MADRL_ESS
+﻿# MADRL_ESS
 
-面向配电网潮流约束场景的多智能体储能训练工程。当前仓库只保留一条主线：基于 `GridEnv` 的 MADDPG / MATD3 训练与评估。
+面向配电网潮流约束场景的多智能体储能充放电优化工程。当前仓库已经收束为一条主线：`GridEnv` + processed prosumer dataset + `MADDPG` / `MATD3` 训练与评估。
 
-## 当前主线
+## Mainline
 
-默认实验配置已经收束到 grid 主线：
-
-- 环境：`grid_pf`
-- 数据集：`csv_prosumer`
-- 奖励：`grid_composite`
-- 电网 profile：`rural1_phase1`
+默认主线只保留一套可直接训练的组合：
+- 环境：`GridEnv`
+- 数据：`data/processed/prosumer`
+- 预测：`perfect` 或 `lstm`
 - 默认入口：`compose_experiment_config()`
+- 推荐训练 notebook：`notebooks/madrl/train_madrl_grid.ipynb`
 
-这意味着不再需要手动 patch 旧环境、旧控制器或额外的 grid profile，默认配置就是可训练的带潮流环境配置。
+现在不再需要在主线配置里切换旧环境、旧数据模式或额外 profile 选择器。常用参数都集中在 `configs/experiment_config.py`，notebook 里再按实验需要覆盖。
 
-## 快速开始
+## Data
 
-### 1. 安装依赖
+训练主线默认读取以下处理后数据文件：
+- `data/processed/prosumer/household.csv`
+- `data/processed/prosumer/heatpump.csv`
+- `data/processed/prosumer/pv_reference.csv`
+- `data/processed/prosumer/price.csv`
+
+如果这些文件已经存在，就可以直接开始训练或训练 LSTM 预测器。
+
+## Quick Start
+
+安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 准备数据
+打开主训练 notebook：
+- `notebooks/madrl/train_madrl_grid.ipynb`
 
-默认训练依赖以下文件：
+这个 notebook 的逻辑保持为一条主线：
+1. 在一个统一参数单元里设置运行时、数据切片和训练超参数。
+2. 生成主线实验配置。
+3. 构建 runner 并开始训练。
+4. 绘制训练结果和测试回放。
+5. 保存模型并对比 `perfect` / `normal` 预测模式下的 MPC 基线。
 
-- `data/simbench_2016_train.csv`
-- `data/simbench_2016_test.csv`
+如果需要单独训练 LSTM 预测器：
+- `notebooks/forecast/forecast_lstm.ipynb`
 
-如果数据还没准备好，可以执行 [notebooks/data/prepare_simbench_data.ipynb](notebooks/data/prepare_simbench_data.ipynb)。
+## Default Config
 
-### 3. 直接跑默认 grid 训练
-
-首选 notebook 入口：
-
-- [notebooks/madrl/train_madrl_grid.ipynb](notebooks/madrl/train_madrl_grid.ipynb)
-
-它只保留最短训练闭环：
-
-1. 生成默认 grid 实验配置
-2. 构建 `GridEnv` 训练 runner
-3. 执行训练
-4. 绘制训练期 reward 分解
-5. 保存 checkpoint
-
-如果你更想走脚本入口，可以运行：
-
-```bash
-python scripts/run_debug_training.py
-```
-
-## 默认配置说明
-
-`configs.compose_experiment_config()` 默认会生成下面这组组合：
+`compose_experiment_config()` 返回的默认配置已经是主线配置，常见字段包括：
 
 ```python
 cfg = compose_experiment_config()
+
+cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16"]
+cfg.data.train_year == 2019
+cfg.data.test_year == 2020
+cfg.data.load_components == ["household", "heatpump"]
+cfg.data.pv_reference == "south"
+cfg.reward.type == "grid_composite"
+cfg.obs.local_features == ["time", "soc"]
+cfg.obs.sequence_features == ["price", "load", "pv"]
 ```
 
-等价于一条默认 grid 主线：
+最常改的参数主要在两处：
+- `configs/experiment_config.py`：长期默认值
+- `notebooks/madrl/train_madrl_grid.ipynb`：当前实验覆盖值
 
-- `cfg.env.env_type == "grid_pf"`
-- `cfg.data.dataset_type == "csv_prosumer"`
-- `cfg.reward.type == "grid_composite"`
-- 自动应用 `rural1_phase1` deployment/profile
-
-常见的最小覆盖方式只有这些：
-
-```python
-cfg = compose_experiment_config(profile="debug", algorithm="MADDPG")
-cfg.train.train_episodes = 256
-```
-
-## 目录概览
+## Repository Guide
 
 ```text
 configs/
   experiment_config.py      # dataclass 默认配置
-  profiles.py               # 组合配置入口 compose_experiment_config()
+  profiles.py               # notebook 友好的 compose_experiment_config
+
+data/loaders/
+  prosumer.py               # processed prosumer 主线数据集
+  registry.py               # 主线 dataset 构建入口
 
 envs/
-  grid_env.py               # GridEnv 外部环境接口
-  registry.py               # 只保留 grid_pf
-  grid/
-    config/                 # grid profile 与 deployment 配置
-    core/                   # GridCore / GridStepResult / net builder
-    analysis/               # sensitivity 等 grid 分析工具
-    topology/               # rural1_fixed 拓扑
+  grid_env.py               # GridEnv 主环境
+  grid/                     # 电网拓扑、潮流和分析组件
+  observation/              # 默认观测构造器
 
-controllers/
-  madrl_controller.py       # 多智能体控制器封装
-  zero_controller.py        # 零动作基线
-  madrl/                    # MADDPG / MATD3 实现
+predictors/
+  oracle.py                 # perfect forecaster
+  lstm_*.py                 # LSTM 模型与推理
+  training.py               # LSTM 训练与 artifact 管理
 
 scripts/
   builder.py                # build_env / build_train_runner
-  train.py                  # 训练主循环
+  train.py                  # 训练循环
   evaluate.py               # 评估入口
-  run_debug_training.py     # 调试训练入口
-  plots/                    # 训练/评估可视化
-  recorders/                # 轨迹记录
+  plots/                    # 绘图工具
+  utils/                    # notebook / runtime 辅助工具
 
 notebooks/
-  madrl/train_madrl_grid.ipynb      # 默认 grid 训练 notebook
-  madrl/grid_network_analysis.ipynb # grid 网络分析 notebook
+  madrl/train_madrl_grid.ipynb
+  madrl/grid_network_analysis.ipynb
+  forecast/forecast_lstm.ipynb
 ```
 
-## 训练产物
+## Outputs
 
-默认训练产物保存在 `artifacts/training/`：
+默认训练产物位于：
+- `artifacts/training/checkpoints/`
+- `artifacts/training/tensorboard/`
+- `artifacts/forecast/lstm/`
 
-- `artifacts/training/checkpoints/`：模型权重
-- `artifacts/training/tensorboard/`：TensorBoard 日志
+## Notes
 
-## 保留与删除
-
-当前仓库只保留和 grid 主线一致的内容：
-
-- 保留：`GridEnv`、`GridCore`、`MADDPG`、`MATD3`、`ZeroController`
-- 删除：`EnergyStorageEnv / hems_env.py / energy_storage`
-- 删除：旧占位控制器与对比 notebook
-- 删除：旧主线专用脚本与分析入口
-
-## 建议使用方式
-
-如果你只是想确认主线可跑：
-
-1. 先准备 `simbench_2016_train/test.csv`
-2. 直接运行 `notebooks/madrl/train_madrl_grid.ipynb`
-3. 检查 `artifacts/training/checkpoints/` 是否生成模型
-
-如果你要继续做算法实验，优先只改：
-
-- `configs/experiment_config.py`
-- `configs/profiles.py`
-- `envs/grid_env.py`
-- `envs/rewards/grid_composite.py`
-- `controllers/madrl/`
+- 图表文字统一保持英文，避免不同环境下的字体告警。
+- 代码注释和文档以 UTF-8 保存，避免乱码。
+- 如果只想确认主线可跑，优先使用 `train_madrl_grid.ipynb`，不要从旧兼容路径起步。

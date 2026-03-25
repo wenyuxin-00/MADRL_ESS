@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import traceback
 from multiprocessing.connection import Client, Listener
 
 import numpy as np
@@ -11,6 +12,10 @@ import torch
 from envs.vec_env import split_batched_actions, stack_step_outputs
 from scripts.utils.nested import stack_nested
 from scripts.utils.torch_runtime import configure_torch_runtime
+
+
+_WORKER_READY = "worker_ready"
+_WORKER_INIT_ERROR = "worker_init_error"
 
 
 def _make_worker_env(cfg, mode: str, *, worker_rank: int, seed: int | None):
@@ -35,7 +40,19 @@ def _make_worker_env(cfg, mode: str, *, worker_rank: int, seed: int | None):
 def _subproc_worker(address, authkey: bytes, cfg, mode: str, worker_rank: int, seed: int | None) -> None:
     """Child-process event loop for one environment worker."""
     remote = Client(address, family="AF_INET", authkey=authkey)
-    env = _make_worker_env(cfg, mode=mode, worker_rank=worker_rank, seed=seed)
+    env = None
+
+    try:
+        env = _make_worker_env(cfg, mode=mode, worker_rank=worker_rank, seed=seed)
+        remote.send((_WORKER_READY, int(env.n)))
+    except Exception:
+        try:
+            remote.send((_WORKER_INIT_ERROR, traceback.format_exc()))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        finally:
+            remote.close()
+        return
 
     try:
         while True:
@@ -85,7 +102,30 @@ def _subproc_worker(address, authkey: bytes, cfg, mode: str, worker_rank: int, s
     except EOFError:
         pass
     finally:
-        env.close()
+        if env is not None:
+            env.close()
+
+
+def _recv_worker_ready(remote, process, worker_rank: int) -> int:
+    try:
+        status, payload = remote.recv()
+    except (ConnectionAbortedError, BrokenPipeError, EOFError, OSError) as exc:
+        raise RuntimeError(
+            "SubprocVecEnv worker "
+            f"{worker_rank} exited before initialization completed (exitcode={process.exitcode})."
+        ) from exc
+
+    if status == _WORKER_READY:
+        return int(payload)
+
+    if status == _WORKER_INIT_ERROR:
+        raise RuntimeError(
+            f"SubprocVecEnv worker {worker_rank} failed during initialization:\n{payload}"
+        )
+
+    raise RuntimeError(
+        f"SubprocVecEnv worker {worker_rank} sent unexpected init status {status!r}."
+    )
 
 
 class SubprocVecEnv:
@@ -99,22 +139,37 @@ class SubprocVecEnv:
         ctx = mp.get_context("spawn")
         self.remotes = []
         self.processes = []
+        self.num_agents = 0
 
-        for worker_rank in range(self.num_envs):
-            listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=self.authkey)
-            process = ctx.Process(
-                target=_subproc_worker,
-                args=(listener.address, self.authkey, cfg, mode, worker_rank, seed),
-                daemon=True,
-            )
-            process.start()
-            remote = listener.accept()
-            listener.close()
-            self.remotes.append(remote)
-            self.processes.append(process)
+        try:
+            for worker_rank in range(self.num_envs):
+                listener = Listener(("127.0.0.1", 0), family="AF_INET", authkey=self.authkey)
+                try:
+                    process = ctx.Process(
+                        target=_subproc_worker,
+                        args=(listener.address, self.authkey, cfg, mode, worker_rank, seed),
+                        daemon=True,
+                    )
+                    process.start()
+                    remote = listener.accept()
+                finally:
+                    listener.close()
 
-        self.remotes[0].send(("get_num_agents", None))
-        self.num_agents = int(self.remotes[0].recv())
+                self.remotes.append(remote)
+                self.processes.append(process)
+
+            for worker_rank, (remote, process) in enumerate(zip(self.remotes, self.processes)):
+                worker_num_agents = _recv_worker_ready(remote, process, worker_rank)
+                if worker_rank == 0:
+                    self.num_agents = worker_num_agents
+                elif worker_num_agents != self.num_agents:
+                    raise RuntimeError(
+                        "SubprocVecEnv workers reported inconsistent agent counts: "
+                        f"worker 0 -> {self.num_agents}, worker {worker_rank} -> {worker_num_agents}."
+                    )
+        except Exception:
+            self.close()
+            raise
 
     def reset(self):
         for remote in self.remotes:
