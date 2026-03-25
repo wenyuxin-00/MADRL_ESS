@@ -56,5 +56,11 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         torch_batch = to_torch_batch(batch, cfg.runtime.device)
         assert isinstance(torch_batch["obs"]["local"], torch.Tensor)
         assert torch_batch["obs"]["local"].dtype == torch.float32
+
+        direct_torch_batch = buffer.sample_torch(cfg.runtime.device)
+        assert isinstance(direct_torch_batch["obs"]["local"], torch.Tensor)
+        assert direct_torch_batch["obs"]["local"].shape == torch_batch["obs"]["local"].shape
+        assert direct_torch_batch["action"].shape == torch_batch["action"].shape
+        assert direct_torch_batch["reward"].dtype == torch.float32
     finally:
         env.close()

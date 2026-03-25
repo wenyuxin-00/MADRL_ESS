@@ -17,7 +17,7 @@ from scripts.checkpoints import build_checkpoint_manifest, write_checkpoint_mani
 from scripts.recorders.episode_recorder import append_step_record, init_episode_record
 from scripts.utils.nested import to_torch_nested
 from scripts.utils.project_paths import get_tensorboard_run_dir
-from scripts.utils.replay_buffer import ReplayBuffer, to_torch_batch
+from scripts.utils.replay_buffer import ReplayBuffer
 
 
 class TrainRunner:
@@ -49,7 +49,10 @@ class TrainRunner:
             seed=seed,
         )
         log_dir.mkdir(parents=True, exist_ok=True)
+        self.tensorboard_dir = str(log_dir)
         self.writer = SummaryWriter(log_dir=str(log_dir))
+        self.vec_env_name = type(self.env).__name__
+        self.agent_performance = dict(getattr(self.agent_n[0], "performance_summary", {}))
 
         self.history: deque = deque(maxlen=2000)
         self.episode_rewards = []
@@ -64,12 +67,12 @@ class TrainRunner:
 
     def select_action_batch(self, obs_np: dict) -> np.ndarray:
         obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             action_t = torch.stack(
                 [agent.act_from_torch_obs(obs_t, noise_std=self.noise_std) for agent in self.agent_n],
                 dim=1,
             )
-        return action_t.cpu().numpy().astype(np.float32)
+        return action_t.to(dtype=torch.float32).cpu().numpy()
 
     def rollout_once(self, obs_np: dict | None = None) -> dict:
         if obs_np is None:
@@ -227,8 +230,11 @@ class TrainRunner:
                 ):
                     update_start = time.perf_counter()
                     for _ in range(self.cfg.train.updates_per_step):
-                        batch_np = self.replay_buffer.sample()
-                        batch_torch = to_torch_batch(batch_np, self.cfg.runtime.device)
+                        batch_torch = self.replay_buffer.sample_torch(
+                            self.cfg.runtime.device,
+                            pin_memory=bool(getattr(self.cfg.runtime, "pin_memory", False)),
+                            non_blocking=bool(getattr(self.cfg.runtime, "non_blocking_transfers", False)),
+                        )
                         for agent in self.agent_n:
                             agent.train_on_batch(batch_torch, self.agent_n)
                         update_calls += 1
@@ -258,6 +264,8 @@ class TrainRunner:
             "seed": self.seed,
             "runtime_mode": str(self.cfg.runtime.execution_mode),
             "device": str(self.cfg.runtime.device),
+            "vec_env": self.vec_env_name,
+            "tensorboard_dir": self.tensorboard_dir,
             "total_wall_time_s": total_elapsed,
             "action_time_s": action_time_total,
             "env_step_time_s": env_step_time_total,
@@ -268,5 +276,6 @@ class TrainRunner:
             "avg_env_ms_per_iter": 1000.0 * env_step_time_total / max(interaction_step, 1),
             "avg_update_ms_per_call": 1000.0 * update_time_total / max(update_calls, 1),
         }
+        self.perf_summary.update(self.agent_performance)
         self.episodes_completed = episodes_completed
         return episodes_completed

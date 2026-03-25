@@ -24,6 +24,7 @@ from configs.profiles import (
     make_base_config,
     print_experiment_summary,
     project_root,
+    recommended_gpu_fast_num_envs,
     summarize_experiment,
 )
 
@@ -49,5 +50,6 @@ __all__ = [
     "make_base_config",
     "print_experiment_summary",
     "project_root",
+    "recommended_gpu_fast_num_envs",
     "summarize_experiment",
 ]

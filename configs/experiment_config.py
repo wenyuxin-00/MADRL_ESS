@@ -179,6 +179,12 @@ class RuntimeConfig:
     use_deterministic_algorithms: bool | None = None
     pin_memory: bool | None = None
     non_blocking_transfers: bool | None = None
+    enable_amp: bool | None = None
+    amp_dtype: str = "bfloat16"
+    enable_compile: bool | None = None
+    compile_mode: str = "reduce-overhead"
+    compile_fullgraph: bool = False
+    compile_dynamic: bool = False
     worker_rank: int = 0
     observation_schema: dict[str, tuple[int, ...]] | None = None
     observation_layout: dict[str, dict[str, object]] | None = None

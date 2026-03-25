@@ -1,17 +1,12 @@
-"""MADRL 单智能体基类。
-
-定义单个智能体的 Actor-Critic 网络结构与更新逻辑，
-供 MADDPG 和 MATD3 等具体算法继承。
-
-主要类:
-    BaseAgent -- 单智能体抽象基类
-"""
+"""Base utilities shared by MADRL agents."""
 
 from __future__ import annotations
 
-import copy
+import importlib.util
 import os
+import warnings
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -19,86 +14,156 @@ import torch
 
 from scripts.utils.nested import add_batch_dim, to_torch_nested
 
+_EMITTED_RUNTIME_WARNINGS: set[str] = set()
+
 
 class BaseAgent(ABC):
-    """多智能体强化学习智能体的抽象基类。
+    """Common actor-critic helpers shared by MADDPG and MATD3."""
 
-    每个智能体拥有一个 Actor 网络和一个（或双份）Critic 网络。
-    该基类负责：
-    - 动作选择（观测预处理 + 前向推理）
-    - 目标网络软更新（Polyak 平均）
-    - 模型检查点的保存与加载
+    def _warn_runtime_once(self, message: str) -> None:
+        if message in _EMITTED_RUNTIME_WARNINGS:
+            return
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        _EMITTED_RUNTIME_WARNINGS.add(message)
 
-    子类需要设置的属性:
-        agent_id (int): 该智能体在多智能体系统中的索引。
-        device (torch.device): 计算设备（CPU 或 CUDA）。
-        actor: Actor（策略）网络。
-        critic: Critic（价值）网络。
-        actor_target: Actor 目标网络。
-        critic_target: Critic 目标网络。
-        tau (float): 目标网络软更新系数。
-    """
+    def _runtime_flag(self, name: str, default):
+        runtime_cfg = getattr(self.cfg, "runtime", None)
+        if runtime_cfg is None or not hasattr(runtime_cfg, name):
+            return default
+        value = getattr(runtime_cfg, name)
+        return default if value is None else value
+
+    def _configure_runtime_acceleration(self) -> None:
+        self._actor_forward = self.actor
+        self._critic_forward = self.critic
+        self._actor_target_forward = self.actor_target
+        self._critic_target_forward = self.critic_target
+        self._autocast_dtype = None
+        self.performance_summary = {
+            "amp_enabled": False,
+            "amp_dtype": None,
+            "amp_fallback_reason": None,
+            "compile_enabled": False,
+            "compile_mode": None,
+            "compile_fallback_reason": None,
+            "compiled_modules": [],
+        }
+
+        if self.device.type != "cuda":
+            self.performance_summary["amp_fallback_reason"] = "CUDA device not in use."
+            self.performance_summary["compile_fallback_reason"] = "CUDA device not in use."
+            return
+
+        if str(self._runtime_flag("execution_mode", "performance")) != "performance":
+            self.performance_summary["amp_fallback_reason"] = "Runtime mode is not performance."
+            self.performance_summary["compile_fallback_reason"] = "Runtime mode is not performance."
+            return
+
+        if bool(self._runtime_flag("enable_amp", True)):
+            amp_dtype_name = str(self._runtime_flag("amp_dtype", "bfloat16")).lower()
+            try:
+                dtype = getattr(torch, amp_dtype_name)
+                with torch.autocast(device_type="cuda", dtype=dtype):
+                    pass
+                self._autocast_dtype = dtype
+                self.performance_summary["amp_enabled"] = True
+                self.performance_summary["amp_dtype"] = amp_dtype_name
+            except Exception as exc:
+                self.performance_summary["amp_fallback_reason"] = str(exc)
+                self._warn_runtime_once(
+                    f"{type(self).__name__} agent {self.agent_id} disabled CUDA autocast "
+                    f"and fell back to eager FP32: {exc}"
+                )
+        else:
+            self.performance_summary["amp_fallback_reason"] = "CUDA autocast disabled by runtime config."
+
+        if not bool(self._runtime_flag("enable_compile", True)):
+            self.performance_summary["compile_fallback_reason"] = "torch.compile disabled by runtime config."
+            return
+
+        if not hasattr(torch, "compile"):
+            self.performance_summary["compile_fallback_reason"] = "torch.compile is unavailable in this PyTorch build."
+            return
+        if importlib.util.find_spec("triton") is None:
+            self.performance_summary["compile_fallback_reason"] = "Triton is unavailable in the current environment."
+            return
+
+        compile_kwargs = {
+            "mode": str(self._runtime_flag("compile_mode", "reduce-overhead")),
+            "fullgraph": bool(self._runtime_flag("compile_fullgraph", False)),
+            "dynamic": bool(self._runtime_flag("compile_dynamic", False)),
+        }
+        try:
+            self._actor_forward = torch.compile(self.actor, **compile_kwargs)
+            self._critic_forward = torch.compile(self.critic, **compile_kwargs)
+            self._actor_target_forward = torch.compile(self.actor_target, **compile_kwargs)
+            self._critic_target_forward = torch.compile(self.critic_target, **compile_kwargs)
+            self.performance_summary["compile_enabled"] = True
+            self.performance_summary["compile_mode"] = compile_kwargs["mode"]
+            self.performance_summary["compiled_modules"] = [
+                "actor",
+                "critic",
+                "actor_target",
+                "critic_target",
+            ]
+        except Exception as exc:
+            self._actor_forward = self.actor
+            self._critic_forward = self.critic
+            self._actor_target_forward = self.actor_target
+            self._critic_target_forward = self.critic_target
+            self.performance_summary["compile_fallback_reason"] = str(exc)
+            self._warn_runtime_once(
+                f"{type(self).__name__} agent {self.agent_id} disabled torch.compile "
+                f"and fell back to eager execution: {exc}"
+            )
+
+    def _autocast_context(self):
+        if self._autocast_dtype is None or self.device.type != "cuda":
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self._autocast_dtype)
+
+    def _actor_call(self, obs_t: dict) -> torch.Tensor:
+        with self._autocast_context():
+            return self._actor_forward(obs_t)
+
+    def _actor_target_call(self, obs_t: dict) -> torch.Tensor:
+        with self._autocast_context():
+            return self._actor_target_forward(obs_t)
+
+    def _critic_call(self, obs_t: dict, action_t: torch.Tensor):
+        with self._autocast_context():
+            return self._critic_forward(obs_t, action_t)
+
+    def _critic_target_call(self, obs_t: dict, action_t: torch.Tensor):
+        with self._autocast_context():
+            return self._critic_target_forward(obs_t, action_t)
 
     def _prepare_obs(self, obs: dict) -> tuple[dict, bool]:
-        """将观测字典预处理为带 batch 维度的 PyTorch 张量。
-
-        参数:
-            obs: 结构化观测字典，可能有或没有 batch 维度。
-
-        返回:
-            tuple: (转换后的 torch 观测字典, 原始数据是否已有 batch 维度)。
-        """
-        # 通过 local 观测的维度数判断是否已有 batch 维度（3维=有batch）
         has_batch_dim = obs["local"].ndim == 3
         if not has_batch_dim:
-            # 单步观测需要手动添加 batch 维度以统一后续处理
             obs = add_batch_dim(obs)
-        # 将嵌套字典中的 numpy 数组递归转换为 torch 张量并移至目标设备
-        obs_t = to_torch_nested(obs, self.device)
-        return obs_t, has_batch_dim
+        return to_torch_nested(obs, self.device), has_batch_dim
 
     def choose_action(self, obs: dict, noise_std: float) -> np.ndarray:
-        """根据结构化观测选择动作（支持单步和批量输入）。
-
-        参数:
-            obs: 结构化观测字典。可以是单步格式
-                ``{"local": (n_agents, local_dim), ...}``
-                或批量格式 ``{"local": (batch, n_agents, local_dim), ...}``。
-            noise_std: 探索噪声标准差（0 表示确定性策略）。
-
-        返回:
-            np.ndarray: 单步输入时形状为 ``(action_dim,)``，
-            批量输入时形状为 ``(batch, action_dim)``。取值范围 ``[-1, 1]``。
-        """
         obs_t, has_batch_dim = self._prepare_obs(obs)
-        # 推理阶段不需要计算梯度，节省显存和计算
-        with torch.no_grad():
-            action = self.act_from_torch_obs(obs_t, noise_std=noise_std).cpu().numpy()
+        with torch.inference_mode():
+            action = (
+                self.act_from_torch_obs(obs_t, noise_std=noise_std)
+                .to(dtype=torch.float32)
+                .cpu()
+                .numpy()
+            )
         if not has_batch_dim:
-            # 若原始输入无 batch 维度，去掉输出中添加的 batch 维度
             action = action[0]
         return action.astype(np.float32)
 
     def _soft_update(self) -> None:
-        """对目标网络执行 Polyak 软更新。
-
-        使用公式: target_param = tau * param + (1 - tau) * target_param
-        通过缓慢跟踪在线网络参数，使训练目标更稳定。
-        """
-        # 更新 Critic 目标网络参数
         for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
             tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
-        # 更新 Actor 目标网络参数
         for p, tp in zip(self.actor.parameters(), self.actor_target.parameters()):
             tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
 
     def save_model(self, model_dir: str, episode: int) -> None:
-        """将 Actor 和 Critic 的参数保存到磁盘。
-
-        参数:
-            model_dir: 检查点文件保存目录。
-            episode: 用作检查点标签的 episode 编号。
-        """
         os.makedirs(model_dir, exist_ok=True)
         actor_path = os.path.join(model_dir, f"actor_agent_{self.agent_id}_ep_{episode}.pth")
         critic_path = os.path.join(model_dir, f"critic_agent_{self.agent_id}_ep_{episode}.pth")
@@ -106,54 +171,21 @@ class BaseAgent(ABC):
         torch.save(self.critic.state_dict(), critic_path)
 
     def load_model(self, model_dir: str, episode: int) -> None:
-        """从磁盘加载 Actor 和 Critic 的参数。
-
-        加载后会重新构建目标网络（深拷贝），确保目标网络
-        与在线网络参数完全一致。
-
-        参数:
-            model_dir: 包含检查点文件的目录。
-            episode: 要加载的 episode 标签。
-        """
         actor_path = os.path.join(model_dir, f"actor_agent_{self.agent_id}_ep_{episode}.pth")
         critic_path = os.path.join(model_dir, f"critic_agent_{self.agent_id}_ep_{episode}.pth")
         self.actor.load_state_dict(torch.load(actor_path, map_location=self.device))
         self.critic.load_state_dict(torch.load(critic_path, map_location=self.device))
-        # 加载后重建目标网络，使其与在线网络参数完全同步
-        self.actor_target = copy.deepcopy(self.actor)
-        self.critic_target = copy.deepcopy(self.critic)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.critic_target.load_state_dict(self.critic.state_dict())
 
     @abstractmethod
     def act_from_torch_obs(self, obs_t: dict, noise_std: float) -> torch.Tensor:
-        """从已转换的 PyTorch 观测批次中选择动作。
-
-        参数:
-            obs_t: 已在目标设备上的 torch 观测字典。
-            noise_std: 探索噪声标准差。
-
-        返回:
-            torch.Tensor: 形状为 ``(batch, action_dim)`` 的动作张量。
-        """
-        ...
+        """Select actions from already-device-placed torch observations."""
 
     @abstractmethod
     def train(self, replay_buffer: Any, agent_n: list) -> None:
-        """从经验回放缓冲区采样一批数据并更新网络参数。
-
-        参数:
-            replay_buffer: 共享的经验回放缓冲区。
-            agent_n: 所有智能体列表（用于集中式 Critic 训练）。
-        """
-        ...
+        """Sample from a replay buffer and execute one update step."""
 
     @abstractmethod
     def train_on_batch(self, batch: dict, agent_n: list) -> None:
-        """使用一个预采样的批次数据更新网络参数。
-
-        参数:
-            batch: 包含键 ``"obs"``、``"action"``、``"reward"``、
-                ``"next_obs"``、``"done"`` 的字典，所有值均为
-                已在目标设备上的 torch 张量。
-            agent_n: 所有智能体列表。
-        """
-        ...
+        """Update the agent parameters from one sampled batch."""

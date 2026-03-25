@@ -62,7 +62,9 @@ def test_notebook_defaults_stay_portable():
     assert 'train_controls = {' in madrl_text
     assert '"vec_env_type": "subproc"' in madrl_text
     assert '"prediction_mode": "perfect"' in madrl_text
-    assert '"require_cuda": False' in madrl_text
+    assert '"launch_mode": "external"' in madrl_text
+    assert 'recommended_gpu_fast_num_envs()' in madrl_text
+    assert 'bool(torch.cuda.is_available())' in madrl_text
 
     assert 'ProsumerDataset(' in grid_text
     assert 'build_simbench_net(cfg.grid.sb_code)' in grid_text
@@ -74,4 +76,4 @@ def test_removed_legacy_notebooks_are_gone():
     repo_root = Path(__file__).resolve().parents[1]
     assert not (repo_root / "notebooks" / "data" / "data_process.ipynb").exists()
     assert not (repo_root / "notebooks" / "data" / "prepare_simbench_data.ipynb").exists()
-    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()
+    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()

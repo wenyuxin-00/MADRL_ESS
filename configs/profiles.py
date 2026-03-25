@@ -32,6 +32,10 @@ def make_base_config(data_dir: str | Path | None = None, device=None) -> Experim
     return cfg
 
 
+def recommended_gpu_fast_num_envs() -> int:
+    return min(20, max(8, (os.cpu_count() or 8) - 8))
+
+
 def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentConfig:
     if profile_name == "base":
         return cfg
@@ -56,6 +60,15 @@ def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentC
         cfg.train.buffer_size = 100000
         cfg.train.update_interval = 1
         cfg.train.updates_per_step = 1
+        cfg.train.use_noise_decay = True
+        return cfg
+    if profile_name == "gpu_fast":
+        cfg.train.num_envs = recommended_gpu_fast_num_envs()
+        cfg.train.vec_env_type = "subproc" if cfg.train.num_envs > 1 else "dummy"
+        cfg.train.batch_size = 4096
+        cfg.train.buffer_size = 200000
+        cfg.train.update_interval = 1
+        cfg.train.updates_per_step = 2
         cfg.train.use_noise_decay = True
         return cfg
     raise ValueError(f"Unknown train profile: '{profile_name}'")
@@ -100,13 +113,19 @@ def apply_runtime_profile(cfg: ExperimentConfig, runtime_mode: str) -> Experimen
     cfg.runtime.use_deterministic_algorithms = None
     cfg.runtime.pin_memory = None
     cfg.runtime.non_blocking_transfers = None
+    cfg.runtime.enable_amp = None
+    cfg.runtime.enable_compile = None
+    cfg.runtime.amp_dtype = "bfloat16"
+    cfg.runtime.compile_mode = "reduce-overhead"
+    cfg.runtime.compile_fullgraph = False
+    cfg.runtime.compile_dynamic = False
     return cfg
 
 
 def compose_experiment_config(
     *,
     profile: str = "base",
-    algorithm: str = "MADDPG",
+    algorithm: str | None = None,
     model_family: str = "mlp",
     reward_type: str | None = None,
     forecast_type: str | None = None,
@@ -123,7 +142,9 @@ def compose_experiment_config(
     apply_train_profile(cfg, profile)
     apply_runtime_profile(cfg, runtime_mode)
     apply_model_profile(cfg, model_family)
-    cfg.algo.name = algorithm
+    cfg.algo.name = (
+        "MATD3" if algorithm is None and profile == "gpu_fast" else (algorithm or "MADDPG")
+    )
 
     if reward_type is not None:
         apply_reward_profile(cfg, reward_type)

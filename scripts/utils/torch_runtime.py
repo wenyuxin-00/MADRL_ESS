@@ -43,6 +43,12 @@ class TorchRuntimeState:
     deterministic_algorithms: bool
     pin_memory: bool
     non_blocking_transfers: bool
+    enable_amp: bool
+    amp_dtype: str
+    enable_compile: bool
+    compile_mode: str
+    compile_fullgraph: bool
+    compile_dynamic: bool
 
 
 def _unwrap_runtime_config(runtime_or_cfg: Any | None):
@@ -180,6 +186,24 @@ def configure_torch_runtime(
     non_blocking_transfers = bool(
         _runtime_attr(runtime_cfg, "non_blocking_transfers", resolved_device.type == "cuda")
     )
+    enable_amp = bool(
+        _runtime_attr(
+            runtime_cfg,
+            "enable_amp",
+            resolved_device.type == "cuda" and resolved_mode == PERFORMANCE_RUNTIME_MODE,
+        )
+    )
+    amp_dtype = str(_runtime_attr(runtime_cfg, "amp_dtype", "bfloat16"))
+    enable_compile = bool(
+        _runtime_attr(
+            runtime_cfg,
+            "enable_compile",
+            resolved_device.type == "cuda" and resolved_mode == PERFORMANCE_RUNTIME_MODE,
+        )
+    )
+    compile_mode = str(_runtime_attr(runtime_cfg, "compile_mode", "reduce-overhead"))
+    compile_fullgraph = bool(_runtime_attr(runtime_cfg, "compile_fullgraph", False))
+    compile_dynamic = bool(_runtime_attr(runtime_cfg, "compile_dynamic", False))
     cuda_available = torch.cuda.is_available()
 
     # 先做一致性检查，尽早报错，避免训练跑一半才发现设备条件不满足。
@@ -242,6 +266,12 @@ def configure_torch_runtime(
         # 把当前线程的默认 CUDA 设备切到目标卡，后续张量创建才会落到正确位置。
         torch.cuda.set_device(resolved_device)
 
+    if enable_compile and hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
+        try:
+            torch._dynamo.config.suppress_errors = True
+        except (AttributeError, RuntimeError):
+            pass
+
     # 这个 state 相当于“本次配置最终落地成了什么”，方便日志记录和下游复用。
     state = TorchRuntimeState(
         device=resolved_device,
@@ -255,6 +285,12 @@ def configure_torch_runtime(
         deterministic_algorithms=deterministic_algorithms,
         pin_memory=pin_memory,
         non_blocking_transfers=non_blocking_transfers,
+        enable_amp=enable_amp,
+        amp_dtype=amp_dtype,
+        enable_compile=enable_compile,
+        compile_mode=compile_mode,
+        compile_fullgraph=compile_fullgraph,
+        compile_dynamic=compile_dynamic,
     )
 
     if runtime_cfg is not None:
@@ -270,6 +306,12 @@ def configure_torch_runtime(
         runtime_cfg.use_deterministic_algorithms = state.deterministic_algorithms
         runtime_cfg.pin_memory = state.pin_memory
         runtime_cfg.non_blocking_transfers = state.non_blocking_transfers
+        runtime_cfg.enable_amp = state.enable_amp
+        runtime_cfg.amp_dtype = state.amp_dtype
+        runtime_cfg.enable_compile = state.enable_compile
+        runtime_cfg.compile_mode = state.compile_mode
+        runtime_cfg.compile_fullgraph = state.compile_fullgraph
+        runtime_cfg.compile_dynamic = state.compile_dynamic
         runtime_cfg.require_cuda = resolved_require_cuda
 
     return state

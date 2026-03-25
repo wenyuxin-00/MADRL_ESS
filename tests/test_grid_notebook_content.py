@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def test_grid_notebook_exposes_mainline_controls_and_helper_workflow():
+def test_grid_notebook_exposes_external_mainline_and_inline_debug_paths():
     repo_root = Path(__file__).resolve().parents[1]
     notebook = json.loads(
         (repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb").read_text(encoding="utf-8")
@@ -22,21 +22,23 @@ def test_grid_notebook_exposes_mainline_controls_and_helper_workflow():
     assert "collect_mpc_rollout(" in notebook_text
     assert "plot_test_rollout(" in notebook_text
     assert "plot_operating_cost_comparison(" in notebook_text
-    assert "experiment_controls = {" in notebook_text
-    assert "data_controls = {" in notebook_text
-    assert "train_controls = {" in notebook_text
-    assert '"prediction_mode": "perfect"' in notebook_text
-    assert '"agent_profiles": ["SFH12", "SFH14", "SFH16"]' in notebook_text
-    assert '"future_horizon": 24' in notebook_text
-    assert '"num_envs": 16' in notebook_text
+    assert "recommended_gpu_fast_num_envs()" in notebook_text
+    assert "run_external_train_mainline(" in notebook_text
+    assert '"launch_mode": "external"' in notebook_text
+    assert '"profile": "gpu_fast"' in notebook_text
+    assert '"algorithm": "MATD3"' in notebook_text
     assert '"vec_env_type": "subproc"' in notebook_text
     assert '"batch_size": 4096' in notebook_text
-    assert '"updates_per_step": 8' in notebook_text
-    assert '"require_cuda": False' in notebook_text
+    assert '"buffer_size": 200000' in notebook_text
+    assert '"update_interval": 1' in notebook_text
+    assert '"updates_per_step": 2' in notebook_text
+    assert '"policy_update_freq": 2' in notebook_text
+    assert 'if launch_mode == "external":' in notebook_text
+    assert 'if launch_mode == "inline":' in notebook_text
     assert "runner = build_runner(" in notebook_text
-    assert "episodes_completed = runner.run()" in notebook_text
     assert "plot_reward_decomposition(" in notebook_text
     assert "runner.save_model(" in notebook_text
+    assert "cfg.algo.name = algorithm" in notebook_text
 
     assert "apply_grid_profile(cfg" not in notebook_text
     assert "dataset_type" not in notebook_text
@@ -46,4 +48,3 @@ def test_grid_notebook_exposes_mainline_controls_and_helper_workflow():
     assert "wpuq_" not in notebook_text
     assert "csv_prosumer" not in notebook_text
     assert "grid_pf" not in notebook_text
-

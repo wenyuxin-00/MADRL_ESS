@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import traceback
+import warnings
 from multiprocessing.connection import Client, Listener
 
 import numpy as np
@@ -43,6 +44,16 @@ def _subproc_worker(address, authkey: bytes, cfg, mode: str, worker_rank: int, s
     env = None
 
     try:
+        warnings.filterwarnings(
+            "ignore",
+            message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*",
+            category=FutureWarning,
+        )
+        torch.set_num_threads(1)
+        try:
+            torch.set_num_interop_threads(1)
+        except (AttributeError, RuntimeError):
+            pass
         env = _make_worker_env(cfg, mode=mode, worker_rank=worker_rank, seed=seed)
         remote.send((_WORKER_READY, int(env.n)))
     except Exception:
