@@ -47,12 +47,17 @@ def get_default_lstm_artifact_paths(
     *,
     signal_name: str = "price",
     future_horizon: int = 24,
+    agent_index: int | None = None,
 ) -> dict[str, Path]:
     """Return the standard model/meta/scaler paths for one signal."""
     signal_name = str(signal_name)
     future_horizon = int(future_horizon)
     artifact_dir = get_lstm_horizon_artifact_dir(future_horizon, root) / signal_name
     stem = f"{signal_name}_lstm_h{future_horizon}"
+    if agent_index is not None:
+        agent_index = int(agent_index)
+        artifact_dir = artifact_dir / f"agent_{agent_index}"
+        stem = f"{signal_name}_agent{agent_index}_lstm_h{future_horizon}"
     return {
         "artifact_dir": artifact_dir,
         "model_path": artifact_dir / f"{stem}.pt",

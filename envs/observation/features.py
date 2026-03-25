@@ -98,6 +98,14 @@ def _current_timestamp_value(env) -> str:
     return str(fallback)
 
 
+def _history_timestamps(env) -> list[str]:
+    timestamps = list(dict(getattr(env, "episode_meta", {})).get("timestamps") or [])
+    if not timestamps:
+        return []
+    end_idx = max(0, int(env.cur_step) + 1)
+    return [str(timestamp) for timestamp in timestamps[:end_idx]]
+
+
 def _current_shared_signal_feature(signal_name: str, description: str) -> ObservationFeatureSpec:
     return ObservationFeatureSpec(
         name=signal_name,
@@ -132,6 +140,7 @@ def _shared_signal_sequence_feature(
                 env.get_signal_history(signal_name),
                 sequence_length,
                 signal_name=signal_name,
+                history_timestamps=_history_timestamps(env),
             ).astype(np.float32)
         return pad_sequence_1d(env.get_signal(signal_name), env.cur_step, sequence_length).astype(np.float32)
 
@@ -157,6 +166,7 @@ def _per_agent_signal_sequence_feature(
                 env.get_signal_history(signal_name),
                 sequence_length,
                 signal_name=signal_name,
+                history_timestamps=_history_timestamps(env),
             ).astype(np.float32)
         return pad_sequence_2d(env.get_signal(signal_name), env.cur_step, sequence_length).T.astype(np.float32)
 

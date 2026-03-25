@@ -36,6 +36,13 @@ def _load_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _write_json(path: str | Path, payload: dict[str, Any]) -> Path:
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(payload, indent=2, default=_json_default), encoding="utf-8")
+    return target_path
+
+
 def _json_default(value: Any):
     if isinstance(value, Path):
         return str(value)
@@ -111,6 +118,7 @@ def _build_result_payload(
     cfg,
     experiment_controls: dict[str, Any],
     data_controls: dict[str, Any],
+    battery_controls: dict[str, Any],
     train_controls: dict[str, Any],
     checkpoint_controls: dict[str, Any],
     runtime_state,
@@ -121,6 +129,7 @@ def _build_result_payload(
     save_dir: Path,
     meta_dir: Path,
     log_path: Path,
+    reward_summary_path: Path,
     env_name: str,
     run_number: int,
     seed: int,
@@ -130,6 +139,7 @@ def _build_result_payload(
         checkpoint_controls.get("experiment_name", save_dir.parent.name),
         default="grid_mainline",
     )
+    run_metadata = dict(getattr(runner, "run_metadata", {}))
     return {
         "algorithm": str(cfg.algo.name),
         "prediction_mode": str(applied_controls["prediction_mode"]),
@@ -142,6 +152,7 @@ def _build_result_payload(
         "model_root": str(save_dir),
         "meta_dir": str(meta_dir),
         "log_path": str(log_path),
+        "reward_summary_path": str(reward_summary_path),
         "checkpoint_info": resolve_checkpoint_to_load(save_dir, cfg.algo.name, episode_tag=episodes_completed),
         "tensorboard_dir": str(
             get_tensorboard_run_dir(
@@ -155,10 +166,15 @@ def _build_result_payload(
         "device": str(cfg.runtime.device),
         "vec_env": type(runner.env).__name__,
         "perf_summary": dict(runner.perf_summary),
+        "started_at": run_metadata.get("started_at"),
+        "finished_at": run_metadata.get("finished_at"),
+        "elapsed_seconds": run_metadata.get("elapsed_seconds"),
+        "estimated_end_time": run_metadata.get("estimated_end_time"),
         "summary": summary,
         "device_info": describe_device(runtime_state),
         "experiment_controls": dict(experiment_controls),
         "data_controls": dict(data_controls),
+        "battery_controls": dict(battery_controls),
         "train_controls": dict(train_controls),
         "checkpoint_controls": dict(checkpoint_controls),
         "forecast_ready": forecast_ready,
@@ -170,6 +186,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the accelerated Grid MADRL training mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
+    parser.add_argument("--battery-controls")
     parser.add_argument("--train-controls", required=True)
     parser.add_argument("--checkpoint-controls")
     parser.add_argument("--data-dir")
@@ -191,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
 
     experiment_controls = _load_json(args.experiment_controls)
     data_controls = _load_json(args.data_controls)
+    battery_controls = _load_json(args.battery_controls) if args.battery_controls else {}
     train_controls = _load_json(args.train_controls)
     checkpoint_controls = _load_json(args.checkpoint_controls) if args.checkpoint_controls else {}
 
@@ -211,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     log_path = meta_dir / "train.log"
     progress_json = meta_dir / "progress.json"
+    reward_summary_path = meta_dir / "train_reward_summary.json"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = compose_experiment_config(
@@ -232,10 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         agent_profiles=list(data_controls.get("agent_profiles", cfg.data.agent_profiles)),
         load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * cfg.env.num_agents),
         pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * cfg.env.num_agents),
-        storage_scale=data_controls.get(
-            "storage_scale",
-            cfg.data.storage_scale or [1.0] * cfg.env.num_agents,
-        ),
+        battery_controls=battery_controls,
         future_horizon=int(data_controls.get("future_horizon", cfg.env.future_horizon)),
         train_year=data_controls.get("train_year"),
         test_year=data_controls.get("test_year"),
@@ -254,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = print_experiment_summary(cfg)
     summary["applied_controls"] = applied_controls
     summary["device_info"] = describe_device(runtime_state)
+    summary["battery_controls"] = dict(battery_controls)
     summary["checkpoint_controls"] = dict(checkpoint_controls)
     summary["model_root"] = str(save_dir)
     summary["meta_dir"] = str(meta_dir)
@@ -266,10 +283,13 @@ def main(argv: list[str] | None = None) -> int:
         episodes_completed = runner.run()
         save_dir.mkdir(parents=True, exist_ok=True)
         runner.save_model(str(save_dir), episode=episodes_completed)
+        reward_summary_payload = runner.build_reward_summary()
+        _write_json(reward_summary_path, reward_summary_payload)
         result_payload = _build_result_payload(
             cfg=cfg,
             experiment_controls=experiment_controls,
             data_controls=data_controls,
+            battery_controls=battery_controls,
             train_controls=train_controls,
             checkpoint_controls=checkpoint_controls,
             runtime_state=runtime_state,
@@ -280,16 +300,13 @@ def main(argv: list[str] | None = None) -> int:
             save_dir=save_dir,
             meta_dir=meta_dir,
             log_path=log_path,
+            reward_summary_path=reward_summary_path,
             env_name=args.env_name,
             run_number=int(args.run_number),
             seed=seed,
             applied_controls=applied_controls,
         )
-        result_json.parent.mkdir(parents=True, exist_ok=True)
-        result_json.write_text(
-            json.dumps(result_payload, indent=2, default=_json_default),
-            encoding="utf-8",
-        )
+        _write_json(result_json, result_payload)
         print(json.dumps(result_payload, indent=2, default=_json_default))
         return 0
     finally:
@@ -298,3 +315,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

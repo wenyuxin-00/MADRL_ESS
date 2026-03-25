@@ -57,6 +57,5 @@ def build_dataset(cfg, mode: str = "train"):
         pv_capacity_kw=list(cfg.data.pv_capacity_kw),
         load_scale=list(cfg.data.load_scale),
         pv_scale=list(cfg.data.pv_scale),
-        storage_scale=list(cfg.data.storage_scale),
         node_ids=list(cfg.grid.agent_bus_ids),
     )

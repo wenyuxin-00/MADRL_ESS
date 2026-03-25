@@ -59,8 +59,22 @@ class GridEnv(gym.Env):
         self.gamma = float(cfg.algo.gamma)
         self.init_soc = float(env_cfg.init_soc)
         self.dt = float(env_cfg.dt)
-        self.storage_power_scale = float(getattr(env_cfg, "storage_power_scale", 1.0))
-        self.storage_capacity_scale = float(getattr(env_cfg, "storage_capacity_scale", 1.0))
+        self.battery_mode = str(getattr(env_cfg, "battery_mode", "from_pv")).strip().lower()
+        self.from_pv_power_ratio = float(getattr(env_cfg, "from_pv_power_ratio", 0.5))
+        self.from_pv_duration_hours = float(getattr(env_cfg, "from_pv_duration_hours", 2.5))
+        if self.battery_mode not in {"fixed", "from_pv"}:
+            raise ValueError(
+                f"battery_mode must be one of ['fixed', 'from_pv'], got '{self.battery_mode}'."
+            )
+        if self.from_pv_power_ratio <= 0.0:
+            raise ValueError(
+                f"from_pv_power_ratio must be positive, got {self.from_pv_power_ratio}."
+            )
+        if self.from_pv_duration_hours <= 0.0:
+            raise ValueError(
+                "from_pv_duration_hours must be positive, "
+                f"got {self.from_pv_duration_hours}."
+            )
         runtime_seed = getattr(getattr(cfg, "runtime", None), "seed", None)
         self._default_seed = None if runtime_seed is None else int(runtime_seed)
         self._seeded_once = False
@@ -160,23 +174,33 @@ class GridEnv(gym.Env):
             )
         return signal
 
-    def _resolve_meta_vector(self, key: str, default_value: float) -> np.ndarray:
+    def _require_meta_vector(self, key: str) -> np.ndarray:
         raw_value = self.episode_meta.get(key)
         if raw_value is None:
-            return np.full((self.n,), default_value, dtype=np.float32)
+            raise ValueError(
+                f"battery_mode='{self.battery_mode}' requires episode meta '{key}' to be present."
+            )
         values = np.asarray(raw_value, dtype=np.float32).reshape(-1)
         if values.size != self.n:
             raise ValueError(
                 f"episode meta '{key}' should have {self.n} values, got shape {values.shape}"
             )
-        fallback = np.full((self.n,), default_value, dtype=np.float32)
-        return np.where(values > 0.0, values, fallback).astype(np.float32)
+        if np.any(values <= 0.0):
+            raise ValueError(
+                f"episode meta '{key}' must contain positive values for all agents, got {values.tolist()}."
+            )
+        return values.astype(np.float32)
 
     def _apply_episode_storage_config(self) -> None:
-        self.agent_c_bat = self._resolve_meta_vector("ess_capacity_kwh", self.c_bat)
-        self.agent_p_max = self._resolve_meta_vector("ess_power_kw", self.p_max)
-        self.agent_c_bat = (self.agent_c_bat * self.storage_capacity_scale).astype(np.float32)
-        self.agent_p_max = (self.agent_p_max * self.storage_power_scale).astype(np.float32)
+        if self.battery_mode == "fixed":
+            self.agent_c_bat = np.full((self.n,), self.c_bat, dtype=np.float32)
+            self.agent_p_max = np.full((self.n,), self.p_max, dtype=np.float32)
+        else:
+            pv_peak_kw = self._require_meta_vector("pv_peak_kw")
+            self.agent_p_max = (pv_peak_kw * np.float32(self.from_pv_power_ratio)).astype(np.float32)
+            self.agent_c_bat = (self.agent_p_max * np.float32(self.from_pv_duration_hours)).astype(
+                np.float32
+            )
         self.agent_e_min = (self.soc_min * self.agent_c_bat).astype(np.float32)
         self.agent_e_max = (self.soc_max * self.agent_c_bat).astype(np.float32)
         self.e_min = self.agent_e_min.copy()
@@ -284,8 +308,7 @@ class GridEnv(gym.Env):
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
 
         self.forecaster.reset()
-        if hasattr(self.forecaster, "set_episode"):
-            self.forecaster.set_episode(self.signals)
+        self.forecaster.set_episode(self.signals, self.episode_meta)
 
         base_load = np.asarray(self.ep_load[0], dtype=np.float32)
         base_pv = np.asarray(self.ep_pv[0], dtype=np.float32)

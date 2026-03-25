@@ -216,7 +216,18 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
         "agent_profiles": list(cfg.data.agent_profiles),
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
-        "storage_scale": list(cfg.data.storage_scale),
+        "battery": {
+            "mode": str(cfg.env.battery_mode),
+            "from_pv_power_ratio": float(cfg.env.from_pv_power_ratio),
+            "from_pv_duration_hours": float(cfg.env.from_pv_duration_hours),
+            "battery_capacity": float(cfg.env.battery_capacity),
+            "max_charge_rate": float(cfg.env.max_charge_rate),
+            "efficiency": float(cfg.env.efficiency),
+            "init_soc": float(cfg.env.init_soc),
+            "soc_min": float(cfg.env.soc_min),
+            "soc_max": float(cfg.env.soc_max),
+            "soc_target": float(cfg.env.soc_target),
+        },
     }
     if cfg.forecast.type == "lstm":
         summary["forecast_signals"] = list(cfg.forecast.target_signals)

@@ -10,10 +10,11 @@ def plot_last_k_episodes_price_action_soc(history, k=2, n_agents=3, title_prefix
     """Plot price, battery power, and SoC for the last ``k`` episodes."""
     if len(history) == 0:
         print("No history to plot.")
-        return
+        return None
 
     k = min(k, len(history))
     start = len(history) - k
+    figures = []
 
     for ep_idx in range(start, len(history)):
         ep = history[ep_idx]
@@ -74,4 +75,8 @@ def plot_last_k_episodes_price_action_soc(history, k=2, n_agents=3, title_prefix
 
         axes[-1].set_xlabel("Time Step")
         fig.tight_layout(rect=[0, 0, 1, 0.97])
-        plt.show()
+        figures.append(fig)
+
+    if len(figures) == 1:
+        return figures[0]
+    return figures

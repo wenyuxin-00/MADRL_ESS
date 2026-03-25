@@ -1,10 +1,4 @@
-"""LSTM 时序预测器。
-
-使用训练好的 LSTM 模型对电价、负荷、光伏等信号进行多步预测。
-
-主要类:
-    LSTMForecaster -- LSTM 预测器
-"""
+"""Runtime LSTM forecaster with managed artifact metadata."""
 
 from __future__ import annotations
 
@@ -12,24 +6,77 @@ import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
+import pandas as pd
 import torch
 
 from predictors.base import Forecaster
 from predictors.lstm_model import LSTMForecastModel
+from predictors.time_features import (
+    TIME_FEATURE_MODE_NONE,
+    coerce_timestamp_index,
+    encode_forecast_time_features,
+    infer_timestamp_step,
+    normalize_time_feature_mode,
+    pad_history_timestamps_left,
+)
 
-# LSTM 产物文件的标准后缀
-LSTM_META_SUFFIX = "_meta.json"       # 元数据文件后缀
-LSTM_SCALER_SUFFIX = "_scaler.pkl"    # 标准化器文件后缀
-# 元数据文件中必须包含的字段列表
+LSTM_ARTIFACT_FORMAT = "lstm_forecaster_v4"
+LSTM_LOAD_HYBRID_ARTIFACT_FORMAT = "lstm_forecaster_v5"
+PHYSICAL_NORMALIZATION_NONE = "none"
+PHYSICAL_NORMALIZATION_LOAD_SCALE = "load_scale"
+PHYSICAL_NORMALIZATION_PV_PEAK = "pv_peak_kw"
+POSTPROCESS_MODE_NONE = "none"
+POSTPROCESS_MODE_BASELINE_BLEND = "baseline_blend"
+BASELINE_MODE_NONE = "none"
+BASELINE_MODE_LAST_VALUE = "last_value"
+PHYSICAL_SCALE_EPS = np.float32(1e-6)
+
+LSTM_META_SUFFIX = "_meta.json"
+LSTM_SCALER_SUFFIX = "_scaler.pkl"
 LSTM_REQUIRED_META_FIELDS = (
     "seq_len",
     "pred_len",
     "hidden_size",
     "num_layers",
     "dropout",
+    "input_size",
+    "time_feature_mode",
+    "model_mode",
 )
+
+
+def _normalize_physical_mode(mode: str | None) -> str:
+    normalized = str(mode or PHYSICAL_NORMALIZATION_NONE).strip().lower()
+    if normalized not in {
+        PHYSICAL_NORMALIZATION_NONE,
+        PHYSICAL_NORMALIZATION_LOAD_SCALE,
+        PHYSICAL_NORMALIZATION_PV_PEAK,
+    }:
+        raise ValueError(f"Unsupported physical_normalization_mode '{mode}'.")
+    return normalized
+
+
+def _coerce_physical_scale_array(
+    scale_by_column,
+    *,
+    expected_size: int | None = None,
+) -> np.ndarray | None:
+    if scale_by_column is None:
+        return None
+    scale = np.asarray(scale_by_column, dtype=np.float32).reshape(-1)
+    if scale.size == 0:
+        return None
+    if expected_size is not None:
+        if scale.size == 1 and expected_size > 1:
+            scale = np.repeat(scale, expected_size)
+        elif scale.size != expected_size:
+            raise ValueError(
+                f"physical_scale_by_column size mismatch: expected {expected_size}, got {scale.size}"
+            )
+    return scale.astype(np.float32, copy=True)
 
 
 def resolve_lstm_artifact_paths(
@@ -37,22 +84,8 @@ def resolve_lstm_artifact_paths(
     meta_path=None,
     scaler_path=None,
 ) -> tuple[Path, Path, Path]:
-    """解析单个已保存 LSTM 模型的标准伴随文件路径。
-
-    根据模型文件路径自动推导元数据和标准化器的存放位置，
-    遵循 ``<stem>_meta.json`` 和 ``<stem>_scaler.pkl`` 命名约定。
-
-    参数:
-        model_path: 模型权重文件路径（.pt 文件）。
-        meta_path: 元数据文件路径，为 None 时按命名约定自动推导。
-        scaler_path: 标准化器文件路径，为 None 时按命名约定自动推导。
-
-    返回:
-        (model_path, meta_path, scaler_path) 三元组。
-    """
     model_path = Path(model_path)
     stem = model_path.stem
-    # 未指定时按约定在同一目录下生成伴随文件名
     meta_path = Path(meta_path) if meta_path is not None else model_path.with_name(f"{stem}{LSTM_META_SUFFIX}")
     scaler_path = (
         Path(scaler_path)
@@ -74,36 +107,29 @@ def save_lstm_forecaster_artifacts(
     dropout: float,
     signal_name: str = "price",
     future_horizon: int | None = None,
+    normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+    source_signature: dict[str, object] | None = None,
+    input_size: int = 1,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+    model_mode: str = "shared",
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+    artifact_format: str | None = None,
+    postprocess_mode: str = POSTPROCESS_MODE_NONE,
+    baseline_mode: str = BASELINE_MODE_NONE,
+    blend_weight: float | None = None,
+    optimized_metric: str | None = None,
 ) -> dict[str, str]:
-    """保存单个信号的标准 模型/元数据/标准化器 三件套产物。
-
-    参数:
-        model_path: 模型权重的目标保存路径。
-        state_dict: PyTorch 模型的 state_dict。
-        scaler: 已拟合的标准化器对象（不可为 None）。
-        seq_len: 输入序列长度。
-        pred_len: 预测步数。
-        hidden_size: LSTM 隐藏层维度。
-        num_layers: LSTM 层数。
-        dropout: Dropout 比率。
-        signal_name: 信号名称，默认 ``"price"``。
-        future_horizon: 预测时域长度，为 None 时使用 pred_len。
-
-    返回:
-        包含三个保存路径的字典: ``model_path``, ``meta_path``, ``scaler_path``。
-    """
     if scaler is None:
         raise ValueError("LSTM forecaster artifacts require a fitted scaler object.")
 
     model_path, meta_path, scaler_path = resolve_lstm_artifact_paths(model_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 保存模型权重
     torch.save(state_dict, model_path)
 
-    # 保存元数据 JSON（包含模型结构参数和信号信息）
     meta = {
-        "artifact_format": "lstm_forecaster_v2",
+        "artifact_format": str(artifact_format or LSTM_ARTIFACT_FORMAT),
         "signal_name": str(signal_name),
         "future_horizon": int(pred_len if future_horizon is None else future_horizon),
         "seq_len": int(seq_len),
@@ -111,10 +137,25 @@ def save_lstm_forecaster_artifacts(
         "hidden_size": int(hidden_size),
         "num_layers": int(num_layers),
         "dropout": float(dropout),
+        "input_size": int(input_size),
+        "time_feature_mode": normalize_time_feature_mode(time_feature_mode),
+        "model_mode": str(model_mode),
+        "normalization_mode": _normalize_physical_mode(normalization_mode),
+        "source_signature": dict(source_signature or {}),
+        "agent_index": None if agent_index is None else int(agent_index),
+        "agent_profile": None if agent_profile is None else str(agent_profile),
     }
+    if meta["artifact_format"] == LSTM_LOAD_HYBRID_ARTIFACT_FORMAT or str(postprocess_mode) != POSTPROCESS_MODE_NONE:
+        meta.update(
+            {
+                "postprocess_mode": str(postprocess_mode),
+                "baseline_mode": str(baseline_mode),
+                "blend_weight": None if blend_weight is None else float(blend_weight),
+                "optimized_metric": None if optimized_metric is None else str(optimized_metric),
+            }
+        )
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    # 保存标准化器（pickle 序列化）
     with scaler_path.open("wb") as handle:
         pickle.dump(scaler, handle)
 
@@ -130,32 +171,17 @@ def load_lstm_forecaster_artifacts(
     meta_path=None,
     scaler_path=None,
 ) -> tuple[dict, object]:
-    """加载单个信号模型的标准 元数据/标准化器 伴随文件。
-
-    参数:
-        model_path: 模型权重文件路径，用于推导伴随文件位置。
-        meta_path: 元数据文件路径，为 None 时自动推导。
-        scaler_path: 标准化器文件路径，为 None 时自动推导。
-
-    返回:
-        (meta, scaler) 元组，meta 为字典，scaler 为反序列化的标准化器对象。
-
-    异常:
-        FileNotFoundError: 元数据或标准化器文件不存在时抛出。
-        ValueError: 元数据缺少必要字段时抛出。
-    """
     _, meta_path, scaler_path = resolve_lstm_artifact_paths(model_path, meta_path, scaler_path)
 
     if not meta_path.exists():
         raise FileNotFoundError(
-            f"Missing LSTM meta artifact: '{meta_path}'. Expected the standard '<stem>_meta.json' file next to the model."
+            f"Missing LSTM meta artifact: '{meta_path}'. Expected '<stem>_meta.json' next to the model."
         )
     if not scaler_path.exists():
         raise FileNotFoundError(
-            f"Missing LSTM scaler artifact: '{scaler_path}'. Expected the standard '<stem>_scaler.pkl' file next to the model."
+            f"Missing LSTM scaler artifact: '{scaler_path}'. Expected '<stem>_scaler.pkl' next to the model."
         )
 
-    # 读取并校验元数据
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     missing_fields = [field for field in LSTM_REQUIRED_META_FIELDS if field not in meta]
     if missing_fields:
@@ -163,7 +189,6 @@ def load_lstm_forecaster_artifacts(
             f"LSTM meta artifact '{meta_path}' is missing required fields: {missing_fields}"
         )
 
-    # 反序列化标准化器
     with scaler_path.open("rb") as handle:
         scaler = pickle.load(handle)
 
@@ -172,20 +197,6 @@ def load_lstm_forecaster_artifacts(
 
 @dataclass
 class _SignalForecasterRuntime:
-    """单个信号的 LSTM 预测运行时上下文。
-
-    封装了一个信号所需的模型、标准化器及超参数，供 LSTMForecaster 内部使用。
-
-    属性:
-        signal_name: 信号名称（如 ``"price"``、``"load"``、``"pv"``）。
-        seq_len: 模型输入序列长度。
-        pred_len: 模型单次预测步数。
-        hidden_size: LSTM 隐藏层维度。
-        num_layers: LSTM 层数。
-        dropout: Dropout 比率。
-        model: 已加载的 PyTorch LSTM 模型（推理模式）。
-        scaler: 标准化器对象，用于输入归一化和输出反归一化；可为 None。
-    """
     signal_name: str
     seq_len: int
     pred_len: int
@@ -194,26 +205,20 @@ class _SignalForecasterRuntime:
     dropout: float
     model: torch.nn.Module
     scaler: object | None
+    input_size: int = 1
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE
+    model_mode: str = "shared"
+    physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE
+    physical_scale_by_column: np.ndarray | None = None
+    agent_index: int | None = None
+    agent_profile: str | None = None
+    postprocess_mode: str = POSTPROCESS_MODE_NONE
+    baseline_mode: str = BASELINE_MODE_NONE
+    blend_weight: float | None = None
+    optimized_metric: str | None = None
 
 
 class LSTMForecaster(Forecaster):
-    """运行时 LSTM 预测器，支持共享信号和每智能体信号的多步预测。
-
-    支持单信号和多信号模式：
-    - 单信号模式：通过 ``model_path`` 直接构造，或通过 ``from_artifacts`` 加载。
-    - 多信号模式：通过 ``from_signal_artifacts`` 同时加载多个信号的模型。
-
-    当历史序列不足以覆盖整个预测时域时，会自动进行滚动递推预测。
-
-    属性:
-        device: 推理设备（CPU 或 CUDA）。
-        signal_runtimes: 信号名到运行时上下文的映射字典。
-        seq_len: 兼容属性，主信号的输入序列长度。
-        pred_len: 兼容属性，主信号的预测步数。
-        scaler: 兼容属性，主信号的标准化器。
-        model: 兼容属性，主信号的 LSTM 模型。
-    """
-
     def __init__(
         self,
         model_path: str | None = None,
@@ -224,24 +229,18 @@ class LSTMForecaster(Forecaster):
         seq_len: int = 1344,
         device: str | torch.device = "cpu",
         scaler=None,
-        signal_runtimes: dict[str, _SignalForecasterRuntime] | None = None,
+        input_size: int = 1,
+        time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+        model_mode: str = "shared",
+        physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+        physical_scale_by_column=None,
+        postprocess_mode: str = POSTPROCESS_MODE_NONE,
+        baseline_mode: str = BASELINE_MODE_NONE,
+        blend_weight: float | None = None,
+        optimized_metric: str | None = None,
+        signal_runtimes: dict[str, list[_SignalForecasterRuntime]] | None = None,
     ):
-        """初始化 LSTM 预测器。
-
-        参数:
-            model_path: 模型权重文件路径，为 None 时使用随机初始化的模型。
-            hidden_size: LSTM 隐藏层维度，默认 128。
-            num_layers: LSTM 层数，默认 2。
-            dropout: Dropout 比率，默认 0.23。
-            pred_len: 单次预测步数，默认 4。
-            seq_len: 输入序列长度，默认 1344。
-            device: 推理设备，默认 ``"cpu"``。
-            scaler: 标准化器对象，可为 None。
-            signal_runtimes: 预构建的信号运行时字典；为 None 时自动创建默认 price 运行时。
-        """
         self.device = torch.device(device)
-
-        # 未提供运行时字典时，使用传入参数构建默认的 price 信号运行时
         if signal_runtimes is None:
             runtime = self._build_runtime(
                 signal_name="price",
@@ -252,28 +251,37 @@ class LSTMForecaster(Forecaster):
                 pred_len=pred_len,
                 seq_len=seq_len,
                 scaler=scaler,
+                input_size=input_size,
+                time_feature_mode=time_feature_mode,
+                model_mode=model_mode,
+                physical_normalization_mode=physical_normalization_mode,
+                physical_scale_by_column=physical_scale_by_column,
+                postprocess_mode=postprocess_mode,
+                baseline_mode=baseline_mode,
+                blend_weight=blend_weight,
+                optimized_metric=optimized_metric,
                 device=self.device,
             )
-            signal_runtimes = {"price": runtime}
+            signal_runtimes = {"price": [runtime]}
 
-        self.signal_runtimes = dict(signal_runtimes)
+        self.signal_runtimes = {
+            str(signal_name): list(runtimes)
+            for signal_name, runtimes in signal_runtimes.items()
+        }
         self._set_legacy_attributes()
 
     def _set_legacy_attributes(self) -> None:
-        """将首选信号的运行时参数暴露为实例属性，保持历史单信号 API 的兼容性。"""
-        # 优先选择 price 信号，否则取第一个可用信号
         preferred_signal = "price" if "price" in self.signal_runtimes else next(iter(self.signal_runtimes))
-        runtime = self.signal_runtimes[preferred_signal]
+        runtime = self.signal_runtimes[preferred_signal][0]
         self.seq_len = int(runtime.seq_len)
         self.pred_len = int(runtime.pred_len)
         self.scaler = runtime.scaler
         self.model = runtime.model
 
     def _sync_legacy_price_runtime(self) -> None:
-        """将实例属性的直接修改同步回 price 运行时，兼容测试和 notebook 的直接赋值。"""
-        if "price" not in self.signal_runtimes:
+        if "price" not in self.signal_runtimes or not self.signal_runtimes["price"]:
             return
-        runtime = self.signal_runtimes["price"]
+        runtime = self.signal_runtimes["price"][0]
         runtime.seq_len = int(getattr(self, "seq_len", runtime.seq_len))
         runtime.pred_len = int(getattr(self, "pred_len", runtime.pred_len))
         runtime.scaler = getattr(self, "scaler", runtime.scaler)
@@ -291,37 +299,29 @@ class LSTMForecaster(Forecaster):
         seq_len: int,
         scaler,
         device: torch.device,
+        input_size: int = 1,
+        time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+        model_mode: str = "shared",
+        physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+        physical_scale_by_column=None,
+        agent_index: int | None = None,
+        agent_profile: str | None = None,
+        postprocess_mode: str = POSTPROCESS_MODE_NONE,
+        baseline_mode: str = BASELINE_MODE_NONE,
+        blend_weight: float | None = None,
+        optimized_metric: str | None = None,
     ) -> _SignalForecasterRuntime:
-        """构建单个信号的运行时上下文（模型创建、权重加载、推理模式切换）。
-
-        参数:
-            signal_name: 信号名称。
-            model_path: 模型权重路径，为 None 时使用随机初始化。
-            hidden_size: LSTM 隐藏层维度。
-            num_layers: LSTM 层数。
-            dropout: Dropout 比率。
-            pred_len: 预测步数。
-            seq_len: 输入序列长度。
-            scaler: 标准化器对象。
-            device: 目标设备。
-
-        返回:
-            初始化完成的 _SignalForecasterRuntime 实例。
-        """
-        # 创建模型并移动到目标设备
         model = LSTMForecastModel(
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
             pred_len=pred_len,
+            input_size=input_size,
         ).to(device)
-
-        # 如果提供了权重文件则加载
         if model_path is not None:
             state_dict = torch.load(model_path, map_location=device)
             model.load_state_dict(state_dict)
-
-        model.eval()  # 切换到推理模式
+        model.eval()
         return _SignalForecasterRuntime(
             signal_name=str(signal_name),
             seq_len=int(seq_len),
@@ -331,6 +331,17 @@ class LSTMForecaster(Forecaster):
             dropout=float(dropout),
             model=model,
             scaler=scaler,
+            input_size=int(input_size),
+            time_feature_mode=normalize_time_feature_mode(time_feature_mode),
+            model_mode=str(model_mode),
+            physical_normalization_mode=_normalize_physical_mode(physical_normalization_mode),
+            physical_scale_by_column=_coerce_physical_scale_array(physical_scale_by_column),
+            agent_index=None if agent_index is None else int(agent_index),
+            agent_profile=None if agent_profile is None else str(agent_profile),
+            postprocess_mode=str(postprocess_mode or POSTPROCESS_MODE_NONE),
+            baseline_mode=str(baseline_mode or BASELINE_MODE_NONE),
+            blend_weight=None if blend_weight is None else float(blend_weight),
+            optimized_metric=None if optimized_metric is None else str(optimized_metric),
         )
 
     @classmethod
@@ -342,18 +353,6 @@ class LSTMForecaster(Forecaster):
         device: str | torch.device = "cpu",
         signal_name: str = "price",
     ):
-        """从单个产物三件套（模型/元数据/标准化器）构建单信号预测器。
-
-        参数:
-            model_path: 模型权重文件路径。
-            meta_path: 元数据文件路径，为 None 时自动推导。
-            scaler_path: 标准化器文件路径，为 None 时自动推导。
-            device: 推理设备，默认 ``"cpu"``。
-            signal_name: 信号名称备选值，元数据中有时优先使用元数据中的名称。
-
-        返回:
-            已初始化的 LSTMForecaster 实例。
-        """
         meta, scaler = load_lstm_forecaster_artifacts(
             model_path=model_path,
             meta_path=meta_path,
@@ -368,92 +367,248 @@ class LSTMForecaster(Forecaster):
             seq_len=int(meta["seq_len"]),
             device=device,
             scaler=scaler,
+            input_size=int(meta.get("input_size", 1)),
+            time_feature_mode=meta.get("time_feature_mode", TIME_FEATURE_MODE_NONE),
+            model_mode=meta.get("model_mode", "shared"),
+            physical_normalization_mode=meta.get("normalization_mode", PHYSICAL_NORMALIZATION_NONE),
+            postprocess_mode=meta.get("postprocess_mode", POSTPROCESS_MODE_NONE),
+            baseline_mode=meta.get("baseline_mode", BASELINE_MODE_NONE),
+            blend_weight=meta.get("blend_weight"),
+            optimized_metric=meta.get("optimized_metric"),
             signal_runtimes=None,
         ).rename_default_signal(meta.get("signal_name", signal_name))
+
+    @staticmethod
+    def _normalize_artifact_bundle(bundle) -> list[tuple[str, str | None, str | None]]:
+        if isinstance(bundle, tuple) and len(bundle) == 3 and not any(
+            isinstance(item, (list, tuple)) for item in bundle
+        ):
+            return [bundle]
+        if isinstance(bundle, list):
+            if not bundle:
+                return []
+            return [tuple(item) for item in bundle]
+        if isinstance(bundle, tuple) and bundle and all(isinstance(item, (list, tuple)) for item in bundle):
+            return [tuple(item) for item in bundle]
+        raise TypeError(f"Unsupported signal artifact bundle: {bundle!r}")
 
     @classmethod
     def from_signal_artifacts(
         cls,
-        signal_artifacts: dict[str, tuple[str, str | None, str | None]],
+        signal_artifacts: dict[str, object],
         *,
         device: str | torch.device = "cpu",
     ):
-        """从多组产物三件套构建多信号运行时预测器。
-
-        参数:
-            signal_artifacts: 信号名到 ``(model_path, meta_path, scaler_path)`` 的映射。
-                meta_path 和 scaler_path 可为 None（自动推导）。
-            device: 推理设备，默认 ``"cpu"``。
-
-        返回:
-            包含所有信号运行时的 LSTMForecaster 实例。
-        """
         device = torch.device(device)
-        signal_runtimes: dict[str, _SignalForecasterRuntime] = {}
-        # 逐个信号加载产物并构建运行时
-        for signal_name, (model_path, meta_path, scaler_path) in signal_artifacts.items():
-            meta, scaler = load_lstm_forecaster_artifacts(
-                model_path=model_path,
-                meta_path=meta_path,
-                scaler_path=scaler_path,
-            )
-            runtime = cls._build_runtime(
-                signal_name=meta.get("signal_name", signal_name),
-                model_path=model_path,
-                hidden_size=int(meta["hidden_size"]),
-                num_layers=int(meta["num_layers"]),
-                dropout=float(meta["dropout"]),
-                pred_len=int(meta["pred_len"]),
-                seq_len=int(meta["seq_len"]),
-                scaler=scaler,
-                device=device,
-            )
-            signal_runtimes[str(signal_name)] = runtime
-
+        signal_runtimes: dict[str, list[_SignalForecasterRuntime]] = {}
+        for signal_name, bundle in signal_artifacts.items():
+            runtimes: list[_SignalForecasterRuntime] = []
+            for model_path, meta_path, scaler_path in cls._normalize_artifact_bundle(bundle):
+                meta, scaler = load_lstm_forecaster_artifacts(
+                    model_path=model_path,
+                    meta_path=meta_path,
+                    scaler_path=scaler_path,
+                )
+                runtimes.append(
+                    cls._build_runtime(
+                        signal_name=meta.get("signal_name", signal_name),
+                        model_path=model_path,
+                        hidden_size=int(meta["hidden_size"]),
+                        num_layers=int(meta["num_layers"]),
+                        dropout=float(meta["dropout"]),
+                        pred_len=int(meta["pred_len"]),
+                        seq_len=int(meta["seq_len"]),
+                        scaler=scaler,
+                        input_size=int(meta.get("input_size", 1)),
+                        time_feature_mode=meta.get("time_feature_mode", TIME_FEATURE_MODE_NONE),
+                        model_mode=meta.get("model_mode", "shared"),
+                        physical_normalization_mode=meta.get("normalization_mode", PHYSICAL_NORMALIZATION_NONE),
+                        agent_index=meta.get("agent_index"),
+                        agent_profile=meta.get("agent_profile"),
+                        postprocess_mode=meta.get("postprocess_mode", POSTPROCESS_MODE_NONE),
+                        baseline_mode=meta.get("baseline_mode", BASELINE_MODE_NONE),
+                        blend_weight=meta.get("blend_weight"),
+                        optimized_metric=meta.get("optimized_metric"),
+                        device=device,
+                    )
+                )
+            signal_runtimes[str(signal_name)] = runtimes
         return cls(device=device, signal_runtimes=signal_runtimes)
 
     def rename_default_signal(self, signal_name: str):
-        """重命名兼容层默认信号（从 ``"price"`` 改为指定名称），用于加载旧产物后的适配。
-
-        参数:
-            signal_name: 新的信号名称。
-
-        返回:
-            self（支持链式调用）。
-        """
         if "price" in self.signal_runtimes and signal_name != "price":
             self.signal_runtimes[str(signal_name)] = self.signal_runtimes.pop("price")
-            self.signal_runtimes[str(signal_name)].signal_name = str(signal_name)
+            for runtime in self.signal_runtimes[str(signal_name)]:
+                runtime.signal_name = str(signal_name)
         self._set_legacy_attributes()
         return self
 
     def available_signals(self) -> list[str]:
-        """返回所有已加载产物支持的信号名称列表（排序后）。"""
         return sorted(self.signal_runtimes)
 
     def reset(self) -> None:
-        """重置回合状态（运行时预测器跨回合无状态，此处为空操作）。"""
+        for runtimes in self.signal_runtimes.values():
+            for runtime in runtimes:
+                if runtime.physical_normalization_mode != PHYSICAL_NORMALIZATION_NONE:
+                    runtime.physical_scale_by_column = None
         return None
+
+    @staticmethod
+    def _select_runtime_scale(
+        scale_by_column: np.ndarray | None,
+        runtime: _SignalForecasterRuntime,
+    ) -> np.ndarray | None:
+        if scale_by_column is None:
+            return None
+        if runtime.model_mode == "per_agent" and runtime.agent_index is not None:
+            if runtime.agent_index >= scale_by_column.size:
+                raise IndexError(
+                    f"Runtime agent_index={runtime.agent_index} is out of range for scale size={scale_by_column.size}."
+                )
+            return np.asarray([scale_by_column[runtime.agent_index]], dtype=np.float32)
+        return scale_by_column.astype(np.float32, copy=True)
+
+    def set_episode(
+        self,
+        episode_signals: dict[str, np.ndarray] | np.ndarray,
+        episode_meta: dict[str, object] | None = None,
+    ) -> None:
+        del episode_signals
+        meta = dict(episode_meta or {})
+        load_scale = _coerce_physical_scale_array(meta.get("load_scale"))
+        pv_peak_kw = _coerce_physical_scale_array(meta.get("pv_peak_kw"))
+        if pv_peak_kw is not None and np.any(pv_peak_kw <= 0.0):
+            raise ValueError("episode_meta['pv_peak_kw'] must stay positive for PV forecast normalization.")
+
+        for signal_name, runtimes in self.signal_runtimes.items():
+            for runtime in runtimes:
+                if runtime.physical_normalization_mode == PHYSICAL_NORMALIZATION_LOAD_SCALE:
+                    runtime.physical_scale_by_column = self._select_runtime_scale(load_scale, runtime)
+                elif runtime.physical_normalization_mode == PHYSICAL_NORMALIZATION_PV_PEAK:
+                    runtime.physical_scale_by_column = self._select_runtime_scale(pv_peak_kw, runtime)
+
+    @staticmethod
+    def _resolve_column_scale(runtime: _SignalForecasterRuntime, column_idx: int | None) -> np.float32:
+        scale_by_column = runtime.physical_scale_by_column
+        if scale_by_column is None:
+            return np.float32(1.0)
+        scale = np.asarray(scale_by_column, dtype=np.float32).reshape(-1)
+        if scale.size == 0:
+            return np.float32(1.0)
+        if column_idx is None:
+            column_idx = 0
+        if column_idx >= scale.size:
+            if scale.size == 1:
+                return np.float32(scale[0])
+            raise IndexError(
+                f"physical_scale_by_column is too short for column {column_idx}: size={scale.size}"
+            )
+        return np.float32(scale[column_idx])
+
+    @staticmethod
+    def _normalize_model_input(
+        values: np.ndarray,
+        runtime: _SignalForecasterRuntime,
+        *,
+        column_idx: int | None,
+    ) -> tuple[np.ndarray, np.float32]:
+        scale = LSTMForecaster._resolve_column_scale(runtime, column_idx)
+        normalized = np.asarray(values, dtype=np.float32)
+        if runtime.physical_normalization_mode != PHYSICAL_NORMALIZATION_NONE:
+            divisor = np.float32(max(float(scale), float(PHYSICAL_SCALE_EPS)))
+            normalized = (normalized / divisor).astype(np.float32)
+        return normalized, scale
+
+    @staticmethod
+    def _restore_prediction_scale(
+        values: np.ndarray,
+        runtime: _SignalForecasterRuntime,
+        *,
+        scale: np.float32,
+    ) -> np.ndarray:
+        restored = np.asarray(values, dtype=np.float32)
+        if runtime.physical_normalization_mode != PHYSICAL_NORMALIZATION_NONE:
+            restored = (restored * np.float32(scale)).astype(np.float32)
+        return restored
+
+    @staticmethod
+    def _default_timestamp_start() -> pd.Timestamp:
+        return pd.Timestamp("2000-01-01 00:00:00+00:00")
+
+    def _build_model_input_tensor(
+        self,
+        runtime: _SignalForecasterRuntime,
+        model_history: np.ndarray,
+        *,
+        history_timestamps: pd.DatetimeIndex,
+        column_idx: int | None,
+    ) -> tuple[torch.Tensor, np.float32]:
+        normalized_history, scale = self._normalize_model_input(
+            model_history,
+            runtime,
+            column_idx=column_idx,
+        )
+        if runtime.scaler is not None:
+            load_channel = runtime.scaler.transform(normalized_history.reshape(-1, 1)).reshape(-1).astype(np.float32)
+        else:
+            load_channel = normalized_history.astype(np.float32)
+
+        if int(runtime.input_size) <= 1 or normalize_time_feature_mode(runtime.time_feature_mode) == TIME_FEATURE_MODE_NONE:
+            features = load_channel.reshape(1, -1)
+        else:
+            time_features = encode_forecast_time_features(history_timestamps, runtime.time_feature_mode)
+            features = np.concatenate([load_channel[:, None], time_features], axis=1)[None, :, :]
+
+        tensor = torch.tensor(features, dtype=torch.float32, device=self.device)
+        return tensor, scale
+
+    @staticmethod
+    def _apply_postprocess(
+        runtime: _SignalForecasterRuntime,
+        raw_prediction: np.ndarray,
+        *,
+        baseline_value: np.float32,
+    ) -> np.ndarray:
+        prediction = np.asarray(raw_prediction, dtype=np.float32)
+        if str(runtime.postprocess_mode) != POSTPROCESS_MODE_BASELINE_BLEND:
+            return prediction
+        if str(runtime.baseline_mode) != BASELINE_MODE_LAST_VALUE:
+            raise ValueError(f"Unsupported baseline_mode '{runtime.baseline_mode}'.")
+        weight = np.float32(1.0 if runtime.blend_weight is None else float(runtime.blend_weight))
+        baseline = np.full(prediction.shape, np.float32(baseline_value), dtype=np.float32)
+        return (baseline + weight * (prediction - baseline)).astype(np.float32)
+
+    def _predict_model_chunk(
+        self,
+        runtime: _SignalForecasterRuntime,
+        model_history: np.ndarray,
+        *,
+        history_timestamps: pd.DatetimeIndex,
+        column_idx: int | None,
+    ) -> np.ndarray:
+        model_tensor, scale = self._build_model_input_tensor(
+            runtime,
+            model_history,
+            history_timestamps=history_timestamps,
+            column_idx=column_idx,
+        )
+
+        with torch.no_grad():
+            prediction = runtime.model(model_tensor).detach().cpu().numpy().reshape(-1)
+
+        if runtime.scaler is not None:
+            prediction = runtime.scaler.inverse_transform(prediction.reshape(-1, 1)).reshape(-1)
+        return self._restore_prediction_scale(prediction, runtime, scale=scale)
 
     def _predict_univariate(
         self,
         runtime: _SignalForecasterRuntime,
         history: np.ndarray,
         horizon: int,
+        *,
+        column_idx: int | None = None,
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
-        """对单变量序列执行滚动递推预测。
-
-        当所需的预测步数超过模型单次输出长度（pred_len）时，
-        将预测结果追加到历史中，循环递推直至覆盖完整 horizon。
-
-        参数:
-            runtime: 信号运行时上下文（包含模型、标准化器等）。
-            history: 一维历史序列，形状 ``(T,)``。
-            horizon: 总预测步数（包含当前值）。
-
-        返回:
-            形状 ``(horizon,)`` 的预测数组，第一个元素为当前值。
-        """
         if horizon <= 0:
             return np.zeros((0,), dtype=np.float32)
 
@@ -461,52 +616,62 @@ class LSTMForecaster(Forecaster):
         if history.size == 0:
             return np.zeros((horizon,), dtype=np.float32)
 
-        # 提取当前时刻的值
         current_value = np.array([history[-1]], dtype=np.float32)
         if horizon == 1:
             return current_value.copy()
 
-        # 滚动递推预测：每次用模型预测 pred_len 步，追加到历史后继续
         rolling_history = history.copy()
-        future_chunks = []
+        timestamp_index = coerce_timestamp_index(history_timestamps)
+        step_delta = infer_timestamp_step(timestamp_index)
+        rolling_timestamps = pad_history_timestamps_left(timestamp_index, rolling_history.size, step=step_delta)
+        future_chunks: list[np.ndarray] = []
         remaining = horizon - 1
 
         while remaining > 0:
-            # 历史不足 seq_len 时用零左填充
             if rolling_history.size < runtime.seq_len:
-                pad = np.zeros((runtime.seq_len - rolling_history.size,), dtype=np.float32)
-                model_input = np.concatenate([pad, rolling_history], axis=0)
+                model_history = np.concatenate(
+                    [np.zeros((runtime.seq_len - rolling_history.size,), dtype=np.float32), rolling_history],
+                    axis=0,
+                )
             else:
-                model_input = rolling_history[-runtime.seq_len :]
+                model_history = rolling_history[-runtime.seq_len :]
+            model_timestamps = pad_history_timestamps_left(
+                rolling_timestamps,
+                runtime.seq_len,
+                step=step_delta,
+            )
 
-            # 输入标准化
-            if runtime.scaler is not None:
-                model_input = runtime.scaler.transform(model_input.reshape(-1, 1)).reshape(-1).astype(np.float32)
+            raw_prediction = self._predict_model_chunk(
+                runtime,
+                model_history,
+                history_timestamps=model_timestamps,
+                column_idx=column_idx,
+            )
 
-            # 转为张量并前向推理
-            model_tensor = torch.tensor(
-                model_input,
-                dtype=torch.float32,
-                device=self.device,
-            ).unsqueeze(0)  # 添加 batch 维度
+            if str(runtime.postprocess_mode) == POSTPROCESS_MODE_BASELINE_BLEND:
+                next_value = self._apply_postprocess(
+                    runtime,
+                    np.asarray(raw_prediction[:1], dtype=np.float32),
+                    baseline_value=np.float32(rolling_history[-1]),
+                )
+                prediction_chunk = np.asarray(next_value[:1], dtype=np.float32)
+                take = 1
+            else:
+                take = min(runtime.pred_len, remaining)
+                prediction_chunk = np.asarray(raw_prediction[:take], dtype=np.float32)
+            future_chunks.append(prediction_chunk)
 
-            with torch.no_grad():
-                prediction = runtime.model(model_tensor).detach().cpu().numpy().reshape(-1)
-
-            # 输出反标准化
-            if runtime.scaler is not None:
-                prediction = runtime.scaler.inverse_transform(prediction.reshape(-1, 1)).reshape(-1)
-
-            prediction = np.asarray(prediction, dtype=np.float32)
-            # 只取本轮需要的步数
-            take = min(runtime.pred_len, remaining)
-            prediction = prediction[:take].astype(np.float32)
-            future_chunks.append(prediction)
-            # 将预测结果追加到滚动历史中供下一轮使用
-            rolling_history = np.concatenate([rolling_history, prediction], axis=0)
+            rolling_history = np.concatenate([rolling_history, prediction_chunk], axis=0)
+            if take > 0:
+                last_timestamp = (
+                    rolling_timestamps[-1]
+                    if len(rolling_timestamps)
+                    else self._default_timestamp_start()
+                )
+                extension = pd.date_range(start=last_timestamp + step_delta, periods=take, freq=step_delta)
+                rolling_timestamps = rolling_timestamps.append(extension)
             remaining -= take
 
-        # 拼接当前值和所有未来预测块
         future = np.concatenate(future_chunks, axis=0).astype(np.float32)
         return np.concatenate([current_value, future], axis=0)[:horizon].astype(np.float32)
 
@@ -516,43 +681,44 @@ class LSTMForecaster(Forecaster):
         horizon: int,
         *,
         signal_name: str = "price",
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
-        """对指定信号执行多步前瞻预测。
-
-        一维输入直接预测；二维输入按列（每个智能体）分别预测后堆叠。
-        当只有一个信号运行时且请求的信号名不匹配时，自动回退到唯一可用的信号。
-
-        参数:
-            history: 历史信号，一维 ``(T,)`` 或二维 ``(T, N)``。
-            horizon: 预测步数（包含当前值）。
-            signal_name: 信号名称，默认 ``"price"``。
-
-        返回:
-            共享信号返回 ``(horizon,)``，每智能体信号返回 ``(N, horizon)``。
-        """
-        # 信号名不匹配时的回退逻辑
         if signal_name not in self.signal_runtimes:
             if len(self.signal_runtimes) == 1:
                 signal_name = next(iter(self.signal_runtimes))
             else:
-                available = self.available_signals()
-                raise KeyError(f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {available}")
+                raise KeyError(
+                    f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {self.available_signals()}"
+                )
 
-        # 同步兼容层属性的修改
         self._sync_legacy_price_runtime()
-        runtime = self.signal_runtimes[signal_name]
+        runtimes = self.signal_runtimes[signal_name]
         history = np.asarray(history, dtype=np.float32)
 
-        # 一维输入：直接单变量预测
         if history.ndim == 1:
-            return self._predict_univariate(runtime, history, horizon)
+            runtime = runtimes[0]
+            return self._predict_univariate(
+                runtime,
+                history,
+                horizon,
+                column_idx=0,
+                history_timestamps=history_timestamps,
+            )
 
         if history.ndim != 2:
             raise ValueError(f"LSTMForecaster expects 1D or 2D history, got shape {history.shape}")
 
-        # 二维输入：按列（每个智能体）分别预测后堆叠
-        predictions = [
-            self._predict_univariate(runtime, history[:, column_idx], horizon)
-            for column_idx in range(history.shape[1])
-        ]
+        predictions: list[np.ndarray] = []
+        for column_idx in range(history.shape[1]):
+            runtime = runtimes[column_idx] if len(runtimes) == history.shape[1] else runtimes[0]
+            runtime_column_idx = 0 if len(runtimes) == history.shape[1] else column_idx
+            predictions.append(
+                self._predict_univariate(
+                    runtime,
+                    history[:, column_idx],
+                    horizon,
+                    column_idx=runtime_column_idx,
+                    history_timestamps=history_timestamps,
+                )
+            )
         return np.stack(predictions, axis=0).astype(np.float32)

@@ -49,8 +49,14 @@ def test_train_runner_batches_progress_updates(monkeypatch, tmp_path):
     progress = DummyTqdm.instances[-1]
     assert progress.update_calls == [2, 2, 1]
     assert progress.postfix_calls == 3
+    assert "eta" in progress.last_postfix
 
     payload = json.loads(progress_path.read_text(encoding="utf-8"))
     assert payload["status"] == "completed"
     assert payload["interaction_step"] == 5
     assert payload["target_interactions"] == 5
+    assert payload["started_at"]
+    assert payload["updated_at"]
+    assert payload["elapsed_seconds"] >= 0.0
+    assert payload["remaining_seconds"] == 0.0
+    assert payload["estimated_end_time"] == payload["updated_at"]

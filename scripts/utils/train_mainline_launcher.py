@@ -33,6 +33,7 @@ def prepare_train_mainline_launch(
     experiment_controls: dict[str, Any],
     data_controls: dict[str, Any],
     train_controls: dict[str, Any],
+    battery_controls: dict[str, Any] | None = None,
     checkpoint_controls: dict[str, Any] | None = None,
     data_dir=None,
     save_dir=None,
@@ -80,9 +81,11 @@ def prepare_train_mainline_launch(
         "run_label": run_label,
         "model_root": str(model_root),
     }
+    battery_controls = dict(battery_controls or {})
 
     experiment_controls_path = _write_json(meta_dir / "experiment_controls.json", experiment_controls)
     data_controls_path = _write_json(meta_dir / "data_controls.json", data_controls)
+    battery_controls_path = _write_json(meta_dir / "battery_controls.json", battery_controls)
     train_controls_path = _write_json(meta_dir / "train_controls.json", train_controls)
     checkpoint_controls_path = _write_json(meta_dir / "checkpoint_controls.json", checkpoint_payload)
     result_json_path = meta_dir / "train_result.json"
@@ -93,6 +96,7 @@ def prepare_train_mainline_launch(
         "project_root": str(project_root),
         "experiment_controls_path": str(experiment_controls_path),
         "data_controls_path": str(data_controls_path),
+        "battery_controls_path": str(battery_controls_path),
         "train_controls_path": str(train_controls_path),
         "checkpoint_controls_path": str(checkpoint_controls_path),
         "result_json_path": str(result_json_path),
@@ -125,6 +129,8 @@ def build_train_mainline_command(
         str(launch_info["experiment_controls_path"]),
         "--data-controls",
         str(launch_info["data_controls_path"]),
+        "--battery-controls",
+        str(launch_info["battery_controls_path"]),
         "--train-controls",
         str(launch_info["train_controls_path"]),
         "--checkpoint-controls",
@@ -161,9 +167,19 @@ def _format_progress_summary(payload: dict[str, Any]) -> str:
     steps_per_sec = float(payload.get("steps_per_sec", 0.0))
     percent = 100.0 * interaction_step / target_interactions
     status = str(payload.get("status", "running"))
+    estimated_end_time = payload.get("estimated_end_time")
+    remaining_seconds = payload.get("remaining_seconds")
+    if estimated_end_time:
+        if remaining_seconds is None:
+            eta_segment = f" | ETA={estimated_end_time}"
+        else:
+            eta_segment = f" | ETA={estimated_end_time} ({float(remaining_seconds):.1f}s)"
+    else:
+        eta_segment = " | ETA=--"
     return (
         f"[train:{status}] {interaction_step}/{target_interactions} iters ({percent:5.1f}%) | "
         f"episodes={episodes_completed} | avg_reward={avg_reward:8.3f} | steps/s={steps_per_sec:7.1f}"
+        f"{eta_segment}"
     )
 
 
@@ -172,14 +188,16 @@ def _monitor_process_progress(
     *,
     progress_json_path: Path,
     summary_interval_s: float,
-) -> None:
+) -> dict[str, Any] | None:
     last_mtime_ns = -1
     last_print_time = 0.0
     last_summary = ""
+    last_payload: dict[str, Any] | None = None
 
     while process.poll() is None:
         payload = _load_progress_payload(progress_json_path)
         if payload is not None and progress_json_path.exists():
+            last_payload = payload
             stat = progress_json_path.stat()
             summary = _format_progress_summary(payload)
             now = time.monotonic()
@@ -192,9 +210,11 @@ def _monitor_process_progress(
 
     payload = _load_progress_payload(progress_json_path)
     if payload is not None:
+        last_payload = payload
         summary = _format_progress_summary(payload)
         if summary != last_summary:
             print(summary)
+    return last_payload
 
 
 def run_external_train_mainline(
@@ -203,6 +223,7 @@ def run_external_train_mainline(
     experiment_controls: dict[str, Any],
     data_controls: dict[str, Any],
     train_controls: dict[str, Any],
+    battery_controls: dict[str, Any] | None = None,
     checkpoint_controls: dict[str, Any] | None = None,
     data_dir=None,
     save_dir=None,
@@ -216,6 +237,7 @@ def run_external_train_mainline(
         project_root=project_root,
         experiment_controls=experiment_controls,
         data_controls=data_controls,
+        battery_controls=battery_controls,
         train_controls=train_controls,
         checkpoint_controls=checkpoint_controls,
         data_dir=data_dir,
@@ -229,6 +251,7 @@ def run_external_train_mainline(
 
     log_path = Path(launch_info["log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    last_progress = None
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
             command,
@@ -243,13 +266,15 @@ def run_external_train_mainline(
         )
         if stream_output:
             print(f"Training log: {log_path}")
-            _monitor_process_progress(
+            last_progress = _monitor_process_progress(
                 process,
                 progress_json_path=Path(launch_info["progress_json_path"]),
                 summary_interval_s=float(summary_interval_s),
             )
         returncode = process.wait()
 
+    if last_progress is None:
+        last_progress = _load_progress_payload(Path(launch_info["progress_json_path"]))
     result = (
         load_train_mainline_result(launch_info["result_json_path"])
         if Path(launch_info["result_json_path"]).exists()
@@ -261,6 +286,7 @@ def run_external_train_mainline(
         "command": command,
         "launch_info": launch_info,
         "result": result,
+        "last_progress": last_progress,
         "stream_output": bool(stream_output),
     }
 

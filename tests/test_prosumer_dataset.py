@@ -133,7 +133,6 @@ def test_prosumer_dataset_combines_heatpump_and_scales_pv_and_ess(tmp_path):
     pv_capacity_kw = [8.0, 4.0]
     load_scale = [1.5, 0.5]
     pv_scale = [0.5, 1.25]
-    storage_scale = [2.0, 0.25]
     dataset = ProsumerDataset(
         data_dir=data_dir,
         episode_length=4,
@@ -145,7 +144,6 @@ def test_prosumer_dataset_combines_heatpump_and_scales_pv_and_ess(tmp_path):
         pv_capacity_kw=pv_capacity_kw,
         load_scale=load_scale,
         pv_scale=pv_scale,
-        storage_scale=storage_scale,
         node_ids=[10, 6],
     )
 
@@ -174,17 +172,11 @@ def test_prosumer_dataset_combines_heatpump_and_scales_pv_and_ess(tmp_path):
         episode["meta"]["pv_peak_kw"],
         np.array([8.0 * pv_scale[0], 4.0 * pv_scale[1]], dtype=np.float32),
     )
-    assert np.allclose(
-        episode["meta"]["ess_power_kw"],
-        np.array([8.0 * pv_scale[0] * 0.5 * storage_scale[0], 4.0 * pv_scale[1] * 0.5 * storage_scale[1]], dtype=np.float32),
-    )
-    assert np.allclose(
-        episode["meta"]["ess_capacity_kwh"],
-        np.array([8.0 * pv_scale[0] * 1.25 * storage_scale[0], 4.0 * pv_scale[1] * 1.25 * storage_scale[1]], dtype=np.float32),
-    )
     assert np.allclose(episode["meta"]["load_scale"], np.array(load_scale, dtype=np.float32))
     assert np.allclose(episode["meta"]["pv_scale"], np.array(pv_scale, dtype=np.float32))
-    assert np.allclose(episode["meta"]["storage_scale"], np.array(storage_scale, dtype=np.float32))
+    assert "ess_power_kw" not in episode["meta"]
+    assert "ess_capacity_kwh" not in episode["meta"]
+    assert "storage_scale" not in episode["meta"]
 
 
 def test_prosumer_dataset_filters_explicit_date_range_and_build_dataset_uses_it(tmp_path):

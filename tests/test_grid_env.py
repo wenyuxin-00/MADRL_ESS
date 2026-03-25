@@ -180,6 +180,35 @@ def test_reset_returns_correct_obs_shape(grid_env) -> None:
     assert "p_max" in reset_info
 
 
+def test_from_pv_battery_mode_uses_episode_pv_peak(grid_env) -> None:
+    _, reset_info = grid_env.reset(episode_idx=0)
+    pv_peak_kw = np.asarray(reset_info["episode_meta"]["pv_peak_kw"], dtype=np.float32)
+    expected_p_max = pv_peak_kw * np.float32(grid_env.from_pv_power_ratio)
+    expected_capacity = expected_p_max * np.float32(grid_env.from_pv_duration_hours)
+
+    assert grid_env.battery_mode == "from_pv"
+    assert np.allclose(reset_info["p_max"], expected_p_max)
+    assert np.allclose(reset_info["battery_capacity_kwh"], expected_capacity)
+
+
+def test_fixed_battery_mode_uses_cfg_defaults() -> None:
+    cfg = _make_cfg()
+    cfg.env.battery_mode = "fixed"
+    cfg.env.battery_capacity = 7.5
+    cfg.env.max_charge_rate = 3.25
+    env = _build_env(cfg, mode="test")
+
+    try:
+        _, reset_info = env.reset(episode_idx=0)
+        assert np.allclose(reset_info["p_max"], np.full((cfg.env.num_agents,), 3.25, dtype=np.float32))
+        assert np.allclose(
+            reset_info["battery_capacity_kwh"],
+            np.full((cfg.env.num_agents,), 7.5, dtype=np.float32),
+        )
+    finally:
+        env.close()
+
+
 def test_step_return_types(grid_env) -> None:
     grid_env.reset()
     actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]

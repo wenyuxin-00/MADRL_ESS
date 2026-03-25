@@ -39,7 +39,18 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
         agent_profiles=["SFH12", "SFH14"],
         load_scale=[1.2, 0.8],
         pv_scale=0.5,
-        storage_scale=[1.0, 1.5],
+        battery_controls={
+            "mode": "from_pv",
+            "from_pv_power_ratio": 0.75,
+            "from_pv_duration_hours": 3.0,
+            "battery_capacity": 6.0,
+            "max_charge_rate": 2.0,
+            "efficiency": 0.9,
+            "init_soc": 0.4,
+            "soc_min": 0.1,
+            "soc_max": 0.9,
+            "soc_target": 0.6,
+        },
         future_horizon=24,
         train_year=2019,
         test_year=2019,
@@ -53,11 +64,17 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     assert cfg.data.test_end_date == "2019-01-30"
     assert np.allclose(cfg.data.load_scale, [1.2, 0.8])
     assert np.allclose(cfg.data.pv_scale, [0.5, 0.5])
-    assert np.allclose(cfg.data.storage_scale, [1.0, 1.5])
+    assert cfg.env.battery_mode == "from_pv"
+    assert np.isclose(cfg.env.from_pv_power_ratio, 0.75)
+    assert np.isclose(cfg.env.from_pv_duration_hours, 3.0)
+    assert np.isclose(cfg.env.battery_capacity, 6.0)
+    assert np.isclose(cfg.env.max_charge_rate, 2.0)
     assert summary["prediction_mode"] == "normal"
     assert summary["evaluation_mode"] == FORECAST_EVAL_MODE
     assert summary["forecast_backend"] == "lstm"
     assert summary["agent_profiles"] == ["SFH12", "SFH14"]
+    assert summary["battery"]["mode"] == "from_pv"
+    assert np.isclose(summary["battery"]["from_pv_power_ratio"], 0.75)
 
 
 def test_normalize_date_input_accepts_compact_dates():

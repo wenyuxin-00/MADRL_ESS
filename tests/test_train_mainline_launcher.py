@@ -39,6 +39,7 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
         project_root=tmp_path,
         experiment_controls={"seed": 7, "algorithm": "MATD3"},
         data_controls={"prediction_mode": "perfect"},
+        battery_controls={"mode": "from_pv", "from_pv_power_ratio": 0.5, "from_pv_duration_hours": 2.5},
         train_controls={"profile": "gpu_fast", "launch_mode": "external", "train_episodes": 100},
         checkpoint_controls={"experiment_name": "grid_mainline"},
         env_name="GridTrainMainline",
@@ -48,11 +49,13 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
 
     assert Path(launch["experiment_controls_path"]).exists()
     assert Path(launch["data_controls_path"]).exists()
+    assert Path(launch["battery_controls_path"]).exists()
     assert Path(launch["train_controls_path"]).exists()
     assert Path(launch["checkpoint_controls_path"]).exists()
     assert Path(launch["meta_dir"]).exists()
     assert Path(launch["model_root"]).parts[-4:-1] == ("MATD3", "perfect", "grid_mainline")
     assert command[:3] == ["python", "-m", "scripts.run_train_mainline"]
+    assert "--battery-controls" in command
     assert "--checkpoint-controls" in command
     assert "--env-name" in command
     assert "GridTrainMainline" in command
@@ -85,10 +88,21 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "agent_profiles": ["SFH12", "SFH14"],
         "load_scale": [1.0, 1.0],
         "pv_scale": [1.0, 1.0],
-        "storage_scale": [1.0, 1.0],
         "future_horizon": 1,
         "train_year": 2019,
         "test_year": 2020,
+    }
+    battery_controls = {
+        "mode": "from_pv",
+        "from_pv_power_ratio": 0.5,
+        "from_pv_duration_hours": 2.5,
+        "battery_capacity": 5.0,
+        "max_charge_rate": 2.5,
+        "efficiency": 0.95,
+        "init_soc": 0.5,
+        "soc_min": 0.05,
+        "soc_max": 0.95,
+        "soc_target": 0.5,
     }
     train_controls = {
         "launch_mode": "external",
@@ -116,12 +130,14 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
 
     experiment_path = controls_dir / "experiment_controls.json"
     data_path = controls_dir / "data_controls.json"
+    battery_path = controls_dir / "battery_controls.json"
     train_path = controls_dir / "train_controls.json"
     checkpoint_path = controls_dir / "checkpoint_controls.json"
     result_path = controls_dir / "result.json"
 
     experiment_path.write_text(json.dumps(experiment_controls), encoding="utf-8")
     data_path.write_text(json.dumps(data_controls), encoding="utf-8")
+    battery_path.write_text(json.dumps(battery_controls), encoding="utf-8")
     train_path.write_text(json.dumps(train_controls), encoding="utf-8")
     checkpoint_path.write_text(json.dumps(checkpoint_controls), encoding="utf-8")
 
@@ -133,6 +149,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         str(experiment_path),
         "--data-controls",
         str(data_path),
+        "--battery-controls",
+        str(battery_path),
         "--train-controls",
         str(train_path),
         "--checkpoint-controls",
@@ -156,15 +174,30 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    reward_summary_path = Path(result["reward_summary_path"])
+    reward_summary = json.loads(reward_summary_path.read_text(encoding="utf-8"))
+    progress_payload = json.loads((Path(result["meta_dir"]) / "progress.json").read_text(encoding="utf-8"))
+
     assert result["algorithm"] == "MATD3"
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
+    assert result["battery_controls"]["mode"] == "from_pv"
     assert result["vec_env"] == "SubprocVecEnv"
     assert result["device"] == "cpu"
+    assert result["started_at"]
+    assert result["finished_at"]
+    assert result["estimated_end_time"]
+    assert result["elapsed_seconds"] >= 0.0
     assert Path(result["model_root"]).exists()
     assert Path(result["meta_dir"]).exists()
     assert Path(result["log_path"]).parent == Path(result["meta_dir"])
-    assert (Path(result["meta_dir"]) / "progress.json").exists()
+    assert reward_summary_path.exists()
+    assert reward_summary_path.parent == Path(result["meta_dir"])
+    assert len(reward_summary["episodes"]) == result["episodes_completed"]
+    assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
+    assert "components" in reward_summary
+    assert progress_payload["estimated_end_time"]
+    assert progress_payload["remaining_seconds"] == 0.0
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]

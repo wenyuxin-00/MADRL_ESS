@@ -25,8 +25,28 @@ from predictors.artifacts import (
     get_default_lstm_artifact_paths,
     get_weekly_forecast_plot_path,
 )
-from predictors.lstm_forecaster import LSTMForecaster, save_lstm_forecaster_artifacts
+from predictors.lstm_forecaster import (
+    BASELINE_MODE_LAST_VALUE,
+    BASELINE_MODE_NONE,
+    LSTMForecaster,
+    LSTM_ARTIFACT_FORMAT,
+    LSTM_LOAD_HYBRID_ARTIFACT_FORMAT,
+    PHYSICAL_NORMALIZATION_LOAD_SCALE,
+    PHYSICAL_NORMALIZATION_NONE,
+    PHYSICAL_NORMALIZATION_PV_PEAK,
+    POSTPROCESS_MODE_BASELINE_BLEND,
+    POSTPROCESS_MODE_NONE,
+    save_lstm_forecaster_artifacts,
+)
 from predictors.lstm_model import LSTMForecastModel
+from predictors.time_features import (
+    TIME_FEATURE_MODE_NONE,
+    coerce_timestamp_index,
+    encode_forecast_time_features,
+    infer_timestamp_step,
+    normalize_time_feature_mode,
+    time_feature_dim,
+)
 
 DEFAULT_WEEK_STEPS = 96 * 7
 SIGNAL_TRAINING_OVERRIDE_FIELDS = {
@@ -40,6 +60,227 @@ SIGNAL_TRAINING_OVERRIDE_FIELDS = {
     "train_ratio": "lstm_train_ratio",
     "val_ratio": "lstm_val_ratio",
 }
+PHYSICAL_SCALE_EPS = np.float32(1e-6)
+
+
+def _normalize_load_model_mode(mode: str | None) -> str:
+    normalized = str(mode or "per_agent").strip().lower()
+    if normalized != "per_agent":
+        raise ValueError(
+            f"Unsupported forecast.load_model_mode '{mode}'. Only 'per_agent' is implemented."
+        )
+    return normalized
+
+
+def _normalize_load_hybrid_mode(mode: str | None) -> str:
+    normalized = str(mode or POSTPROCESS_MODE_BASELINE_BLEND).strip().lower()
+    if normalized != POSTPROCESS_MODE_BASELINE_BLEND:
+        raise ValueError(
+            f"Unsupported forecast.load_hybrid_mode '{mode}'. Only '{POSTPROCESS_MODE_BASELINE_BLEND}' is implemented."
+        )
+    return normalized
+
+
+def _normalize_load_baseline_mode(mode: str | None) -> str:
+    normalized = str(mode or BASELINE_MODE_LAST_VALUE).strip().lower()
+    if normalized != BASELINE_MODE_LAST_VALUE:
+        raise ValueError(
+            f"Unsupported forecast.load_baseline_mode '{mode}'. Only '{BASELINE_MODE_LAST_VALUE}' is implemented."
+        )
+    return normalized
+
+
+def _normalize_load_blend_candidates(candidates: Sequence[float] | None) -> tuple[float, ...]:
+    if candidates is None:
+        return tuple(float(index) / 10.0 for index in range(11))
+    normalized = tuple(float(value) for value in candidates)
+    if not normalized:
+        raise ValueError("forecast.load_blend_candidates must contain at least one candidate weight.")
+    if any(value < 0.0 or value > 1.0 for value in normalized):
+        raise ValueError("forecast.load_blend_candidates values must stay within [0.0, 1.0].")
+    return normalized
+
+
+def _normalize_date_range(start_date, end_date) -> dict[str, str | None]:
+    return {
+        "start_date": None if start_date in (None, "") else str(start_date),
+        "end_date": None if end_date in (None, "") else str(end_date),
+    }
+
+
+def resolve_signal_physical_normalization_mode(signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return PHYSICAL_NORMALIZATION_LOAD_SCALE
+    if normalized == "pv":
+        return PHYSICAL_NORMALIZATION_PV_PEAK
+    return PHYSICAL_NORMALIZATION_NONE
+
+
+def resolve_signal_model_mode(cfg, signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return _normalize_load_model_mode(getattr(cfg.forecast, "load_model_mode", "per_agent"))
+    return "shared"
+
+
+def resolve_signal_time_feature_mode(cfg, signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return normalize_time_feature_mode(getattr(cfg.forecast, "load_time_feature_mode", TIME_FEATURE_MODE_NONE))
+    return TIME_FEATURE_MODE_NONE
+
+
+def resolve_signal_postprocess_mode(cfg, signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return _normalize_load_hybrid_mode(getattr(cfg.forecast, "load_hybrid_mode", POSTPROCESS_MODE_BASELINE_BLEND))
+    return POSTPROCESS_MODE_NONE
+
+
+def resolve_signal_baseline_mode(cfg, signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return _normalize_load_baseline_mode(getattr(cfg.forecast, "load_baseline_mode", BASELINE_MODE_LAST_VALUE))
+    return BASELINE_MODE_NONE
+
+
+def resolve_signal_blend_candidates(cfg, signal_name: str) -> tuple[float, ...]:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return _normalize_load_blend_candidates(getattr(cfg.forecast, "load_blend_candidates", None))
+    return (1.0,)
+
+
+def resolve_signal_artifact_format(signal_name: str, settings: dict[str, object]) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load" and str(settings.get("postprocess_mode", POSTPROCESS_MODE_NONE)) == POSTPROCESS_MODE_BASELINE_BLEND:
+        return LSTM_LOAD_HYBRID_ARTIFACT_FORMAT
+    return LSTM_ARTIFACT_FORMAT
+
+
+def resolve_signal_input_size(cfg, signal_name: str) -> int:
+    return 1 + int(time_feature_dim(resolve_signal_time_feature_mode(cfg, signal_name)))
+
+
+def build_lstm_source_signature(cfg, signal_name: str) -> dict[str, object]:
+    normalized_signal = _normalize_signal_name(signal_name)
+    train_exclusion = {"start_date": None, "end_date": None}
+    if (
+        int(cfg.data.train_year) == int(cfg.data.test_year)
+        and not cfg.data.train_start_date
+        and not cfg.data.train_end_date
+        and (cfg.data.test_start_date or cfg.data.test_end_date)
+    ):
+        train_exclusion = _normalize_date_range(cfg.data.test_start_date, cfg.data.test_end_date)
+    return {
+        "signal_name": normalized_signal,
+        "agent_profiles": [str(profile) for profile in cfg.data.agent_profiles],
+        "train_year": int(cfg.data.train_year),
+        "test_year": int(cfg.data.test_year),
+        "train_date_range": _normalize_date_range(cfg.data.train_start_date, cfg.data.train_end_date),
+        "test_date_range": _normalize_date_range(cfg.data.test_start_date, cfg.data.test_end_date),
+        "train_excluded_date_range": train_exclusion,
+        "load_components": [str(component) for component in cfg.data.load_components],
+        "pv_reference": str(cfg.data.pv_reference),
+        "pv_capacity_kw": [float(value) for value in (cfg.data.pv_capacity_kw or [])],
+        "num_agents": int(cfg.env.num_agents),
+        "future_horizon": int(cfg.env.future_horizon),
+        "history_window": int(cfg.forecast.history_window),
+    }
+
+
+def _coerce_physical_scale_by_column(
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None,
+    *,
+    expected_size: int,
+) -> np.ndarray | None:
+    if physical_scale_by_column is None:
+        return None
+    scale = np.asarray(physical_scale_by_column, dtype=np.float32).reshape(-1)
+    if scale.size == 0:
+        return None
+    if scale.size == 1 and expected_size > 1:
+        scale = np.repeat(scale, expected_size)
+    elif scale.size != expected_size:
+        raise ValueError(
+            f"physical_scale_by_column size mismatch: expected {expected_size}, got {scale.size}"
+        )
+    return scale.astype(np.float32, copy=True)
+
+
+def _apply_physical_normalization(
+    values: np.ndarray,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None,
+) -> np.ndarray:
+    normalized = np.asarray(values, dtype=np.float32)
+    if normalized.ndim == 1:
+        expected_size = 1
+    elif normalized.ndim == 2:
+        expected_size = normalized.shape[1]
+    else:
+        raise ValueError(f"Expected 1D or 2D values for physical normalization, got shape {normalized.shape}")
+
+    scale = _coerce_physical_scale_by_column(physical_scale_by_column, expected_size=expected_size)
+    if scale is None:
+        return normalized.astype(np.float32, copy=True)
+
+    divisor = np.maximum(scale, np.float32(PHYSICAL_SCALE_EPS)).astype(np.float32)
+    if normalized.ndim == 1:
+        return (normalized / divisor[0]).astype(np.float32)
+    return (normalized / divisor[None, :]).astype(np.float32)
+
+
+def _slice_scale_by_source_columns(
+    values: Sequence[float] | np.ndarray | float | None,
+    source: "SignalCsvSource",
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    scale = np.asarray(values, dtype=np.float32).reshape(-1)
+    if scale.size == 0:
+        return None
+    indices = tuple(source.column_indices or tuple(range(len(source.value_columns))))
+    if not indices:
+        return None
+    if scale.size == len(indices) and indices == tuple(range(len(indices))):
+        return scale.astype(np.float32, copy=True)
+    if any(index < 0 or index >= scale.size for index in indices):
+        raise IndexError(
+            f"Signal source column_indices={indices} are out of bounds for scale size={scale.size}."
+        )
+    return scale[list(indices)].astype(np.float32, copy=True)
+
+
+def resolve_signal_physical_scale_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+) -> np.ndarray | None:
+    mode = resolve_signal_physical_normalization_mode(signal_name)
+    if mode == PHYSICAL_NORMALIZATION_NONE:
+        return None
+    dataset_kwargs = dict((source.dataset_kwargs or {}).get(split) or {})
+    if not dataset_kwargs:
+        return None
+    if mode == PHYSICAL_NORMALIZATION_LOAD_SCALE:
+        return _coerce_physical_scale_by_column(
+            _slice_scale_by_source_columns(dataset_kwargs.get("load_scale"), source),
+            expected_size=len(source.value_columns),
+        )
+    if mode == PHYSICAL_NORMALIZATION_PV_PEAK:
+        dataset = ProsumerDataset(**dataset_kwargs)
+        pv_peak_kw = np.asarray(dataset._meta_template.get("pv_peak_kw", []), dtype=np.float32).reshape(-1)
+        if pv_peak_kw.size == 0:
+            return None
+        if np.any(pv_peak_kw <= 0.0):
+            raise ValueError("ProsumerDataset produced non-positive pv_peak_kw for PV forecast normalization.")
+        return _coerce_physical_scale_by_column(
+            _slice_scale_by_source_columns(pv_peak_kw, source),
+            expected_size=len(source.value_columns),
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -50,6 +291,7 @@ class SignalCsvSource:
     train_path: Path | None
     test_path: Path | None
     value_columns: tuple[str, ...]
+    column_indices: tuple[int, ...] | None = None
     source_kind: str = "prosumer"
     dataset_kwargs: dict[str, dict[str, object]] | None = None
 
@@ -140,6 +382,12 @@ def resolve_signal_training_settings(
         "train_ratio": float(local_cfg.forecast.lstm_train_ratio),
         "val_ratio": float(local_cfg.forecast.lstm_val_ratio),
         "device": str(local_cfg.runtime.device),
+        "model_mode": resolve_signal_model_mode(local_cfg, signal_name),
+        "time_feature_mode": resolve_signal_time_feature_mode(local_cfg, signal_name),
+        "input_size": resolve_signal_input_size(local_cfg, signal_name),
+        "postprocess_mode": resolve_signal_postprocess_mode(local_cfg, signal_name),
+        "baseline_mode": resolve_signal_baseline_mode(local_cfg, signal_name),
+        "blend_candidates": resolve_signal_blend_candidates(local_cfg, signal_name),
     }
     return local_cfg, settings
 
@@ -156,12 +404,15 @@ def expected_lstm_artifact_meta(
     cfg,
     signal_name: str,
     overrides: dict[str, object] | None = None,
+    *,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
 ) -> dict[str, object]:
     """Build the expected artifact metadata for one signal."""
-    _, settings = resolve_signal_training_settings(cfg, signal_name, overrides=overrides)
+    local_cfg, settings = resolve_signal_training_settings(cfg, signal_name, overrides=overrides)
     future_horizon = int(settings["future_horizon"])
     return {
-        "artifact_format": "lstm_forecaster_v2",
+        "artifact_format": resolve_signal_artifact_format(signal_name, settings),
         "signal_name": str(settings["signal_name"]),
         "future_horizon": future_horizon,
         "pred_len": future_horizon,
@@ -169,6 +420,23 @@ def expected_lstm_artifact_meta(
         "hidden_size": int(settings["hidden_size"]),
         "num_layers": int(settings["num_layers"]),
         "dropout": float(settings["dropout"]),
+        "input_size": int(settings["input_size"]),
+        "time_feature_mode": str(settings["time_feature_mode"]),
+        "model_mode": str(settings["model_mode"]),
+        "normalization_mode": resolve_signal_physical_normalization_mode(signal_name),
+        "source_signature": build_lstm_source_signature(local_cfg, signal_name),
+        "agent_index": None if agent_index is None else int(agent_index),
+        "agent_profile": None if agent_profile is None else str(agent_profile),
+        **(
+            {
+                "postprocess_mode": str(settings["postprocess_mode"]),
+                "baseline_mode": str(settings["baseline_mode"]),
+                "blend_weight": None,
+                "optimized_metric": "mae_step1",
+            }
+            if _normalize_signal_name(signal_name) == "load"
+            else {}
+        ),
     }
 
 
@@ -177,16 +445,7 @@ def compare_lstm_artifact_meta(
     expected_meta: dict[str, object],
 ) -> dict[str, object]:
     """Compare saved artifact metadata with the current expected configuration."""
-    comparable_fields = (
-        "artifact_format",
-        "signal_name",
-        "future_horizon",
-        "pred_len",
-        "seq_len",
-        "hidden_size",
-        "num_layers",
-        "dropout",
-    )
+    comparable_fields = tuple(expected_meta.keys())
     actual_meta = dict(actual_meta or {})
     actual = {field: actual_meta.get(field) for field in comparable_fields}
     expected = {field: expected_meta.get(field) for field in comparable_fields}
@@ -197,6 +456,10 @@ def compare_lstm_artifact_meta(
         actual_value = actual.get(field)
         if field == "dropout":
             matches = actual_value is not None and bool(np.isclose(float(actual_value), float(expected_value)))
+        elif field == "blend_weight" and expected_value is None:
+            matches = field in actual_meta and (
+                actual_value is None or 0.0 <= float(actual_value) <= 1.0
+            )
         else:
             matches = actual_value == expected_value
         if not matches:
@@ -219,10 +482,18 @@ def validate_lstm_artifact(
     paths: dict[str, str | Path],
     *,
     overrides: dict[str, object] | None = None,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
 ) -> dict[str, object]:
     """校验单个 artifact 是否存在且与当前配置一致。"""
     normalized_signal = _normalize_signal_name(signal_name)
-    expected = expected_lstm_artifact_meta(cfg, normalized_signal, overrides=overrides)
+    expected = expected_lstm_artifact_meta(
+        cfg,
+        normalized_signal,
+        overrides=overrides,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+    )
     resolved_paths = {name: Path(path) for name, path in paths.items()}
     required_files = {
         key: resolved_paths[key]
@@ -242,6 +513,8 @@ def validate_lstm_artifact(
         "missing_files": missing_files,
         "compatible": False,
         "issue_type": None,
+        "agent_index": None if agent_index is None else int(agent_index),
+        "agent_profile": None if agent_profile is None else str(agent_profile),
     }
 
     if missing_files:
@@ -304,7 +577,6 @@ def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[st
         "pv_capacity_kw": list(cfg.data.pv_capacity_kw),
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
-        "storage_scale": list(cfg.data.storage_scale),
         "node_ids": list(range(int(cfg.env.num_agents))),
     }
 
@@ -320,11 +592,13 @@ def _resolve_prosumer_signal_source(cfg, data_dir: Path, signal_name: str) -> Si
     if signal_name not in {"price", "load", "pv"}:
         return None
     agent_profiles = [str(profile) for profile in cfg.data.agent_profiles]
+    value_columns = _prosumer_value_columns(agent_profiles, signal_name)
     return SignalCsvSource(
         signal_name=signal_name,
         train_path=None,
         test_path=None,
-        value_columns=_prosumer_value_columns(agent_profiles, signal_name),
+        value_columns=value_columns,
+        column_indices=tuple(range(len(value_columns))),
         source_kind="prosumer",
         dataset_kwargs={
             "train": _resolve_prosumer_dataset_kwargs(cfg, data_dir, "train"),
@@ -351,6 +625,8 @@ def _load_prosumer_signal_frame_from_source(
         value_columns = ("price",)
         frame = pd.DataFrame({"timestamp": timestamps, "price": signal_values})
     else:
+        column_indices = tuple(source.column_indices or tuple(range(signal_values.shape[1])))
+        signal_values = signal_values[:, list(column_indices)]
         value_columns = tuple(source.value_columns)
         frame = pd.DataFrame(signal_values, columns=list(value_columns))
         frame.insert(0, "timestamp", timestamps)
@@ -392,6 +668,28 @@ def load_signal_matrix_from_source(
     return _load_signal_matrix_from_source(source, signal_name, split=split)
 
 
+def select_signal_source_columns(
+    source: SignalCsvSource,
+    column_indices: Sequence[int],
+) -> SignalCsvSource:
+    selected_indices = tuple(int(index) for index in column_indices)
+    if not selected_indices:
+        raise ValueError("select_signal_source_columns requires at least one column index.")
+    if any(index < 0 or index >= len(source.value_columns) for index in selected_indices):
+        raise IndexError(
+            f"Requested column_indices={selected_indices} for source columns={source.value_columns}."
+        )
+    return SignalCsvSource(
+        signal_name=source.signal_name,
+        train_path=source.train_path,
+        test_path=source.test_path,
+        value_columns=tuple(source.value_columns[index] for index in selected_indices),
+        column_indices=selected_indices,
+        source_kind=source.source_kind,
+        dataset_kwargs=copy.deepcopy(source.dataset_kwargs),
+    )
+
+
 def _load_signal_segments_from_source(
     source: SignalCsvSource,
     signal_name: str,
@@ -428,6 +726,138 @@ def _load_signal_segments_from_source(
             f"Signal source split='{split}' does not contain any segments for signal '{signal_name}'."
         )
     return working.reset_index(drop=True), segments, value_columns
+
+
+def _load_signal_segment_frames_from_source(
+    source: SignalCsvSource,
+    signal_name: str,
+    *,
+    split: str,
+    drop_warmup: bool = False,
+) -> tuple[pd.DataFrame, list[pd.DataFrame], tuple[str, ...]]:
+    frame, value_columns = _load_signal_frame_from_source(source, signal_name, split=split)
+    if drop_warmup and "is_warmup" in frame.columns:
+        frame = frame.loc[~frame["is_warmup"].astype(bool)].copy()
+
+    if frame.empty:
+        raise ValueError(
+            f"Signal source split='{split}' does not contain any usable rows for signal '{signal_name}'."
+        )
+
+    working = frame.copy()
+    if "segment_id" not in working.columns:
+        working["segment_id"] = 0
+    working["segment_id"] = pd.to_numeric(working["segment_id"], errors="coerce").fillna(-1).astype(int)
+
+    segment_frames: list[pd.DataFrame] = []
+    for segment_id in sorted(working["segment_id"].unique()):
+        segment_frame = working.loc[working["segment_id"] == segment_id].reset_index(drop=True)
+        if segment_frame.empty:
+            continue
+        segment_frames.append(segment_frame)
+
+    if not segment_frames:
+        raise ValueError(
+            f"Signal source split='{split}' does not contain any segment frames for signal '{signal_name}'."
+        )
+    return working.reset_index(drop=True), segment_frames, value_columns
+
+
+def temporal_split_segment_frames(
+    segment_frames: list[pd.DataFrame],
+    *,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    seq_len: int,
+    pred_len: int,
+) -> dict[str, object]:
+    min_window = int(seq_len) + int(pred_len)
+    if train_ratio <= 0.0 or val_ratio <= 0.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError("Expected 0 < train_ratio, val_ratio and train_ratio + val_ratio < 1.")
+
+    train_segments: list[pd.DataFrame] = []
+    val_segments: list[pd.DataFrame] = []
+    segment_summaries: list[dict[str, int]] = []
+
+    for segment_idx, segment_frame in enumerate(segment_frames):
+        total_steps = int(len(segment_frame))
+        train_end = int(total_steps * train_ratio)
+        val_end = min(total_steps, int(total_steps * (train_ratio + val_ratio)))
+        val_context_start = max(0, train_end - int(seq_len))
+
+        if train_end >= min_window:
+            train_segments.append(segment_frame.iloc[:train_end].copy())
+        if val_end - train_end > 0 and (val_end - val_context_start) >= min_window:
+            val_segments.append(segment_frame.iloc[val_context_start:val_end].copy())
+
+        segment_summaries.append(
+            {
+                "segment_idx": int(segment_idx),
+                "total_steps": total_steps,
+                "train_end": int(train_end),
+                "val_end": int(val_end),
+            }
+        )
+
+    if not train_segments:
+        raise ValueError("No train segments are long enough for the requested history/prediction windows.")
+    if not val_segments:
+        fallback = max(train_segments, key=len)
+        fallback_tail = fallback.iloc[max(0, len(fallback) - (2 * int(seq_len) + int(pred_len))) :].copy()
+        if len(fallback_tail) < min_window:
+            raise ValueError("No validation segments are long enough for the requested history/prediction windows.")
+        val_segments = [fallback_tail]
+
+    return {
+        "train_segments": train_segments,
+        "val_segments": val_segments,
+        "segment_summaries": segment_summaries,
+    }
+
+
+def build_supervised_windows_from_time_feature_frames(
+    segment_frames: list[pd.DataFrame],
+    *,
+    value_column: str,
+    seq_len: int,
+    pred_len: int,
+    scaler: object | None,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+) -> tuple[np.ndarray, np.ndarray]:
+    total_window = int(seq_len) + int(pred_len)
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+
+    for segment_frame in segment_frames:
+        series = segment_frame.loc[:, value_column].to_numpy(dtype=np.float32).reshape(-1, 1)
+        if series.shape[0] < total_window:
+            continue
+
+        normalized = _apply_physical_normalization(series, physical_scale_by_column).reshape(-1)
+        if scaler is not None:
+            normalized = scaler.transform(normalized.reshape(-1, 1)).reshape(-1).astype(np.float32)
+
+        load_windows = np.lib.stride_tricks.sliding_window_view(normalized, total_window).astype(np.float32)
+        timestamps = coerce_timestamp_index(segment_frame["timestamp"].tolist())
+        time_features = encode_forecast_time_features(timestamps, time_feature_mode).astype(np.float32)
+        time_windows = np.lib.stride_tricks.sliding_window_view(
+            time_features,
+            window_shape=total_window,
+            axis=0,
+        )
+        time_windows = np.moveaxis(time_windows, -1, 1).astype(np.float32)
+
+        load_history = load_windows[:, :seq_len].reshape(-1, seq_len, 1).astype(np.float32)
+        if time_windows.shape[2] > 0:
+            x_parts.append(np.concatenate([load_history, time_windows[:, :seq_len, :]], axis=2))
+        else:
+            x_parts.append(load_history)
+        y_parts.append(load_windows[:, seq_len:].astype(np.float32))
+
+    if not x_parts:
+        raise ValueError("No valid supervised windows could be built from the provided time-feature segments.")
+    return np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0)
 
 
 def resolve_signal_csv_source(data_dir: str | Path, signal_name: str, cfg=None) -> SignalCsvSource | None:
@@ -501,12 +931,25 @@ def load_signal_segments(
     return working.reset_index(drop=True), segments, value_columns
 
 
-def fit_signal_scaler(values: np.ndarray | list[np.ndarray]) -> StandardScaler:
+def fit_signal_scaler(
+    values: np.ndarray | list[np.ndarray],
+    *,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+) -> StandardScaler:
     """在一类信号的所有数值上拟合 StandardScaler。"""
     if isinstance(values, list):
-        flattened = np.concatenate([np.asarray(chunk, dtype=np.float32).reshape(-1) for chunk in values], axis=0)
+        flattened = np.concatenate(
+            [
+                _apply_physical_normalization(np.asarray(chunk, dtype=np.float32), physical_scale_by_column).reshape(-1)
+                for chunk in values
+            ],
+            axis=0,
+        )
     else:
-        flattened = np.asarray(values, dtype=np.float32).reshape(-1)
+        flattened = _apply_physical_normalization(
+            np.asarray(values, dtype=np.float32),
+            physical_scale_by_column,
+        ).reshape(-1)
 
     scaler = StandardScaler()
     scaler.fit(flattened.reshape(-1, 1))
@@ -561,9 +1004,10 @@ def build_supervised_windows_from_matrix(
     seq_len: int,
     pred_len: int,
     scaler: object | None,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """把多列信号矩阵转成可用于监督学习的滑动窗口样本。"""
-    values = _reshape_signal_values(values)
+    values = _apply_physical_normalization(_reshape_signal_values(values), physical_scale_by_column)
 
     total_window = int(seq_len) + int(pred_len)
     if values.shape[0] < total_window:
@@ -593,6 +1037,7 @@ def build_supervised_windows_from_segments(
     seq_len: int,
     pred_len: int,
     scaler: object | None,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """从连续信号 segment 列表中构造滑动窗口样本。"""
     x_parts: list[np.ndarray] = []
@@ -611,6 +1056,7 @@ def build_supervised_windows_from_segments(
             seq_len=seq_len,
             pred_len=pred_len,
             scaler=scaler,
+            physical_scale_by_column=physical_scale_by_column,
         )
         x_parts.append(x_chunk)
         y_parts.append(y_chunk)
@@ -686,6 +1132,7 @@ def make_matrix_loader(
     seq_len: int,
     pred_len: int,
     scaler: object | None,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
     batch_size: int,
     shuffle: bool,
     device: str | torch.device | TorchRuntimeState = "cpu",
@@ -698,6 +1145,7 @@ def make_matrix_loader(
             seq_len=seq_len,
             pred_len=pred_len,
             scaler=scaler,
+            physical_scale_by_column=physical_scale_by_column,
         )
     else:
         x, y = build_supervised_windows_from_matrix(
@@ -705,8 +1153,28 @@ def make_matrix_loader(
             seq_len=seq_len,
             pred_len=pred_len,
             scaler=scaler,
+            physical_scale_by_column=physical_scale_by_column,
         )
     # DataLoader 运行前，要先把 numpy 样本包装成 PyTorch Dataset。
+    dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
+    resolved_device = resolve_device(device)
+    return DataLoader(
+        dataset,
+        batch_size=min(batch_size, len(dataset)),
+        shuffle=shuffle,
+        pin_memory=resolved_device.type == "cuda" if pin_memory is None else bool(pin_memory),
+    )
+
+
+def make_tensor_loader(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    device: str | torch.device | TorchRuntimeState = "cpu",
+    pin_memory: bool | None = None,
+) -> DataLoader:
     dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
     resolved_device = resolve_device(device)
     return DataLoader(
@@ -824,6 +1292,100 @@ def train_lstm_model(
     }
 
 
+def _restore_supervised_window_values(
+    values: np.ndarray,
+    *,
+    scaler: object | None,
+    physical_scale: float | None,
+) -> np.ndarray:
+    restored = np.asarray(values, dtype=np.float32)
+    original_shape = restored.shape
+    if scaler is not None:
+        restored = scaler.inverse_transform(restored.reshape(-1, 1)).reshape(original_shape).astype(np.float32)
+    if physical_scale is not None:
+        restored = (restored * np.float32(physical_scale)).astype(np.float32)
+    return restored.astype(np.float32)
+
+
+def _predict_supervised_windows(
+    model,
+    windows: np.ndarray,
+    *,
+    runtime_state: TorchRuntimeState,
+    batch_size: int,
+) -> np.ndarray:
+    predictions: list[np.ndarray] = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(windows), max(int(batch_size), 1)):
+            batch = torch.tensor(
+                windows[start : start + max(int(batch_size), 1)],
+                dtype=torch.float32,
+                device=runtime_state.device,
+            )
+            predictions.append(model(batch).detach().cpu().numpy().astype(np.float32))
+    if not predictions:
+        raise ValueError("Validation windows are required to search load blend weights.")
+    return np.concatenate(predictions, axis=0).astype(np.float32)
+
+
+def _select_load_blend_weight_from_validation(
+    *,
+    model,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    scaler: object | None,
+    physical_scale: float | None,
+    runtime_state: TorchRuntimeState,
+    batch_size: int,
+    candidate_weights: Sequence[float],
+) -> dict[str, object]:
+    raw_predictions = _predict_supervised_windows(
+        model,
+        x_val,
+        runtime_state=runtime_state,
+        batch_size=batch_size,
+    )
+    raw_step1 = _restore_supervised_window_values(
+        raw_predictions[:, 0],
+        scaler=scaler,
+        physical_scale=physical_scale,
+    )
+    baseline_step1 = _restore_supervised_window_values(
+        x_val[:, -1, 0],
+        scaler=scaler,
+        physical_scale=physical_scale,
+    )
+    target_step1 = _restore_supervised_window_values(
+        y_val[:, 0],
+        scaler=scaler,
+        physical_scale=physical_scale,
+    )
+
+    baseline_mae = float(np.mean(np.abs(baseline_step1 - target_step1)))
+    raw_mae = float(np.mean(np.abs(raw_step1 - target_step1)))
+    best_weight = float(candidate_weights[0])
+    best_mae = float("inf")
+
+    for candidate_weight in candidate_weights:
+        weight = np.float32(candidate_weight)
+        blended_step1 = baseline_step1 + weight * (raw_step1 - baseline_step1)
+        mae = float(np.mean(np.abs(blended_step1 - target_step1)))
+        if mae < best_mae:
+            best_mae = mae
+            best_weight = float(candidate_weight)
+
+    return {
+        "postprocess_mode": POSTPROCESS_MODE_BASELINE_BLEND,
+        "baseline_mode": BASELINE_MODE_LAST_VALUE,
+        "blend_weight": best_weight,
+        "optimized_metric": "mae_step1",
+        "baseline_mae_step1": baseline_mae,
+        "raw_mae_step1": raw_mae,
+        "blended_mae_step1": best_mae,
+    }
+
+
 def build_runtime_forecaster_from_model(
     model,
     *,
@@ -835,6 +1397,17 @@ def build_runtime_forecaster_from_model(
     num_layers: int,
     dropout: float,
     device: str | torch.device,
+    input_size: int = 1,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+    model_mode: str = "shared",
+    physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+    postprocess_mode: str = POSTPROCESS_MODE_NONE,
+    baseline_mode: str = BASELINE_MODE_NONE,
+    blend_weight: float | None = None,
+    optimized_metric: str | None = None,
 ) -> LSTMForecaster:
     """Wrap a trained model as a runtime forecaster for one signal."""
     forecaster = LSTMForecaster(
@@ -846,9 +1419,21 @@ def build_runtime_forecaster_from_model(
         seq_len=seq_len,
         device=device,
         scaler=scaler,
+        input_size=input_size,
+        time_feature_mode=time_feature_mode,
+        model_mode=model_mode,
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=physical_scale_by_column,
+        postprocess_mode=postprocess_mode,
+        baseline_mode=baseline_mode,
+        blend_weight=blend_weight,
+        optimized_metric=optimized_metric,
     ).rename_default_signal(signal_name)
-    forecaster.signal_runtimes[signal_name].model.load_state_dict(copy.deepcopy(model.state_dict()))
-    forecaster.signal_runtimes[signal_name].model.eval()
+    runtime = forecaster.signal_runtimes[signal_name][0]
+    runtime.model.load_state_dict(copy.deepcopy(model.state_dict()))
+    runtime.model.eval()
+    runtime.agent_index = None if agent_index is None else int(agent_index)
+    runtime.agent_profile = None if agent_profile is None else str(agent_profile)
     forecaster._set_legacy_attributes()
     return forecaster
 
@@ -859,7 +1444,7 @@ def _select_week_evaluation_slice(
     *,
     signal_name: str,
     seq_len: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Select one representative week for plotting."""
     if "week_id" in frame.columns and "is_warmup" in frame.columns:
         non_warmup = frame.loc[~frame["is_warmup"].astype(bool)]
@@ -883,17 +1468,21 @@ def _select_week_evaluation_slice(
             if history_values.size == 0:
                 segment_values = values[segment_mask]
                 history_values = segment_values[: min(seq_len, len(segment_values))]
-            return history_values, target_values, target_timestamps
+                history_timestamps = frame.loc[segment_mask].iloc[: len(history_values)]["timestamp"].to_numpy()
+            else:
+                history_timestamps = frame.loc[warmup_mask, "timestamp"].to_numpy()
+            return history_values, target_values, history_timestamps, target_timestamps
 
     history = values[:seq_len]
     target = values[seq_len : seq_len + DEFAULT_WEEK_STEPS]
     if target.size == 0:
         target = values[seq_len:]
+    history_timestamps = frame.loc[: len(history) - 1, "timestamp"].to_numpy() if "timestamp" in frame.columns else np.arange(len(history))
     if "timestamp" in frame.columns:
         timestamps = frame.loc[seq_len : seq_len + len(target) - 1, "timestamp"].to_numpy()
     else:
         timestamps = np.arange(len(target))
-    return history, target, timestamps
+    return history, target, np.asarray(history_timestamps), timestamps
 
 
 def compute_forecast_metrics(target: np.ndarray, prediction: np.ndarray) -> dict[str, float | None]:
@@ -954,10 +1543,21 @@ def evaluate_signal_open_loop_one_week(
     num_layers: int,
     dropout: float,
     device: str | torch.device,
+    input_size: int = 1,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+    model_mode: str = "shared",
+    physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+    postprocess_mode: str = POSTPROCESS_MODE_NONE,
+    baseline_mode: str = BASELINE_MODE_NONE,
+    blend_weight: float | None = None,
+    optimized_metric: str | None = None,
 ) -> SignalForecastEvaluation:
     """开环递推一周，用于长期 stress test。"""
     test_frame, test_values, _ = _load_signal_matrix_from_source(source, signal_name, split="test")
-    history_seed, target_values, timestamps = _select_week_evaluation_slice(
+    history_seed, target_values, history_timestamps, timestamps = _select_week_evaluation_slice(
         test_frame,
         test_values,
         signal_name=signal_name,
@@ -973,6 +1573,17 @@ def evaluate_signal_open_loop_one_week(
         hidden_size=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
+        input_size=input_size,
+        time_feature_mode=time_feature_mode,
+        model_mode=model_mode,
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=physical_scale_by_column,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+        postprocess_mode=postprocess_mode,
+        baseline_mode=baseline_mode,
+        blend_weight=blend_weight,
+        optimized_metric=optimized_metric,
         device=device,
     )
 
@@ -980,6 +1591,7 @@ def evaluate_signal_open_loop_one_week(
         history_seed,
         horizon=target_values.shape[0] + 1,
         signal_name=signal_name,
+        history_timestamps=history_timestamps,
     )
     if target_values.ndim == 1 or target_values.shape[1] == 1:
         prediction = np.asarray(prediction, dtype=np.float32)[1 : target_values.shape[0] + 1]
@@ -1011,10 +1623,21 @@ def evaluate_signal_online_one_week(
     num_layers: int,
     dropout: float,
     device: str | torch.device,
+    input_size: int = 1,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+    model_mode: str = "shared",
+    physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+    postprocess_mode: str = POSTPROCESS_MODE_NONE,
+    baseline_mode: str = BASELINE_MODE_NONE,
+    blend_weight: float | None = None,
+    optimized_metric: str | None = None,
 ) -> SignalForecastEvaluation:
     """在线滚动评估一周，每个时刻都重新基于真实历史调用预测器。"""
     test_frame, test_values, _ = _load_signal_matrix_from_source(source, signal_name, split="test")
-    history_seed, target_values, timestamps = _select_week_evaluation_slice(
+    history_seed, target_values, history_timestamps, timestamps = _select_week_evaluation_slice(
         test_frame,
         test_values,
         signal_name=signal_name,
@@ -1030,6 +1653,17 @@ def evaluate_signal_online_one_week(
         hidden_size=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
+        input_size=input_size,
+        time_feature_mode=time_feature_mode,
+        model_mode=model_mode,
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=physical_scale_by_column,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+        postprocess_mode=postprocess_mode,
+        baseline_mode=baseline_mode,
+        blend_weight=blend_weight,
+        optimized_metric=optimized_metric,
         device=device,
     )
 
@@ -1042,10 +1676,17 @@ def evaluate_signal_online_one_week(
             current_history = history_matrix
         else:
             current_history = np.concatenate([history_matrix, target_matrix[:step_idx]], axis=0)
+        current_timestamps = np.asarray(history_timestamps)
+        if step_idx > 0:
+            current_timestamps = np.concatenate(
+                [current_timestamps, np.asarray(timestamps[:step_idx])],
+                axis=0,
+            )
         rollout = forecaster.predict(
             _to_forecaster_history_input(current_history),
             horizon=max(int(pred_len) + 1, 2),
             signal_name=signal_name,
+            history_timestamps=current_timestamps,
         )
         rollout_array = np.asarray(rollout, dtype=np.float32)
         if target_matrix.shape[1] == 1:
@@ -1083,6 +1724,17 @@ def evaluate_signal_one_week(
     num_layers: int,
     dropout: float,
     device: str | torch.device,
+    input_size: int = 1,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+    model_mode: str = "shared",
+    physical_normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+    postprocess_mode: str = POSTPROCESS_MODE_NONE,
+    baseline_mode: str = BASELINE_MODE_NONE,
+    blend_weight: float | None = None,
+    optimized_metric: str | None = None,
 ) -> SignalForecastEvaluation:
     """兼容旧入口，但要求显式指定评估协议，避免语义继续模糊。"""
     if mode == "online_aligned":
@@ -1097,6 +1749,17 @@ def evaluate_signal_one_week(
             num_layers=num_layers,
             dropout=dropout,
             device=device,
+            input_size=input_size,
+            time_feature_mode=time_feature_mode,
+            model_mode=model_mode,
+            physical_normalization_mode=physical_normalization_mode,
+            physical_scale_by_column=physical_scale_by_column,
+            agent_index=agent_index,
+            agent_profile=agent_profile,
+            postprocess_mode=postprocess_mode,
+            baseline_mode=baseline_mode,
+            blend_weight=blend_weight,
+            optimized_metric=optimized_metric,
         )
     if mode == "open_loop":
         return evaluate_signal_open_loop_one_week(
@@ -1110,16 +1773,33 @@ def evaluate_signal_one_week(
             num_layers=num_layers,
             dropout=dropout,
             device=device,
+            input_size=input_size,
+            time_feature_mode=time_feature_mode,
+            model_mode=model_mode,
+            physical_normalization_mode=physical_normalization_mode,
+            physical_scale_by_column=physical_scale_by_column,
+            agent_index=agent_index,
+            agent_profile=agent_profile,
+            postprocess_mode=postprocess_mode,
+            baseline_mode=baseline_mode,
+            blend_weight=blend_weight,
+            optimized_metric=optimized_metric,
         )
     raise ValueError("Unknown evaluation mode, expected 'online_aligned' or 'open_loop'.")
 
 
-def _managed_lstm_artifact_paths(cfg, signal_name: str) -> dict[str, Path]:
+def _managed_lstm_artifact_paths(
+    cfg,
+    signal_name: str,
+    *,
+    agent_index: int | None = None,
+) -> dict[str, Path]:
     """返回当前配置下单个 signal 的标准 artifact 路径。"""
     return get_default_lstm_artifact_paths(
         root=forecast_artifact_root(cfg),
         signal_name=_normalize_signal_name(signal_name),
         future_horizon=int(cfg.env.future_horizon),
+        agent_index=agent_index,
     )
 
 
@@ -1169,26 +1849,75 @@ def _format_lstm_artifact_issue(validation: dict[str, object]) -> str:
     )
 
 
-def _collect_lstm_artifact_inventory(cfg) -> dict[str, object]:
+def _signal_artifact_specs(cfg, signal_name: str) -> list[dict[str, object]]:
+    normalized_signal = _normalize_signal_name(signal_name)
+    if normalized_signal == "load" and resolve_signal_model_mode(cfg, normalized_signal) == "per_agent":
+        profiles = [str(profile) for profile in cfg.data.agent_profiles][: int(cfg.env.num_agents)]
+        return [
+            {
+                "signal_name": normalized_signal,
+                "agent_index": int(agent_index),
+                "agent_profile": profile,
+                "paths": _managed_lstm_artifact_paths(cfg, normalized_signal, agent_index=agent_index),
+            }
+            for agent_index, profile in enumerate(profiles)
+        ]
+    return [
+        {
+            "signal_name": normalized_signal,
+            "agent_index": None,
+            "agent_profile": None,
+            "paths": _managed_lstm_artifact_paths(cfg, normalized_signal),
+        }
+    ]
+
+
+def _collect_lstm_artifact_inventory(
+    cfg,
+    *,
+    overrides_by_signal: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     """扫描所有 signal 的 artifact，并区分可用、缺失与不兼容。"""
-    artifacts: dict[str, tuple[str, str, str]] = {}
-    missing_signals: list[str] = []
-    invalid_artifacts: dict[str, dict[str, object]] = {}
+    artifacts: dict[str, object] = {}
+    missing_artifacts: dict[str, list[dict[str, object]]] = {}
+    invalid_artifacts: dict[str, list[dict[str, object]]] = {}
 
     for signal_name in configured_forecast_signals(cfg):
-        paths = _managed_lstm_artifact_paths(cfg, signal_name)
-        validation = validate_lstm_artifact(cfg, signal_name, paths)
-        if validation["compatible"]:
-            artifacts[signal_name] = _artifact_tuple_from_paths(paths)
-            continue
-        if validation.get("issue_type") == "missing":
-            missing_signals.append(signal_name)
-            continue
-        invalid_artifacts[signal_name] = validation
+        compatible_artifacts: list[tuple[str, str, str]] = []
+        signal_missing: list[dict[str, object]] = []
+        signal_invalid: list[dict[str, object]] = []
+        signal_overrides = dict((overrides_by_signal or {}).get(signal_name) or {})
+
+        for spec in _signal_artifact_specs(cfg, signal_name):
+            validation = validate_lstm_artifact(
+                cfg,
+                signal_name,
+                spec["paths"],
+                overrides=signal_overrides or None,
+                agent_index=spec["agent_index"],
+                agent_profile=spec["agent_profile"],
+            )
+            if validation["compatible"]:
+                compatible_artifacts.append(_artifact_tuple_from_paths(spec["paths"]))
+                continue
+            if validation.get("issue_type") == "missing":
+                signal_missing.append(validation)
+                continue
+            signal_invalid.append(validation)
+
+        if not signal_missing and not signal_invalid and compatible_artifacts:
+            artifacts[signal_name] = (
+                compatible_artifacts if len(compatible_artifacts) > 1 else compatible_artifacts[0]
+            )
+        if signal_missing:
+            missing_artifacts[signal_name] = signal_missing
+        if signal_invalid:
+            invalid_artifacts[signal_name] = signal_invalid
 
     return {
         "artifacts": artifacts,
-        "missing_signals": missing_signals,
+        "missing_artifacts": missing_artifacts,
+        "missing_signals": sorted(missing_artifacts),
         "invalid_artifacts": invalid_artifacts,
         "mismatched_signals": sorted(invalid_artifacts),
     }
@@ -1197,19 +1926,19 @@ def _collect_lstm_artifact_inventory(cfg) -> dict[str, object]:
 def _raise_lstm_artifact_requirements_error(cfg, inventory: dict[str, object]) -> None:
     """在禁止自动重训时抛出带明细的 artifact 错误。"""
     problem_lines: list[str] = []
-    for validation in inventory.get("invalid_artifacts", {}).values():
-        problem_lines.append(f"- {_format_lstm_artifact_issue(validation)}")
+    for validations in inventory.get("invalid_artifacts", {}).values():
+        for validation in validations:
+            problem_lines.append(f"- {_format_lstm_artifact_issue(validation)}")
 
-    for signal_name in inventory.get("missing_signals", []):
-        paths = _managed_lstm_artifact_paths(cfg, signal_name)
-        missing_validation = validate_lstm_artifact(cfg, signal_name, paths)
-        problem_lines.append(f"- {_format_lstm_artifact_issue(missing_validation)}")
+    for validations in inventory.get("missing_artifacts", {}).values():
+        for validation in validations:
+            problem_lines.append(f"- {_format_lstm_artifact_issue(validation)}")
 
     if not problem_lines:
         return
 
-    mismatch_count = len(inventory.get("invalid_artifacts", {}))
-    missing_count = len(inventory.get("missing_signals", []))
+    mismatch_count = sum(len(validations) for validations in inventory.get("invalid_artifacts", {}).values())
+    missing_count = sum(len(validations) for validations in inventory.get("missing_artifacts", {}).values())
     if mismatch_count and missing_count:
         exc_type = RuntimeError
     elif mismatch_count:
@@ -1221,6 +1950,97 @@ def _raise_lstm_artifact_requirements_error(cfg, inventory: dict[str, object]) -
         "Managed LSTM forecast artifacts are missing or incompatible:\n"
         + "\n".join(problem_lines)
     )
+
+
+def _extract_segment_value_arrays(
+    segment_frames: list[pd.DataFrame],
+    value_columns: Sequence[str],
+) -> list[np.ndarray]:
+    arrays: list[np.ndarray] = []
+    for segment_frame in segment_frames:
+        values = segment_frame.loc[:, list(value_columns)].to_numpy(dtype=np.float32)
+        if values.ndim == 2 and values.shape[1] == 1:
+            values = values.reshape(-1)
+        arrays.append(values)
+    return arrays
+
+
+def _aggregate_per_agent_evaluations(
+    signal_name: str,
+    evaluation_mode: str,
+    evaluations: Sequence[SignalForecastEvaluation],
+) -> SignalForecastEvaluation:
+    if not evaluations:
+        raise ValueError("Per-agent evaluation aggregation requires at least one evaluation.")
+
+    base_timestamps = np.asarray(evaluations[0].timestamps)
+    target_rows: list[np.ndarray] = []
+    prediction_rows: list[np.ndarray] = []
+    source_columns: list[str] = []
+
+    for evaluation in evaluations:
+        evaluation_timestamps = np.asarray(evaluation.timestamps)
+        if evaluation_timestamps.shape != base_timestamps.shape or not np.array_equal(
+            evaluation_timestamps,
+            base_timestamps,
+        ):
+            raise ValueError("Per-agent evaluation timestamps must align before aggregation.")
+        target_array = np.asarray(evaluation.target, dtype=np.float32)
+        prediction_array = np.asarray(evaluation.prediction, dtype=np.float32)
+        if target_array.ndim == 1:
+            target_rows.append(target_array)
+            prediction_rows.append(prediction_array)
+        elif target_array.ndim == 2 and target_array.shape[0] == 1:
+            target_rows.append(target_array.reshape(-1))
+            prediction_rows.append(prediction_array.reshape(-1))
+        else:
+            raise ValueError(
+                "Per-agent aggregation expects 1D evaluations or 2D evaluations with one source column."
+            )
+        source_columns.extend(str(column) for column in evaluation.source_columns)
+
+    target = np.stack(target_rows, axis=0).astype(np.float32)
+    prediction = np.stack(prediction_rows, axis=0).astype(np.float32)
+    return SignalForecastEvaluation(
+        signal_name=signal_name,
+        evaluation_mode=evaluation_mode,
+        timestamps=base_timestamps,
+        target=target,
+        prediction=prediction,
+        metrics=compute_forecast_metrics(target, prediction),
+        source_columns=tuple(source_columns),
+    )
+
+
+def _aggregate_training_history(agent_results: Sequence[dict[str, object]]) -> dict[str, list[float]]:
+    if not agent_results:
+        return {"train_loss": [], "val_loss": []}
+    train_curves = [
+        np.asarray(result["training"]["history"]["train_loss"], dtype=np.float32)
+        for result in agent_results
+    ]
+    val_curves = [
+        np.asarray(result["training"]["history"]["val_loss"], dtype=np.float32)
+        for result in agent_results
+    ]
+    return {
+        "train_loss": np.mean(np.stack(train_curves, axis=0), axis=0).astype(np.float32).tolist(),
+        "val_loss": np.mean(np.stack(val_curves, axis=0), axis=0).astype(np.float32).tolist(),
+    }
+
+
+def _summarize_per_agent_train_stats(agent_results: Sequence[dict[str, object]]) -> dict[str, object]:
+    stats_by_agent = {
+        str(result.get("agent_profile", result["columns"][0])): dict(result["train_stats"])
+        for result in agent_results
+    }
+    return {
+        "agent_stats": stats_by_agent,
+        "min": float(min(stat["min"] for stat in stats_by_agent.values())),
+        "max": float(max(stat["max"] for stat in stats_by_agent.values())),
+        "mean": float(np.mean([stat["mean"] for stat in stats_by_agent.values()])),
+        "std": float(np.mean([stat["std"] for stat in stats_by_agent.values()])),
+    }
 
 
 def _print_signal_evaluation_summary(
@@ -1236,6 +2056,291 @@ def _print_signal_evaluation_summary(
         f"open_loop_rmse={open_loop_evaluation.metrics['rmse']:.6f}, "
         f"open_loop_mae={open_loop_evaluation.metrics['mae']:.6f}"
     )
+
+
+def _train_single_signal_lstm(
+    local_cfg,
+    signal_name: str,
+    *,
+    source: SignalCsvSource,
+    settings: dict[str, object],
+    runtime_state: TorchRuntimeState,
+    overrides: dict[str, object] | None = None,
+    show_progress: bool = False,
+    agent_index: int | None = None,
+    agent_profile: str | None = None,
+) -> dict[str, object]:
+    seq_len = int(local_cfg.forecast.history_window)
+    pred_len = int(local_cfg.env.future_horizon)
+    physical_normalization_mode = resolve_signal_physical_normalization_mode(signal_name)
+    train_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="train")
+    test_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="test")
+    x_val: np.ndarray | None = None
+    y_val: np.ndarray | None = None
+
+    if int(settings["input_size"]) > 1:
+        _, train_segment_frames, value_columns = _load_signal_segment_frames_from_source(
+            source,
+            signal_name,
+            split="train",
+            drop_warmup=True,
+        )
+        split = temporal_split_segment_frames(
+            train_segment_frames,
+            train_ratio=float(local_cfg.forecast.lstm_train_ratio),
+            val_ratio=float(local_cfg.forecast.lstm_val_ratio),
+            seq_len=seq_len,
+            pred_len=pred_len,
+        )
+        train_values_only = _extract_segment_value_arrays(split["train_segments"], source.value_columns)
+        train_stats = summarize_signal_values(train_values_only)
+        scaler = fit_signal_scaler(
+            train_values_only,
+            physical_scale_by_column=train_physical_scale,
+        )
+        x_train, y_train = build_supervised_windows_from_time_feature_frames(
+            split["train_segments"],
+            value_column=source.value_columns[0],
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            time_feature_mode=str(settings["time_feature_mode"]),
+        )
+        x_val, y_val = build_supervised_windows_from_time_feature_frames(
+            split["val_segments"],
+            value_column=source.value_columns[0],
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            time_feature_mode=str(settings["time_feature_mode"]),
+        )
+        train_loader = make_tensor_loader(
+            x_train,
+            y_train,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=True,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        val_loader = make_tensor_loader(
+            x_val,
+            y_val,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=False,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        train_segment_count = len(split["train_segments"])
+        val_segment_count = len(split["val_segments"])
+    else:
+        _, train_segments, value_columns = _load_signal_segments_from_source(
+            source,
+            signal_name,
+            split="train",
+            drop_warmup=True,
+        )
+        split = temporal_split_segments(
+            train_segments,
+            train_ratio=float(local_cfg.forecast.lstm_train_ratio),
+            val_ratio=float(local_cfg.forecast.lstm_val_ratio),
+            seq_len=seq_len,
+            pred_len=pred_len,
+        )
+        train_values_only = split["train_segments"]
+        train_stats = summarize_signal_values(train_values_only)
+        scaler = fit_signal_scaler(
+            train_values_only,
+            physical_scale_by_column=train_physical_scale,
+        )
+        train_loader = make_matrix_loader(
+            train_values_only,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=True,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        val_loader = make_matrix_loader(
+            split["val_segments"],
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=False,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        train_segment_count = len(train_values_only)
+        val_segment_count = len(split["val_segments"])
+
+    progress_name = signal_name if agent_profile is None else f"{signal_name}[{agent_profile}]"
+    print(
+        f"[forecast] {progress_name}: train_segments={train_segment_count}, "
+        f"val_segments={val_segment_count}, columns={list(value_columns)}, "
+        f"train_stats={train_stats}, settings={settings}"
+    )
+
+    model = LSTMForecastModel(
+        hidden_size=int(local_cfg.forecast.lstm_hidden_size),
+        num_layers=int(local_cfg.forecast.lstm_num_layers),
+        dropout=float(local_cfg.forecast.lstm_dropout),
+        pred_len=pred_len,
+        input_size=int(settings["input_size"]),
+    )
+    result = train_lstm_model(
+        model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=int(local_cfg.forecast.lstm_epochs),
+        lr=float(local_cfg.forecast.lstm_lr),
+        device=runtime_state,
+        show_progress=show_progress,
+        progress_label=f"{progress_name} epochs",
+    )
+
+    hybrid_config = {
+        "postprocess_mode": str(settings["postprocess_mode"]),
+        "baseline_mode": str(settings["baseline_mode"]),
+        "blend_weight": None,
+        "optimized_metric": None,
+    }
+    if (
+        _normalize_signal_name(signal_name) == "load"
+        and str(settings["postprocess_mode"]) == POSTPROCESS_MODE_BASELINE_BLEND
+    ):
+        if x_val is None or y_val is None:
+            raise ValueError("Load hybrid validation requires supervised validation windows.")
+        physical_scale = None
+        if train_physical_scale is not None:
+            physical_scale = float(np.asarray(train_physical_scale, dtype=np.float32).reshape(-1)[0])
+        hybrid_config = _select_load_blend_weight_from_validation(
+            model=result["model"],
+            x_val=x_val,
+            y_val=y_val,
+            scaler=scaler,
+            physical_scale=physical_scale,
+            runtime_state=runtime_state,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            candidate_weights=settings["blend_candidates"],
+        )
+
+    artifact_paths = _managed_lstm_artifact_paths(
+        local_cfg,
+        signal_name,
+        agent_index=agent_index if str(settings["model_mode"]) == "per_agent" else None,
+    )
+    artifact_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
+    saved_paths = save_lstm_forecaster_artifacts(
+        model_path=artifact_paths["model_path"],
+        state_dict=result["best_state_dict"],
+        scaler=scaler,
+        seq_len=seq_len,
+        pred_len=pred_len,
+        hidden_size=int(local_cfg.forecast.lstm_hidden_size),
+        num_layers=int(local_cfg.forecast.lstm_num_layers),
+        dropout=float(local_cfg.forecast.lstm_dropout),
+        signal_name=signal_name,
+        future_horizon=pred_len,
+        artifact_format=resolve_signal_artifact_format(signal_name, settings),
+        normalization_mode=physical_normalization_mode,
+        source_signature=build_lstm_source_signature(local_cfg, signal_name),
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+        postprocess_mode=str(hybrid_config["postprocess_mode"]),
+        baseline_mode=str(hybrid_config["baseline_mode"]),
+        blend_weight=hybrid_config["blend_weight"],
+        optimized_metric=hybrid_config["optimized_metric"],
+    )
+
+    refreshed_validation = validate_lstm_artifact(
+        local_cfg,
+        signal_name,
+        artifact_paths,
+        overrides=overrides,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+    )
+    if not refreshed_validation["compatible"]:
+        raise RuntimeError(
+            "Saved LSTM artifact failed validation after training: "
+            f"{_format_lstm_artifact_issue(refreshed_validation)}"
+        )
+    print(f"[forecast] artifact refreshed at {saved_paths['model_path']}")
+
+    online_evaluation = evaluate_signal_online_one_week(
+        source,
+        result["model"],
+        signal_name=signal_name,
+        scaler=scaler,
+        seq_len=seq_len,
+        pred_len=pred_len,
+        hidden_size=int(local_cfg.forecast.lstm_hidden_size),
+        num_layers=int(local_cfg.forecast.lstm_num_layers),
+        dropout=float(local_cfg.forecast.lstm_dropout),
+        device=runtime_state.device,
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=test_physical_scale,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+        postprocess_mode=str(hybrid_config["postprocess_mode"]),
+        baseline_mode=str(hybrid_config["baseline_mode"]),
+        blend_weight=hybrid_config["blend_weight"],
+        optimized_metric=hybrid_config["optimized_metric"],
+    )
+    open_loop_evaluation = evaluate_signal_open_loop_one_week(
+        source,
+        result["model"],
+        signal_name=signal_name,
+        scaler=scaler,
+        seq_len=seq_len,
+        pred_len=pred_len,
+        hidden_size=int(local_cfg.forecast.lstm_hidden_size),
+        num_layers=int(local_cfg.forecast.lstm_num_layers),
+        dropout=float(local_cfg.forecast.lstm_dropout),
+        device=runtime_state.device,
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=test_physical_scale,
+        agent_index=agent_index,
+        agent_profile=agent_profile,
+        postprocess_mode=str(hybrid_config["postprocess_mode"]),
+        baseline_mode=str(hybrid_config["baseline_mode"]),
+        blend_weight=hybrid_config["blend_weight"],
+        optimized_metric=hybrid_config["optimized_metric"],
+    )
+    _print_signal_evaluation_summary(progress_name, online_evaluation, open_loop_evaluation)
+
+    return {
+        "signal_name": signal_name,
+        "source": source,
+        "columns": value_columns,
+        "segment_summary": split["segment_summaries"],
+        "train_stats": train_stats,
+        "artifact_paths": saved_paths,
+        "training": result,
+        "evaluation": online_evaluation,
+        "online_evaluation": online_evaluation,
+        "open_loop_evaluation": open_loop_evaluation,
+        "settings": settings,
+        "runtime": runtime_state,
+        "agent_index": agent_index,
+        "agent_profile": agent_profile,
+        "hybrid": hybrid_config,
+    }
 
 
 def train_signal_lstm(
@@ -1262,6 +2367,59 @@ def train_signal_lstm(
         )
     if int(local_cfg.env.future_horizon) <= 0:
         raise ValueError("LSTM forecast training requires cfg.env.future_horizon > 0.")
+    if signal_name == "load" and str(settings["model_mode"]) == "per_agent":
+        profiles = [str(profile) for profile in local_cfg.data.agent_profiles][: len(source.value_columns)]
+        agent_results: list[dict[str, object]] = []
+        for agent_index, agent_profile in enumerate(profiles):
+            agent_source = select_signal_source_columns(source, [agent_index])
+            agent_results.append(
+                _train_single_signal_lstm(
+                    local_cfg,
+                    signal_name,
+                    source=agent_source,
+                    settings=settings,
+                    runtime_state=runtime_state,
+                    overrides=overrides,
+                    show_progress=show_progress,
+                    agent_index=agent_index,
+                    agent_profile=agent_profile,
+                )
+            )
+
+        online_evaluation = _aggregate_per_agent_evaluations(
+            signal_name,
+            "online_aligned",
+            [result["online_evaluation"] for result in agent_results],
+        )
+        open_loop_evaluation = _aggregate_per_agent_evaluations(
+            signal_name,
+            "open_loop",
+            [result["open_loop_evaluation"] for result in agent_results],
+        )
+        return {
+            "signal_name": signal_name,
+            "source": source,
+            "columns": tuple(source.value_columns),
+            "segment_summary": {str(result["agent_profile"]): result["segment_summary"] for result in agent_results},
+            "train_stats": _summarize_per_agent_train_stats(agent_results),
+            "artifact_paths": [result["artifact_paths"] for result in agent_results],
+            "training": {
+                "history": _aggregate_training_history(agent_results),
+                "best_val_loss": float(
+                    np.mean([result["training"]["best_val_loss"] for result in agent_results], dtype=np.float32)
+                ),
+            },
+            "evaluation": online_evaluation,
+            "online_evaluation": online_evaluation,
+            "open_loop_evaluation": open_loop_evaluation,
+            "settings": settings,
+            "runtime": runtime_state,
+            "agent_results": agent_results,
+            "hybrid": {
+                str(result["agent_profile"]): dict(result["hybrid"])
+                for result in agent_results
+            },
+        }
 
     _, train_segments, value_columns = _load_signal_segments_from_source(
         source,
@@ -1269,6 +2427,9 @@ def train_signal_lstm(
         split="train",
         drop_warmup=True,
     )
+    physical_normalization_mode = resolve_signal_physical_normalization_mode(signal_name)
+    train_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="train")
+    test_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="test")
 
     seq_len = int(local_cfg.forecast.history_window)
     pred_len = int(local_cfg.env.future_horizon)
@@ -1289,12 +2450,16 @@ def train_signal_lstm(
         f"train_stats={train_stats}, settings={settings}"
     )
 
-    scaler = fit_signal_scaler(train_values_only)
+    scaler = fit_signal_scaler(
+        train_values_only,
+        physical_scale_by_column=train_physical_scale,
+    )
     train_loader = make_matrix_loader(
         train_values_only,
         seq_len=seq_len,
         pred_len=pred_len,
         scaler=scaler,
+        physical_scale_by_column=train_physical_scale,
         batch_size=int(local_cfg.forecast.lstm_batch_size),
         shuffle=True,
         device=runtime_state.device,
@@ -1305,6 +2470,7 @@ def train_signal_lstm(
         seq_len=seq_len,
         pred_len=pred_len,
         scaler=scaler,
+        physical_scale_by_column=train_physical_scale,
         batch_size=int(local_cfg.forecast.lstm_batch_size),
         shuffle=False,
         device=runtime_state.device,
@@ -1316,6 +2482,7 @@ def train_signal_lstm(
         num_layers=int(local_cfg.forecast.lstm_num_layers),
         dropout=float(local_cfg.forecast.lstm_dropout),
         pred_len=pred_len,
+        input_size=int(settings["input_size"]),
     )
     result = train_lstm_model(
         model,
@@ -1328,11 +2495,7 @@ def train_signal_lstm(
         progress_label=f"{signal_name} epochs",
     )
 
-    artifact_paths = get_default_lstm_artifact_paths(
-        root=forecast_artifact_root(local_cfg),
-        signal_name=signal_name,
-        future_horizon=pred_len,
-    )
+    artifact_paths = _managed_lstm_artifact_paths(local_cfg, signal_name)
     artifact_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
     saved_paths = save_lstm_forecaster_artifacts(
         model_path=artifact_paths["model_path"],
@@ -1345,6 +2508,12 @@ def train_signal_lstm(
         dropout=float(local_cfg.forecast.lstm_dropout),
         signal_name=signal_name,
         future_horizon=pred_len,
+        artifact_format=resolve_signal_artifact_format(signal_name, settings),
+        normalization_mode=physical_normalization_mode,
+        source_signature=build_lstm_source_signature(local_cfg, signal_name),
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
     )
 
     refreshed_validation = validate_lstm_artifact(local_cfg, signal_name, artifact_paths, overrides=overrides)
@@ -1366,7 +2535,14 @@ def train_signal_lstm(
         num_layers=int(local_cfg.forecast.lstm_num_layers),
         dropout=float(local_cfg.forecast.lstm_dropout),
         device=runtime_state.device,
-    )
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=test_physical_scale,
+        postprocess_mode=str(settings["postprocess_mode"]),
+        baseline_mode=str(settings["baseline_mode"]),
+        )
     open_loop_evaluation = evaluate_signal_open_loop_one_week(
         source,
         result["model"],
@@ -1378,6 +2554,13 @@ def train_signal_lstm(
         num_layers=int(local_cfg.forecast.lstm_num_layers),
         dropout=float(local_cfg.forecast.lstm_dropout),
         device=runtime_state.device,
+        input_size=int(settings["input_size"]),
+        time_feature_mode=str(settings["time_feature_mode"]),
+        model_mode=str(settings["model_mode"]),
+        physical_normalization_mode=physical_normalization_mode,
+        physical_scale_by_column=test_physical_scale,
+        postprocess_mode=str(settings["postprocess_mode"]),
+        baseline_mode=str(settings["baseline_mode"]),
     )
     _print_signal_evaluation_summary(signal_name, online_evaluation, open_loop_evaluation)
 
@@ -1394,12 +2577,22 @@ def train_signal_lstm(
         "open_loop_evaluation": open_loop_evaluation,
         "settings": settings,
         "runtime": runtime_state,
+        "hybrid": {
+            "postprocess_mode": str(settings["postprocess_mode"]),
+            "baseline_mode": str(settings["baseline_mode"]),
+            "blend_weight": None,
+            "optimized_metric": None,
+        },
     }
 
 
-def collect_available_lstm_artifacts(cfg) -> dict[str, tuple[str, str, str]]:
+def collect_available_lstm_artifacts(
+    cfg,
+    *,
+    overrides_by_signal: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     """只返回与当前配置兼容的 artifact。"""
-    return dict(_collect_lstm_artifact_inventory(cfg)["artifacts"])
+    return dict(_collect_lstm_artifact_inventory(cfg, overrides_by_signal=overrides_by_signal)["artifacts"])
 
 
 def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> dict[str, object]:
@@ -1422,8 +2615,8 @@ def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> d
         if signal_name in inventory_before["artifacts"]:
             continue
 
-        invalid_validation = inventory_before["invalid_artifacts"].get(signal_name)
-        if invalid_validation is not None:
+        invalid_validations = inventory_before["invalid_artifacts"].get(signal_name, [])
+        for invalid_validation in invalid_validations:
             print(f"[forecast] artifact mismatch detected: {_format_lstm_artifact_issue(invalid_validation)}")
 
         source = resolve_signal_csv_source(data_dir, signal_name, cfg=cfg)
@@ -1437,7 +2630,7 @@ def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> d
         print(f"[forecast] retraining signal={signal_name}")
         trained_result = train_signal_lstm(cfg, signal_name, device=device)
         trained_results.append(trained_result)
-        if invalid_validation is not None:
+        if invalid_validations:
             retrained_signals.append(signal_name)
         else:
             trained_signals.append(signal_name)
@@ -1535,29 +2728,37 @@ def plot_signal_training_report(
     figsize: tuple[float, float] = (18.0, 4.8),
 ):
     """绘制 loss、对齐式在线预测，以及可选的开环 stress test 结果。"""
-    history = result["training"]["history"]
-    evaluation = result["evaluation"]
-    open_loop_evaluation = result.get("open_loop_evaluation")
-    signal_name = str(result["signal_name"])
+    rows = list(result.get("agent_results") or [result])
+    subplot_count = 3 if any(item.get("open_loop_evaluation") is not None for item in rows) else 2
+    figure, axes = plt.subplots(
+        len(rows),
+        subplot_count,
+        figsize=(figsize[0], figsize[1] * len(rows)),
+        squeeze=False,
+    )
 
-    subplot_count = 3 if open_loop_evaluation is not None else 2
-    figure, axes = plt.subplots(1, subplot_count, figsize=figsize)
-    axes = list(np.atleast_1d(axes))
+    for row_idx, item in enumerate(rows):
+        history = item["training"]["history"]
+        evaluation = item["evaluation"]
+        open_loop_evaluation = item.get("open_loop_evaluation")
+        label = str(item["signal_name"])
+        if item.get("agent_profile") is not None:
+            label = f"{label}[{item['agent_profile']}]"
 
-    axes[0].plot(history["train_loss"], label="Train", linewidth=1.6)
-    axes[0].plot(history["val_loss"], label="Validation", linewidth=1.6)
-    axes[0].set_title(f"{signal_name} - Loss")
-    axes[0].set_xlabel("epoch")
-    axes[0].set_ylabel("MSE")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend(loc="upper right")
+        axes[row_idx, 0].plot(history["train_loss"], label="Train", linewidth=1.6)
+        axes[row_idx, 0].plot(history["val_loss"], label="Validation", linewidth=1.6)
+        axes[row_idx, 0].set_title(f"{label} - Loss")
+        axes[row_idx, 0].set_xlabel("epoch")
+        axes[row_idx, 0].set_ylabel("MSE")
+        axes[row_idx, 0].grid(True, alpha=0.3)
+        axes[row_idx, 0].legend(loc="upper right")
 
-    _plot_evaluation_curve(axes[1], evaluation)
-    axes[1].set_xlabel("timestamp")
+        _plot_evaluation_curve(axes[row_idx, 1], evaluation)
+        axes[row_idx, 1].set_xlabel("timestamp")
 
-    if open_loop_evaluation is not None:
-        _plot_evaluation_curve(axes[2], open_loop_evaluation)
-        axes[2].set_xlabel("timestamp")
+        if open_loop_evaluation is not None:
+            _plot_evaluation_curve(axes[row_idx, 2], open_loop_evaluation)
+            axes[row_idx, 2].set_xlabel("timestamp")
 
     figure.tight_layout()
     return figure

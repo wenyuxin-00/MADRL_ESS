@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 import warnings
 
 import matplotlib
@@ -37,24 +38,49 @@ def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(
             SimpleNamespace(key="r_safe_trafo", label="- r_safe_trafo (trafo penalty)", color="maroon", sign=-1),
         ]
     )
+    reward_summary = {
+        "episodes": [1],
+        "episode_total_reward": [1.0],
+        "components": {
+            "r_cost": {"label": "+ r_cost (incremental cost)", "color": "green", "sign": 1, "values": [0.15]},
+            "r_throughput": {"label": "+ r_throughput (throughput bonus)", "color": "teal", "sign": 1, "values": [0.03]},
+        },
+        "aggregates": {"grid_safety_penalty": [-0.3]},
+    }
 
-    with warnings.catch_warnings(record=True) as caught:
+    with warnings.catch_warnings(record=True) as caught, patch(
+        "scripts.plots.reward_plots.plt.show",
+        side_effect=AssertionError("plot_reward_decomposition should not call plt.show()"),
+    ), patch(
+        "scripts.plots.plots.plt.show",
+        side_effect=AssertionError("plot_last_k_episodes_price_action_soc should not call plt.show()"),
+    ):
         warnings.simplefilter("always")
-        plot_reward_decomposition(
+        reward_figure = plot_reward_decomposition(
             history=history,
             episode_rewards=[1.0],
             reward_fn=reward_fn,
             title="Training Reward Decomposition",
             window=1,
         )
-        plot_last_k_episodes_price_action_soc(
+        summary_figure = plot_reward_decomposition(
+            reward_summary=reward_summary,
+            title="External Training Reward Decomposition",
+            window=1,
+        )
+        episode_figure = plot_last_k_episodes_price_action_soc(
             history=history,
             k=1,
             n_agents=2,
             title_prefix="Eval",
         )
 
-    plt.close("all")
+    assert reward_figure is not None
+    assert summary_figure is not None
+    assert episode_figure is not None
+    plt.close(reward_figure)
+    plt.close(summary_figure)
+    plt.close(episode_figure)
     glyph_warnings = [str(item.message) for item in caught if "Glyph" in str(item.message)]
     assert glyph_warnings == []
 

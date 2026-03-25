@@ -24,6 +24,7 @@ def test_key_notebooks_are_utf8_without_bom():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_paths = [
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
+        repo_root / "notebooks" / "forecast" / "sfh14_forecast.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
         repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
     ]
@@ -36,6 +37,7 @@ def test_key_notebooks_do_not_contain_placeholder_text():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_paths = [
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
+        repo_root / "notebooks" / "forecast" / "sfh14_forecast.ipynb",
         repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb",
         repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
     ]
@@ -49,6 +51,7 @@ def test_key_notebooks_do_not_contain_placeholder_text():
 def test_notebook_defaults_stay_portable():
     repo_root = Path(__file__).resolve().parents[1]
     forecast_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb")
+    sfh14_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "sfh14_forecast.ipynb")
     madrl_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb")
     grid_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb")
 
@@ -56,12 +59,16 @@ def test_notebook_defaults_stay_portable():
     assert 'device_request = None' in forecast_text
     assert 'require_cuda = False' in forecast_text
     assert 'cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16"]' in forecast_text
+    assert 'while project_root != project_root.parent and not (project_root / "configs").exists()' in sfh14_text
+    assert "retrain = True" in sfh14_text
+    assert 'cfg.forecast.target_signals = ["load"]' in sfh14_text
+    assert 'analysis_output_dir = project_root / "artifacts" / "forecast" / "experiments" / "sfh14" / "analysis" / "sfh14_load"' in sfh14_text
 
     assert 'experiment_controls = {' in madrl_text
     assert 'data_controls = {' in madrl_text
     assert 'train_controls = {' in madrl_text
     assert '"vec_env_type": "subproc"' in madrl_text
-    assert '"prediction_mode": "perfect"' in madrl_text
+    assert '"prediction_mode": "normal"' in madrl_text
     assert '"launch_mode": "external"' in madrl_text
     assert 'recommended_gpu_fast_num_envs()' in madrl_text
     assert 'bool(torch.cuda.is_available())' in madrl_text

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 from predictors.base import Forecaster
 
@@ -28,12 +29,17 @@ class PerfectForecaster(Forecaster):
         if episode_signals is not None:
             self.set_episode(episode_signals)
 
-    def set_episode(self, episode_signals: dict[str, np.ndarray] | np.ndarray) -> None:
+    def set_episode(
+        self,
+        episode_signals: dict[str, np.ndarray] | np.ndarray,
+        episode_meta: dict[str, object] | None = None,
+    ) -> None:
         """在 ``env.reset()`` 时注入当前回合的完整信号数据。
 
         参数:
             episode_signals: 信号字典 ``{name: array}``，或单个数组（默认视为 price）。
         """
+        del episode_meta
         if isinstance(episode_signals, dict):
             self._episode_signals = {
                 name: np.asarray(values, dtype=np.float32)
@@ -50,6 +56,7 @@ class PerfectForecaster(Forecaster):
         horizon: int,
         *,
         signal_name: str = "price",
+        history_timestamps: list[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
         """从预存的真实信号中切片返回未来值。
 
@@ -61,6 +68,7 @@ class PerfectForecaster(Forecaster):
         返回:
             一维信号返回 ``(horizon,)``，二维信号返回 ``(n_agents, horizon)``。
         """
+        del history_timestamps
         if horizon <= 0:
             return np.zeros((0,), dtype=np.float32)
         # 校验请求的信号是否已注入

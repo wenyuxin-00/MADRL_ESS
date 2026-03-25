@@ -19,6 +19,7 @@ class EnvConfig:
     num_agents: int = 3
     episode_limit: int = 96 * 2
     future_horizon: int = 24
+    battery_mode: str = "from_pv"
     battery_capacity: float = 5.0
     max_charge_rate: float = 2.5
     efficiency: float = 0.95
@@ -27,8 +28,9 @@ class EnvConfig:
     soc_min: float = 0.05
     soc_max: float = 0.95
     soc_target: float = 0.5
-    storage_power_scale: float = 12.0
-    storage_capacity_scale: float = 12.0
+    from_pv_power_ratio: float = 0.5
+    from_pv_duration_hours: float = 2.5
+
 
 @dataclass
 class RewardConfig:
@@ -94,6 +96,11 @@ class ForecastConfig:
     type: str = "perfect"
     target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
     history_window: int = 96
+    load_model_mode: str = "per_agent"
+    load_time_feature_mode: str = "hour_week_year"
+    load_hybrid_mode: str = "baseline_blend"
+    load_baseline_mode: str = "last_value"
+    load_blend_candidates: tuple[float, ...] = field(default_factory=lambda: tuple(i / 10.0 for i in range(11)))
     lstm_hidden_size: int = 64
     lstm_num_layers: int = 1
     lstm_dropout: float = 0.0
@@ -137,7 +144,7 @@ class DataConfig:
     pv_capacity_kw: list[float] = field(default_factory=list)
     load_scale: list[float] = field(default_factory=list)
     pv_scale: list[float] = field(default_factory=list)
-    storage_scale: list[float] = field(default_factory=list)
+
 
 @dataclass
 class TrainConfig:

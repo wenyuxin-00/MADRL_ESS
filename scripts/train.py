@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,24 @@ from scripts.utils.project_paths import get_tensorboard_run_dir
 from scripts.utils.replay_buffer import ReplayBuffer
 
 
+def _iso_timestamp(value: datetime) -> str:
+    return value.astimezone().isoformat(timespec="seconds")
+
+
+def _estimate_remaining_seconds(
+    *,
+    interaction_step: int,
+    target_interactions: int,
+    elapsed_seconds: float,
+) -> float | None:
+    remaining_interactions = max(int(target_interactions) - int(interaction_step), 0)
+    if remaining_interactions == 0:
+        return 0.0
+    if interaction_step <= 0 or elapsed_seconds <= 0.0:
+        return None
+    return float(remaining_interactions * (elapsed_seconds / float(interaction_step)))
+
+
 def _build_progress_payload(
     *,
     interaction_step: int,
@@ -34,10 +53,25 @@ def _build_progress_payload(
     update_time_total: float,
     update_calls: int,
     run_start: float,
+    started_at: datetime,
     status: str,
     error_message: str = "",
 ) -> dict[str, object]:
-    elapsed = max(time.perf_counter() - run_start, 1e-6)
+    now = datetime.now().astimezone()
+    elapsed = max(time.perf_counter() - run_start, 0.0)
+    safe_elapsed = max(elapsed, 1e-6)
+    remaining_seconds = _estimate_remaining_seconds(
+        interaction_step=interaction_step,
+        target_interactions=target_interactions,
+        elapsed_seconds=elapsed,
+    )
+    if status != "running" and int(interaction_step) >= int(target_interactions):
+        remaining_seconds = 0.0
+        estimated_end_time = now
+    elif remaining_seconds is None:
+        estimated_end_time = None
+    else:
+        estimated_end_time = now + timedelta(seconds=float(remaining_seconds))
     return {
         "status": str(status),
         "error_message": str(error_message),
@@ -46,11 +80,15 @@ def _build_progress_payload(
         "episodes_completed": int(episodes_completed),
         "total_steps": int(total_steps),
         "avg_reward": float(avg_reward),
-        "steps_per_sec": float(total_steps / elapsed),
+        "steps_per_sec": float(total_steps / safe_elapsed),
         "avg_action_ms_per_iter": float(1000.0 * action_time_total / max(interaction_step, 1)),
         "avg_env_ms_per_iter": float(1000.0 * env_step_time_total / max(interaction_step, 1)),
         "avg_update_ms_per_call": float(1000.0 * update_time_total / max(update_calls, 1)),
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "started_at": _iso_timestamp(started_at),
+        "updated_at": _iso_timestamp(now),
+        "elapsed_seconds": float(round(elapsed, 3)),
+        "remaining_seconds": None if remaining_seconds is None else float(round(remaining_seconds, 3)),
+        "estimated_end_time": None if estimated_end_time is None else _iso_timestamp(estimated_end_time),
     }
 
 
@@ -95,11 +133,14 @@ class TrainRunner:
         self.agent_performance = dict(getattr(self.agent_n[0], "performance_summary", {}))
 
         self.history: deque = deque(maxlen=2000)
-        self.episode_rewards = []
+        self.episode_rewards: list[float] = []
         self.total_steps = 0
         self.episodes_completed = 0
         self.noise_std = float(self.cfg.train.noise_std_init)
-        self.perf_summary = {}
+        self.perf_summary: dict[str, Any] = {}
+        self.run_metadata: dict[str, Any] = {}
+        self.reward_component_meta: list[Any] = []
+        self.episode_reward_components: dict[str, list[float]] = {}
         self._closed = False
 
     def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
@@ -166,6 +207,39 @@ class TrainRunner:
         self.writer.close()
         self._closed = True
 
+    def build_reward_summary(self) -> dict[str, Any]:
+        episode_indices = list(range(1, len(self.episode_rewards) + 1))
+        components: dict[str, dict[str, Any]] = {}
+        for meta in self.reward_component_meta:
+            key = str(meta.key)
+            values = [float(value) for value in self.episode_reward_components.get(key, [])]
+            components[key] = {
+                "label": str(getattr(meta, "label", meta.key)),
+                "color": str(getattr(meta, "color", "#111827")),
+                "sign": int(getattr(meta, "sign", 0)),
+                "values": values,
+            }
+
+        aggregates: dict[str, list[float]] = {}
+        grid_safety_keys = [
+            str(meta.key)
+            for meta in self.reward_component_meta
+            if str(meta.key).startswith("r_safe_") and int(getattr(meta, "sign", 0)) == -1
+        ]
+        if grid_safety_keys and all(key in components for key in grid_safety_keys):
+            num_episodes = len(episode_indices)
+            aggregates["grid_safety_penalty"] = [
+                float(sum(self.episode_reward_components[key][episode_idx] for key in grid_safety_keys))
+                for episode_idx in range(num_episodes)
+            ]
+
+        return {
+            "episodes": episode_indices,
+            "episode_total_reward": [float(value) for value in self.episode_rewards],
+            "components": components,
+            "aggregates": aggregates,
+        }
+
     def run(self) -> int:
         target_interactions = (
             self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit)
@@ -174,6 +248,7 @@ class TrainRunner:
         interaction_step = 0
         episodes_completed = 0
         noise_decay = float(self.cfg.train.resolved_noise_std_decay())
+        started_at = datetime.now().astimezone()
         run_start = time.perf_counter()
         action_time_total = 0.0
         env_step_time_total = 0.0
@@ -182,7 +257,9 @@ class TrainRunner:
         error_message = ""
         run_status = "completed"
 
-        reward_metas = self.env_evaluate.reward_fn.component_meta
+        reward_metas = list(self.env_evaluate.reward_fn.component_meta)
+        self.reward_component_meta = reward_metas
+        self.episode_reward_components = {str(meta.key): [] for meta in reward_metas}
         progress_postfix_interval = max(1, int(getattr(self.cfg.train, "progress_postfix_interval", 10)))
         progress_state_path = getattr(self.cfg.runtime, "progress_state_path", None)
         active_histories = [
@@ -206,7 +283,11 @@ class TrainRunner:
 
         def emit_progress(*, force: bool = False) -> None:
             nonlocal pending_progress_steps, last_progress_emit_step
-            should_refresh = force or interaction_step % progress_postfix_interval == 0 or interaction_step >= target_interactions
+            should_refresh = (
+                force
+                or interaction_step % progress_postfix_interval == 0
+                or interaction_step >= target_interactions
+            )
             if not should_refresh:
                 return
             if force and pending_progress_steps == 0 and last_progress_emit_step == interaction_step:
@@ -215,6 +296,12 @@ class TrainRunner:
                 progress.update(pending_progress_steps)
                 pending_progress_steps = 0
             avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+            elapsed_seconds = max(time.perf_counter() - run_start, 0.0)
+            remaining_seconds = _estimate_remaining_seconds(
+                interaction_step=interaction_step,
+                target_interactions=target_interactions,
+                elapsed_seconds=elapsed_seconds,
+            )
             last_progress_emit_step = interaction_step
             progress.set_postfix(
                 {
@@ -223,6 +310,7 @@ class TrainRunner:
                     "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
                     "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
                     "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
+                    "eta": "--" if remaining_seconds is None else f"{remaining_seconds:.1f}s",
                 }
             )
             if progress_state_path is not None:
@@ -239,6 +327,7 @@ class TrainRunner:
                         update_time_total=update_time_total,
                         update_calls=update_calls,
                         run_start=run_start,
+                        started_at=started_at,
                         status="running",
                     ),
                 )
@@ -257,6 +346,7 @@ class TrainRunner:
                     update_time_total=0.0,
                     update_calls=0,
                     run_start=run_start,
+                    started_at=started_at,
                     status="running",
                 ),
             )
@@ -302,10 +392,16 @@ class TrainRunner:
                     if not bool(info.get("episode_done", False)):
                         continue
 
-                    self.history.append(active_histories[env_idx])
+                    episode_history = active_histories[env_idx]
+                    self.history.append(episode_history)
 
                     episode_reward = float(active_episode_rewards[env_idx])
                     self.episode_rewards.append(episode_reward)
+                    for meta in reward_metas:
+                        episode_component = float(
+                            np.sum(np.asarray(episode_history[f"{meta.key}_sum"], dtype=np.float32))
+                        )
+                        self.episode_reward_components[str(meta.key)].append(episode_component)
                     self.writer.add_scalar(
                         "train_episode_total_reward",
                         episode_reward,
@@ -365,13 +461,21 @@ class TrainRunner:
                         update_time_total=update_time_total,
                         update_calls=update_calls,
                         run_start=run_start,
+                        started_at=started_at,
                         status=run_status,
                         error_message=error_message,
                     ),
                 )
             progress.close()
 
+        finished_at = datetime.now().astimezone()
         total_elapsed = max(time.perf_counter() - run_start, 1e-6)
+        self.run_metadata = {
+            "started_at": _iso_timestamp(started_at),
+            "finished_at": _iso_timestamp(finished_at),
+            "elapsed_seconds": float(round(total_elapsed, 3)),
+            "estimated_end_time": _iso_timestamp(finished_at),
+        }
         self.perf_summary = {
             "seed": self.seed,
             "runtime_mode": str(self.cfg.runtime.execution_mode),

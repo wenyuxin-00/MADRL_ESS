@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,6 +17,7 @@ PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
 ORACLE_EVAL_MODE = "oracle_eval"
 FORECAST_EVAL_MODE = "forecast_eval"
+VALID_BATTERY_MODES = {"fixed", "from_pv"}
 
 
 def normalize_prediction_mode(prediction_mode: str) -> str:
@@ -50,6 +52,59 @@ def normalize_agent_scale(scale: float | list[float] | tuple[float, ...], *, n_a
     return values.astype(np.float32).tolist()
 
 
+def normalize_battery_mode(battery_mode: str) -> str:
+    normalized = str(battery_mode).strip().lower()
+    if normalized not in VALID_BATTERY_MODES:
+        raise ValueError(
+            f"battery mode must be one of {sorted(VALID_BATTERY_MODES)}, got '{battery_mode}'."
+        )
+    return normalized
+
+
+def resolve_battery_controls(cfg, battery_controls: Mapping[str, object] | None = None) -> dict[str, object]:
+    controls = dict(battery_controls or {})
+    resolved = {
+        "mode": normalize_battery_mode(controls.get("mode", getattr(cfg.env, "battery_mode", "from_pv"))),
+        "from_pv_power_ratio": float(
+            controls.get("from_pv_power_ratio", getattr(cfg.env, "from_pv_power_ratio", 0.5))
+        ),
+        "from_pv_duration_hours": float(
+            controls.get("from_pv_duration_hours", getattr(cfg.env, "from_pv_duration_hours", 2.5))
+        ),
+        "battery_capacity": float(controls.get("battery_capacity", cfg.env.battery_capacity)),
+        "max_charge_rate": float(controls.get("max_charge_rate", cfg.env.max_charge_rate)),
+        "efficiency": float(controls.get("efficiency", cfg.env.efficiency)),
+        "init_soc": float(controls.get("init_soc", cfg.env.init_soc)),
+        "soc_min": float(controls.get("soc_min", cfg.env.soc_min)),
+        "soc_max": float(controls.get("soc_max", cfg.env.soc_max)),
+        "soc_target": float(controls.get("soc_target", cfg.env.soc_target)),
+    }
+    if resolved["battery_capacity"] <= 0.0:
+        raise ValueError(f"battery_capacity must be positive, got {resolved['battery_capacity']}.")
+    if resolved["max_charge_rate"] <= 0.0:
+        raise ValueError(f"max_charge_rate must be positive, got {resolved['max_charge_rate']}.")
+    if resolved["efficiency"] <= 0.0 or resolved["efficiency"] > 1.0:
+        raise ValueError(f"efficiency must be in (0, 1], got {resolved['efficiency']}.")
+    if resolved["from_pv_power_ratio"] <= 0.0:
+        raise ValueError(
+            f"from_pv_power_ratio must be positive, got {resolved['from_pv_power_ratio']}."
+        )
+    if resolved["from_pv_duration_hours"] <= 0.0:
+        raise ValueError(
+            "from_pv_duration_hours must be positive, "
+            f"got {resolved['from_pv_duration_hours']}."
+        )
+    if not 0.0 <= resolved["soc_min"] <= resolved["soc_max"] <= 1.0:
+        raise ValueError(
+            f"Invalid SoC range: soc_min={resolved['soc_min']}, soc_max={resolved['soc_max']}."
+        )
+    if not 0.0 <= resolved["init_soc"] <= 1.0:
+        raise ValueError(f"init_soc must be in [0, 1], got {resolved['init_soc']}.")
+    if not 0.0 <= resolved["soc_target"] <= 1.0:
+        raise ValueError(f"soc_target must be in [0, 1], got {resolved['soc_target']}.")
+    return resolved
+
+
 def resolve_forecast_backend(prediction_mode: str, future_horizon: int) -> str:
     mode = normalize_prediction_mode(prediction_mode)
     if mode == PERFECT_PREDICTION_MODE:
@@ -78,8 +133,8 @@ def apply_notebook_experiment_settings(
     agent_profiles: list[str],
     load_scale: float | list[float],
     pv_scale: float | list[float],
-    storage_scale: float | list[float],
     future_horizon: int,
+    battery_controls: Mapping[str, object] | None = None,
     train_year: int | None = None,
     test_year: int | None = None,
 ) -> dict[str, object]:
@@ -107,11 +162,17 @@ def apply_notebook_experiment_settings(
     cfg.data.test_end_date = normalize_date_input(test_end_date)
     cfg.data.load_scale = normalize_agent_scale(load_scale, n_agents=cfg.env.num_agents, name="load_scale")
     cfg.data.pv_scale = normalize_agent_scale(pv_scale, n_agents=cfg.env.num_agents, name="pv_scale")
-    cfg.data.storage_scale = normalize_agent_scale(
-        storage_scale,
-        n_agents=cfg.env.num_agents,
-        name="storage_scale",
-    )
+    resolved_battery_controls = resolve_battery_controls(cfg, battery_controls)
+    cfg.env.battery_mode = resolved_battery_controls["mode"]
+    cfg.env.from_pv_power_ratio = resolved_battery_controls["from_pv_power_ratio"]
+    cfg.env.from_pv_duration_hours = resolved_battery_controls["from_pv_duration_hours"]
+    cfg.env.battery_capacity = resolved_battery_controls["battery_capacity"]
+    cfg.env.max_charge_rate = resolved_battery_controls["max_charge_rate"]
+    cfg.env.efficiency = resolved_battery_controls["efficiency"]
+    cfg.env.init_soc = resolved_battery_controls["init_soc"]
+    cfg.env.soc_min = resolved_battery_controls["soc_min"]
+    cfg.env.soc_max = resolved_battery_controls["soc_max"]
+    cfg.env.soc_target = resolved_battery_controls["soc_target"]
 
     if cfg.data.pv_capacity_kw and len(cfg.data.pv_capacity_kw) != cfg.env.num_agents:
         cfg.data.pv_capacity_kw = []
@@ -132,7 +193,7 @@ def apply_notebook_experiment_settings(
         "agent_profiles": list(cfg.data.agent_profiles),
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
-        "storage_scale": list(cfg.data.storage_scale),
+        "battery": dict(resolved_battery_controls),
         "train_year": int(cfg.data.train_year),
         "test_year": int(cfg.data.test_year),
     }

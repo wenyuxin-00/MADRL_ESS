@@ -29,6 +29,7 @@ class LSTMForecastModel(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.23,
         pred_len: int = 4,
+        input_size: int = 1,
     ):
         """初始化 LSTM 预测模型。
 
@@ -40,7 +41,7 @@ class LSTMForecastModel(nn.Module):
         """
         super().__init__()
         self.lstm = nn.LSTM(
-            input_size=1,
+            input_size=int(input_size),
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,

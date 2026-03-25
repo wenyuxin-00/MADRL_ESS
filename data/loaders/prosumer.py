@@ -78,7 +78,6 @@ class ProsumerDataset(BaseEpisodeDataset):
         pv_capacity_kw: Sequence[float] | None = None,
         load_scale: Sequence[float] | float | None = None,
         pv_scale: Sequence[float] | float | None = None,
-        storage_scale: Sequence[float] | float | None = None,
         node_ids: Sequence[int] | None = None,
     ) -> None:
         self.data_dir = _resolve_dataset_dir(data_dir)
@@ -95,11 +94,6 @@ class ProsumerDataset(BaseEpisodeDataset):
         self.pv_capacity_kw = None if pv_capacity_kw is None or len(pv_capacity_kw) == 0 else list(pv_capacity_kw)
         self.load_scale = _coerce_scale_vector(load_scale, name="load_scale", n_agents=self.n_agents)
         self.pv_scale = _coerce_scale_vector(pv_scale, name="pv_scale", n_agents=self.n_agents)
-        self.storage_scale = _coerce_scale_vector(
-            storage_scale,
-            name="storage_scale",
-            n_agents=self.n_agents,
-        )
         self.node_ids = list(node_ids) if node_ids is not None else list(range(self.n_agents))
 
         self._signals: dict[str, np.ndarray] = {}
@@ -266,9 +260,6 @@ class ProsumerDataset(BaseEpisodeDataset):
         if load.shape != pv.shape:
             raise ValueError(f"Load and PV shapes must match, got {load.shape} vs {pv.shape}")
 
-        ess_power_kw = (pv_peak_kw * np.float32(0.5) * self.storage_scale).astype(np.float32)
-        ess_capacity_kwh = (ess_power_kw * np.float32(2.5)).astype(np.float32)
-
         self._timestamps = base_timestamps
         self._signals = {
             "price": price,
@@ -292,11 +283,8 @@ class ProsumerDataset(BaseEpisodeDataset):
             "load_components": list(self.load_components),
             "pv_reference": self.pv_reference,
             "pv_peak_kw": pv_peak_kw.copy(),
-            "ess_power_kw": ess_power_kw.copy(),
-            "ess_capacity_kwh": ess_capacity_kwh.copy(),
             "load_scale": self.load_scale.copy(),
             "pv_scale": self.pv_scale.copy(),
-            "storage_scale": self.storage_scale.copy(),
             "price_unit": "EUR/kWh",
             "power_unit": "kW",
             "energy_unit": "kWh",
