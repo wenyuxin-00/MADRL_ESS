@@ -31,7 +31,6 @@ def _make_prosumer_cfg(tmp_path) -> ExperimentConfig:
     cfg.obs.local_features = ["time", "soc"]
     cfg.obs.sequence_features = ["price", "load", "pv"]
     cfg.forecast.target_signals = ["price", "load", "pv"]
-    cfg.reward.type = "grid_composite"
     cfg.grid.agent_bus_ids = [10, 6, 12]
     return cfg
 

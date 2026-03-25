@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from envs.observation.default_builder import DefaultObservationBuilder
+from envs.observation.normalization import build_observation_normalizer
 
 DEFAULT_OBS_BUILDER_NAME = "default"
 SUPPORTED_OBS_BUILDERS = (DEFAULT_OBS_BUILDER_NAME,)
@@ -23,4 +24,5 @@ def build_obs_builder(cfg) -> DefaultObservationBuilder:
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
         adjacency_type=cfg.obs.adjacency_type,
+        normalizer=build_observation_normalizer(cfg),
     )

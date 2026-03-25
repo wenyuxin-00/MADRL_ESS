@@ -1,8 +1,12 @@
+from datetime import datetime
 from pathlib import Path
 
 from scripts.checkpoints import (
     LATEST_CHECKPOINT_MANIFEST,
     build_checkpoint_manifest,
+    build_training_run_label,
+    build_training_run_paths,
+    find_latest_training_run,
     infer_latest_checkpoint_tag,
     resolve_checkpoint_to_load,
     write_checkpoint_manifest,
@@ -53,6 +57,52 @@ def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
     assert infer_latest_checkpoint_tag(model_dir, "MATD3") == 5
     resolved = resolve_checkpoint_to_load(model_dir, "MATD3")
     assert resolved["saved_episode_tag"] == 5
+
+
+def test_build_training_run_label_uses_expected_tokens():
+    label = build_training_run_label(
+        algorithm="MATD3",
+        prediction_mode="perfect",
+        experiment_name="Grid Mainline",
+        train_episodes=100,
+        max_train_steps=None,
+        timestamp="20260325_101500",
+    )
+
+    assert label == "matd3_perfect_grid_mainline_ep100_20260325_101500"
+
+
+def test_find_latest_training_run_discovers_newest_run(tmp_path):
+    checkpoint_root = tmp_path / "checkpoints"
+    older = build_training_run_paths(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="perfect",
+        experiment_name="grid_mainline",
+        train_episodes=50,
+        max_train_steps=None,
+        timestamp=datetime(2026, 3, 25, 10, 0, 0),
+    )
+    newer = build_training_run_paths(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="perfect",
+        experiment_name="grid_mainline",
+        train_episodes=100,
+        max_train_steps=None,
+        timestamp=datetime(2026, 3, 25, 10, 30, 0),
+    )
+    Path(older["model_root"]).mkdir(parents=True, exist_ok=True)
+    Path(newer["model_root"]).mkdir(parents=True, exist_ok=True)
+
+    resolved = find_latest_training_run(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="perfect",
+        experiment_name="grid_mainline",
+    )
+
+    assert resolved == Path(newer["model_root"])
 
 
 def test_legacy_compare_notebooks_are_removed():

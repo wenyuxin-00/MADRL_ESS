@@ -8,11 +8,11 @@ import warnings
 from typing import Any
 
 from data.loaders.registry import build_dataset
-from envs.grid.deployments import build_agent_deployments
 from envs.grid.core.grid_core import GridCore
+from envs.grid.deployments import build_agent_deployments
 from envs.grid_env import GridEnv
 from envs.observation.default_builder import DefaultObservationBuilder
-from envs.rewards import get_reward_fn
+from envs.rewards import NormalReward
 from envs.subproc_vec_env import SubprocVecEnv
 from envs.vec_env import DummyVecEnv
 from models import validate_and_finalize_model_config
@@ -61,7 +61,7 @@ def build_env(
     if dataset is None:
         dataset = build_dataset(cfg, mode=mode)
     if reward_fn is None:
-        reward_fn = get_reward_fn(cfg.reward.type, cfg)
+        reward_fn = NormalReward(cfg)
     if forecaster is None:
         forecaster = build_forecaster(cfg)
     if obs_builder is None:

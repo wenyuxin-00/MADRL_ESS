@@ -32,7 +32,6 @@ class GridStepResult:
 
     # Full-grid safety diagnostics used by the global reward.
     bus_v_excess: np.ndarray = field(default_factory=_empty_f32)
-    bus_v_signed_indicator: np.ndarray = field(default_factory=_empty_f32)
     line_excess: np.ndarray = field(default_factory=_empty_f32)
     trafo_excess: np.ndarray = field(default_factory=_empty_f32)
     psi_v_raw: float = 0.0

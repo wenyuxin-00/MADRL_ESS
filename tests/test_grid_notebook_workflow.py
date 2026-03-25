@@ -2,10 +2,14 @@ import numpy as np
 import pytest
 
 from scripts.utils.grid_notebook_workflow import (
+    FORECAST_EVAL_MODE,
     NORMAL_PREDICTION_MODE,
+    ORACLE_EVAL_MODE,
     PERFECT_PREDICTION_MODE,
     apply_notebook_experiment_settings,
+    collect_controller_rollout,
     normalize_date_input,
+    resolve_evaluation_mode,
     resolve_forecast_backend,
 )
 from tests.support.helpers import make_case_dir, make_smoke_config
@@ -16,6 +20,11 @@ def test_resolve_forecast_backend_handles_mainline_modes():
     assert resolve_forecast_backend(NORMAL_PREDICTION_MODE, 24) == "lstm"
     with pytest.raises(ValueError, match="future_horizon > 0"):
         resolve_forecast_backend(NORMAL_PREDICTION_MODE, 0)
+
+
+def test_resolve_evaluation_mode_maps_prediction_modes():
+    assert resolve_evaluation_mode(PERFECT_PREDICTION_MODE) == ORACLE_EVAL_MODE
+    assert resolve_evaluation_mode(NORMAL_PREDICTION_MODE) == FORECAST_EVAL_MODE
 
 
 def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_path):
@@ -36,7 +45,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
         test_year=2019,
     )
 
-    assert cfg.obs.local_features == ["time", "soc"]
+    assert cfg.obs.local_features == ["calendar_time", "soc"]
     assert cfg.obs.sequence_features == ["price", "load", "pv"]
     assert cfg.env.future_horizon == 24
     assert cfg.forecast.type == "lstm"
@@ -46,6 +55,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     assert np.allclose(cfg.data.pv_scale, [0.5, 0.5])
     assert np.allclose(cfg.data.storage_scale, [1.0, 1.5])
     assert summary["prediction_mode"] == "normal"
+    assert summary["evaluation_mode"] == FORECAST_EVAL_MODE
     assert summary["forecast_backend"] == "lstm"
     assert summary["agent_profiles"] == ["SFH12", "SFH14"]
 
@@ -53,4 +63,21 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
 def test_normalize_date_input_accepts_compact_dates():
     assert normalize_date_input(20190101) == "2019-01-01"
     assert normalize_date_input("2019-01-30") == "2019-01-30"
-    assert normalize_date_input(None) is None
+    assert normalize_date_input(None) is None
+
+
+def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_rollout_voltage")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    rollout = collect_controller_rollout(
+        cfg,
+        label="ZeroPolicy",
+        action_fn=lambda env, obs: [np.zeros(1, dtype=np.float32) for _ in range(env.n)],
+    )
+
+    assert not rollout.grid_df.empty
+    assert {"bus_id", "vm_pu", "is_agent_bus"}.issubset(rollout.grid_df.columns)
+    assert rollout.meta["agent_bus_ids"] == cfg.grid.agent_bus_ids
+    assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
+    assert rollout.meta["v_max_pu"] == cfg.grid.v_max_pu

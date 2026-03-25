@@ -75,48 +75,11 @@ class GridEnv(gym.Env):
         self.init_soc = float(np.clip(self.init_soc, self.soc_min, self.soc_max))
 
         self._grid_cfg = cfg.grid
-        self._w_v_pen = float(cfg.grid.w_v_pen)
-        self._w_line_pen = float(cfg.grid.w_line_pen)
-        self._w_trafo_pen = float(cfg.grid.w_trafo_pen)
-        self._reward_payload_defaults = {
-            "w_global_safe": float(getattr(cfg.reward, "w_global_safe", 1.0)),
-            "w_sens_credit": float(getattr(cfg.reward, "w_sens_credit", 0.2)),
-            "sens_credit_scale": float(getattr(cfg.reward, "sens_credit_scale", 0.05)),
-        }
-
         self._train_compact_info = bool(getattr(self._grid_cfg, "train_compact_info", True))
-        self._sensitivity_delta_kw = float(getattr(self._grid_cfg, "sensitivity_delta_kw", 1.0))
-        self._sensitivity_max_staleness = int(
-            getattr(self._grid_cfg, "sensitivity_max_staleness_steps", 32)
-        )
-        self._sensitivity_trigger_action_delta = float(
-            getattr(self._grid_cfg, "sensitivity_trigger_action_delta_kw", 1.0)
-        )
-        self._sensitivity_trigger_load_delta = float(
-            getattr(self._grid_cfg, "sensitivity_trigger_load_delta_kw", 2.0)
-        )
-        self._sensitivity_trigger_psi_delta = float(
-            getattr(self._grid_cfg, "sensitivity_trigger_psi_delta", 0.001)
-        )
-        self._sensitivity_trigger_on_pf_recovery = bool(
-            getattr(self._grid_cfg, "sensitivity_trigger_on_pf_recovery", True)
-        )
-        self._sensitivity_trigger_on_violation_change = bool(
-            getattr(self._grid_cfg, "sensitivity_trigger_on_violation_change", True)
-        )
 
-        self._sensitivity_cache: dict[str, np.ndarray] | None = None
-        self._sensitivity_steps_since_update = 0
-        self._prev_e_bat: np.ndarray | None = None
-        self._prev_net_load: np.ndarray | None = None
-        self._prev_psi_total = 0.0
-        self._prev_pf_converged = True
-        self._prev_has_violations = False
-        self._last_sensitivity_trigger = ""
+        from envs.rewards import NormalReward
 
-        from envs.rewards import get_reward_fn
-
-        self.reward_fn = reward_fn if reward_fn is not None else get_reward_fn(cfg.reward.type, cfg)
+        self.reward_fn = reward_fn if reward_fn is not None else NormalReward(cfg)
 
         if dataset is None:
             from data.loaders.registry import build_dataset
@@ -134,13 +97,21 @@ class GridEnv(gym.Env):
 
         if obs_builder is None:
             from envs.observation.default_builder import DefaultObservationBuilder
+            from envs.observation.normalization import build_observation_normalizer
 
             obs_builder = DefaultObservationBuilder(
                 local_features=cfg.obs.local_features,
                 sequence_features=cfg.obs.sequence_features,
                 future_horizon=self.future_horizon,
                 adjacency_type=cfg.obs.adjacency_type,
+                normalizer=build_observation_normalizer(cfg),
             )
+        elif getattr(obs_builder, "normalizer", None) is None and bool(
+            getattr(cfg.obs, "normalization_enabled", False)
+        ):
+            from envs.observation.normalization import build_observation_normalizer
+
+            obs_builder.normalizer = build_observation_normalizer(cfg)
         self.obs_builder = obs_builder
         self.observation_schema = self.obs_builder.get_schema(self.n)
         self.observation_layout = self.obs_builder.get_layout(self.n)
@@ -286,65 +257,6 @@ class GridEnv(gym.Env):
             "n_trafos": int(getattr(self._grid_core, "n_trafos", 0)),
         }
 
-    def _reset_sensitivity_state(self) -> None:
-        self._sensitivity_cache = None
-        self._sensitivity_steps_since_update = 0
-        self._prev_e_bat = None
-        self._prev_net_load = None
-        self._prev_psi_total = 0.0
-        self._prev_pf_converged = True
-        self._prev_has_violations = False
-        self._last_sensitivity_trigger = ""
-
-    def _try_update_sensitivity(self, p_batt_kw: np.ndarray, base_load_kw: np.ndarray) -> None:
-        try:
-            self._sensitivity_cache = self._grid_core.compute_sensitivity_snapshot(
-                p_batt_kw,
-                base_load_kw,
-                delta_kw=self._sensitivity_delta_kw,
-            )
-        except Exception:
-            pass
-
-    def _should_update_sensitivity(
-        self,
-        pf_converged: bool,
-        psi_v_raw: float,
-        psi_line_raw: float,
-        psi_trafo_raw: float,
-        e_bat: np.ndarray,
-        net_load: np.ndarray,
-    ) -> tuple[bool, str]:
-        if self._sensitivity_cache is None:
-            return True, "no_cache"
-
-        if self._sensitivity_trigger_on_pf_recovery and pf_converged and not self._prev_pf_converged:
-            return True, "pf_recovery"
-
-        psi_total = psi_v_raw + psi_line_raw + psi_trafo_raw
-        if self._sensitivity_trigger_on_violation_change:
-            has_violations = psi_total > 0.0
-            if has_violations != self._prev_has_violations:
-                return True, "violation_change"
-
-        if abs(psi_total - self._prev_psi_total) > self._sensitivity_trigger_psi_delta:
-            return True, "psi_delta"
-
-        if self._prev_e_bat is not None:
-            action_delta = float(np.max(np.abs(e_bat - self._prev_e_bat)))
-            if action_delta > self._sensitivity_trigger_action_delta:
-                return True, "action_delta"
-
-        if self._prev_net_load is not None:
-            load_delta = float(np.max(np.abs(net_load - self._prev_net_load)))
-            if load_delta > self._sensitivity_trigger_load_delta:
-                return True, "load_delta"
-
-        if self._sensitivity_steps_since_update >= self._sensitivity_max_staleness:
-            return True, "staleness"
-
-        return False, ""
-
     def reset(
         self,
         episode_idx: int | None = None,
@@ -378,10 +290,6 @@ class GridEnv(gym.Env):
         base_load = np.asarray(self.ep_load[0], dtype=np.float32)
         base_pv = np.asarray(self.ep_pv[0], dtype=np.float32)
         self._grid_core.reset(base_load, base_pv)
-
-        self._reset_sensitivity_state()
-        base_net = (base_load - base_pv).astype(np.float32)
-        self._try_update_sensitivity(np.zeros(self.n, dtype=np.float32), base_net)
 
         return self.obs_builder.build(self), self._build_reset_info(int(episode_idx))
 
@@ -426,7 +334,7 @@ class GridEnv(gym.Env):
         load_t = np.asarray(self.get_signal_step("load", t), dtype=np.float32)
         pv_t = np.asarray(self.ep_pv[t], dtype=np.float32)
         base_net_load = (load_t - pv_t).astype(np.float32)
-        grid_power = (base_net_load + 0.0).astype(np.float32)
+        grid_power = base_net_load.copy()
         return {
             "price_t": price_t,
             "load_t": load_t,
@@ -486,49 +394,21 @@ class GridEnv(gym.Env):
             "psi_line_raw": float(pf_result.psi_line_raw),
             "psi_trafo_raw": float(pf_result.psi_trafo_raw),
             "bus_v_excess": pf_result.bus_v_excess,
-            "bus_v_signed_indicator": pf_result.bus_v_signed_indicator,
             "line_excess": pf_result.line_excess,
             "trafo_excess": pf_result.trafo_excess,
-            "sensitivity_snapshot": self._sensitivity_cache,
         }
 
     def _build_reward_state(self, step_state: dict[str, Any]) -> dict[str, Any]:
         return {
             "e_bat_req": step_state["e_bat_req"],
             "e_bat": step_state["e_bat"],
-            "soc_t": step_state["soc_t"],
-            "soc_next": step_state["soc_next"],
-            "e_t": step_state["e_t"],
-            "e_next": step_state["e_next"],
-            "e_min": step_state["e_min"],
-            "e_max": step_state["e_max"],
             "p_max": step_state["p_max"],
             "price_t": step_state["price_t"],
             "net_load_t": step_state["base_net_load"],
-            "mu_t": step_state["mu_t"],
-            "mu_next": step_state["mu_next"],
-            "gamma": self.gamma,
             "dt": self.dt,
-            "vm_pu": step_state["vm_pu"],
-            "agent_vm_pu": step_state["agent_vm_pu"],
             "v_violation": step_state["v_violation"],
-            "line_violation": step_state["line_violation"],
-            "trafo_violation": step_state["trafo_violation"],
-            "l_violation": step_state["l_violation"],
-            "w_v_pen": self._w_v_pen,
-            "w_line_pen": self._w_line_pen,
-            "w_trafo_pen": self._w_trafo_pen,
-            "pf_converged": step_state["pf_converged"],
-            "pf_error": step_state["pf_error"],
             "psi_v_raw": step_state["psi_v_raw"],
-            "psi_line_raw": step_state["psi_line_raw"],
             "psi_trafo_raw": step_state["psi_trafo_raw"],
-            "bus_v_excess": step_state["bus_v_excess"],
-            "bus_v_signed_indicator": step_state["bus_v_signed_indicator"],
-            "line_excess": step_state["line_excess"],
-            "trafo_excess": step_state["trafo_excess"],
-            "sensitivity_snapshot": step_state["sensitivity_snapshot"],
-            **self._reward_payload_defaults,
         }
 
     def _build_violation_counts(self, step_state: dict[str, Any]) -> tuple[int, int, int]:
@@ -605,32 +485,6 @@ class GridEnv(gym.Env):
                 info.pop(key, None)
         return info
 
-    def _maybe_refresh_sensitivity(self, step_state: dict[str, Any]) -> None:
-        self._sensitivity_steps_since_update += 1
-        should_update, trigger_reason = self._should_update_sensitivity(
-            pf_converged=bool(step_state["pf_converged"]),
-            psi_v_raw=float(step_state["psi_v_raw"]),
-            psi_line_raw=float(step_state["psi_line_raw"]),
-            psi_trafo_raw=float(step_state["psi_trafo_raw"]),
-            e_bat=np.asarray(step_state["e_bat"], dtype=np.float32),
-            net_load=np.asarray(step_state["base_net_load"], dtype=np.float32),
-        )
-        if should_update:
-            self._try_update_sensitivity(step_state["e_bat"], step_state["base_net_load"])
-            self._sensitivity_steps_since_update = 0
-            self._last_sensitivity_trigger = trigger_reason
-
-        self._prev_e_bat = np.asarray(step_state["e_bat"], dtype=np.float32).copy()
-        self._prev_net_load = np.asarray(step_state["base_net_load"], dtype=np.float32).copy()
-        psi_total = (
-            float(step_state["psi_v_raw"])
-            + float(step_state["psi_line_raw"])
-            + float(step_state["psi_trafo_raw"])
-        )
-        self._prev_psi_total = psi_total
-        self._prev_pf_converged = bool(step_state["pf_converged"])
-        self._prev_has_violations = psi_total > 0.0
-
     def step(
         self, actions: list[np.ndarray]
     ) -> tuple[dict[str, np.ndarray], list[float], list[bool], list[bool], dict[str, Any]]:
@@ -644,8 +498,6 @@ class GridEnv(gym.Env):
         reward_per_agent, components = self.reward_fn.compute(reward_state)
         reward = np.asarray(reward_per_agent, dtype=np.float32)
 
-        self._maybe_refresh_sensitivity(step_state)
-
         self.soc = storage_state["soc_next"]
         self.cur_step += 1
         done = self.cur_step >= self.episode_length
@@ -657,5 +509,3 @@ class GridEnv(gym.Env):
 
     def close(self) -> None:
         pass
-
-

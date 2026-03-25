@@ -39,7 +39,8 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
         project_root=tmp_path,
         experiment_controls={"seed": 7, "algorithm": "MATD3"},
         data_controls={"prediction_mode": "perfect"},
-        train_controls={"profile": "gpu_fast", "launch_mode": "external"},
+        train_controls={"profile": "gpu_fast", "launch_mode": "external", "train_episodes": 100},
+        checkpoint_controls={"experiment_name": "grid_mainline"},
         env_name="GridTrainMainline",
         run_number=3,
     )
@@ -48,7 +49,11 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
     assert Path(launch["experiment_controls_path"]).exists()
     assert Path(launch["data_controls_path"]).exists()
     assert Path(launch["train_controls_path"]).exists()
+    assert Path(launch["checkpoint_controls_path"]).exists()
+    assert Path(launch["meta_dir"]).exists()
+    assert Path(launch["model_root"]).parts[-4:-1] == ("MATD3", "perfect", "grid_mainline")
     assert command[:3] == ["python", "-m", "scripts.run_train_mainline"]
+    assert "--checkpoint-controls" in command
     assert "--env-name" in command
     assert "GridTrainMainline" in command
     assert "--run-number" in command
@@ -100,20 +105,25 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "policy_update_freq": 2,
         "use_noise_decay": True,
         "show_progress": False,
-        "progress_postfix_interval": 1,
+        "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
+    }
+    checkpoint_controls = {
+        "experiment_name": "grid_mainline",
+        "checkpoint_root": str(tmp_path / "checkpoints"),
     }
 
     experiment_path = controls_dir / "experiment_controls.json"
     data_path = controls_dir / "data_controls.json"
     train_path = controls_dir / "train_controls.json"
+    checkpoint_path = controls_dir / "checkpoint_controls.json"
     result_path = controls_dir / "result.json"
-    save_dir = tmp_path / "checkpoints"
 
     experiment_path.write_text(json.dumps(experiment_controls), encoding="utf-8")
     data_path.write_text(json.dumps(data_controls), encoding="utf-8")
     train_path.write_text(json.dumps(train_controls), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps(checkpoint_controls), encoding="utf-8")
 
     command = [
         sys.executable,
@@ -125,10 +135,10 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         str(data_path),
         "--train-controls",
         str(train_path),
+        "--checkpoint-controls",
+        str(checkpoint_path),
         "--data-dir",
         str(data_dir),
-        "--save-dir",
-        str(save_dir),
         "--result-json",
         str(result_path),
         "--env-name",
@@ -147,8 +157,14 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert completed.returncode == 0, completed.stderr or completed.stdout
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["algorithm"] == "MATD3"
+    assert result["prediction_mode"] == "perfect"
+    assert result["evaluation_mode"] == "oracle_eval"
     assert result["vec_env"] == "SubprocVecEnv"
     assert result["device"] == "cpu"
+    assert Path(result["model_root"]).exists()
+    assert Path(result["meta_dir"]).exists()
+    assert Path(result["log_path"]).parent == Path(result["meta_dir"])
+    assert (Path(result["meta_dir"]) / "progress.json").exists()
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]

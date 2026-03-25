@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +20,44 @@ from scripts.recorders.episode_recorder import append_step_record, init_episode_
 from scripts.utils.nested import to_torch_nested
 from scripts.utils.project_paths import get_tensorboard_run_dir
 from scripts.utils.replay_buffer import ReplayBuffer
+
+
+def _build_progress_payload(
+    *,
+    interaction_step: int,
+    target_interactions: int,
+    episodes_completed: int,
+    total_steps: int,
+    avg_reward: float,
+    action_time_total: float,
+    env_step_time_total: float,
+    update_time_total: float,
+    update_calls: int,
+    run_start: float,
+    status: str,
+    error_message: str = "",
+) -> dict[str, object]:
+    elapsed = max(time.perf_counter() - run_start, 1e-6)
+    return {
+        "status": str(status),
+        "error_message": str(error_message),
+        "interaction_step": int(interaction_step),
+        "target_interactions": int(target_interactions),
+        "episodes_completed": int(episodes_completed),
+        "total_steps": int(total_steps),
+        "avg_reward": float(avg_reward),
+        "steps_per_sec": float(total_steps / elapsed),
+        "avg_action_ms_per_iter": float(1000.0 * action_time_total / max(interaction_step, 1)),
+        "avg_env_ms_per_iter": float(1000.0 * env_step_time_total / max(interaction_step, 1)),
+        "avg_update_ms_per_call": float(1000.0 * update_time_total / max(update_calls, 1)),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _write_progress_snapshot(path: str | os.PathLike[str], payload: dict[str, object]) -> None:
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 class TrainRunner:
@@ -139,9 +179,12 @@ class TrainRunner:
         env_step_time_total = 0.0
         update_time_total = 0.0
         update_calls = 0
+        error_message = ""
+        run_status = "completed"
 
         reward_metas = self.env_evaluate.reward_fn.component_meta
         progress_postfix_interval = max(1, int(getattr(self.cfg.train, "progress_postfix_interval", 10)))
+        progress_state_path = getattr(self.cfg.runtime, "progress_state_path", None)
         active_histories = [
             init_episode_record(
                 n_agents=self.cfg.env.num_agents,
@@ -158,6 +201,65 @@ class TrainRunner:
             unit="iters",
             disable=not bool(getattr(self.cfg.train, "show_progress", True)),
         )
+        pending_progress_steps = 0
+        last_progress_emit_step = -1
+
+        def emit_progress(*, force: bool = False) -> None:
+            nonlocal pending_progress_steps, last_progress_emit_step
+            should_refresh = force or interaction_step % progress_postfix_interval == 0 or interaction_step >= target_interactions
+            if not should_refresh:
+                return
+            if force and pending_progress_steps == 0 and last_progress_emit_step == interaction_step:
+                return
+            if pending_progress_steps > 0:
+                progress.update(pending_progress_steps)
+                pending_progress_steps = 0
+            avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+            last_progress_emit_step = interaction_step
+            progress.set_postfix(
+                {
+                    "avg_reward": f"{avg_reward:.2f}",
+                    "steps/s": f"{self.total_steps / max(time.perf_counter() - run_start, 1e-6):.1f}",
+                    "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
+                    "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
+                    "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
+                }
+            )
+            if progress_state_path is not None:
+                _write_progress_snapshot(
+                    progress_state_path,
+                    _build_progress_payload(
+                        interaction_step=interaction_step,
+                        target_interactions=target_interactions,
+                        episodes_completed=episodes_completed,
+                        total_steps=self.total_steps,
+                        avg_reward=avg_reward,
+                        action_time_total=action_time_total,
+                        env_step_time_total=env_step_time_total,
+                        update_time_total=update_time_total,
+                        update_calls=update_calls,
+                        run_start=run_start,
+                        status="running",
+                    ),
+                )
+
+        if progress_state_path is not None:
+            _write_progress_snapshot(
+                progress_state_path,
+                _build_progress_payload(
+                    interaction_step=0,
+                    target_interactions=target_interactions,
+                    episodes_completed=0,
+                    total_steps=0,
+                    avg_reward=0.0,
+                    action_time_total=0.0,
+                    env_step_time_total=0.0,
+                    update_time_total=0.0,
+                    update_calls=0,
+                    run_start=run_start,
+                    status="running",
+                ),
+            )
 
         try:
             obs, _ = self.env.reset()
@@ -193,6 +295,7 @@ class TrainRunner:
 
                 obs = next_obs
                 interaction_step += 1
+                pending_progress_steps += 1
                 self.total_steps += self.cfg.train.num_envs
 
                 for env_idx, info in enumerate(info_list):
@@ -240,23 +343,32 @@ class TrainRunner:
                         update_calls += 1
                     update_time_total += time.perf_counter() - update_start
 
-                progress.update(1)
-                if (
-                    interaction_step % progress_postfix_interval == 0
-                    or interaction_step == target_interactions
-                ):
-                    avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
-                    elapsed = max(time.perf_counter() - run_start, 1e-6)
-                    progress.set_postfix(
-                        {
-                            "avg_reward": f"{avg_reward:.2f}",
-                            "steps/s": f"{self.total_steps / elapsed:.1f}",
-                            "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
-                            "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
-                            "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
-                        }
-                    )
+                emit_progress()
+        except Exception as exc:
+            run_status = "failed"
+            error_message = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
+            emit_progress(force=True)
+            if progress_state_path is not None:
+                avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+                _write_progress_snapshot(
+                    progress_state_path,
+                    _build_progress_payload(
+                        interaction_step=interaction_step,
+                        target_interactions=target_interactions,
+                        episodes_completed=episodes_completed,
+                        total_steps=self.total_steps,
+                        avg_reward=avg_reward,
+                        action_time_total=action_time_total,
+                        env_step_time_total=env_step_time_total,
+                        update_time_total=update_time_total,
+                        update_calls=update_calls,
+                        run_start=run_start,
+                        status=run_status,
+                        error_message=error_message,
+                    ),
+                )
             progress.close()
 
         total_elapsed = max(time.perf_counter() - run_start, 1e-6)

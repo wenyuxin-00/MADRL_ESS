@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def test_grid_notebook_exposes_external_mainline_and_inline_debug_paths():
+def test_grid_notebook_exposes_external_mainline_and_reloadable_test_paths():
     repo_root = Path(__file__).resolve().parents[1]
     notebook = json.loads(
         (repo_root / "notebooks" / "madrl" / "train_madrl_grid.ipynb").read_text(encoding="utf-8")
@@ -21,6 +21,7 @@ def test_grid_notebook_exposes_external_mainline_and_inline_debug_paths():
     assert "collect_madrl_rollout(" in notebook_text
     assert "collect_mpc_rollout(" in notebook_text
     assert "plot_test_rollout(" in notebook_text
+    assert "plot_test_voltage_profile(" in notebook_text
     assert "plot_operating_cost_comparison(" in notebook_text
     assert "recommended_gpu_fast_num_envs()" in notebook_text
     assert "run_external_train_mainline(" in notebook_text
@@ -33,6 +34,11 @@ def test_grid_notebook_exposes_external_mainline_and_inline_debug_paths():
     assert '"update_interval": 1' in notebook_text
     assert '"updates_per_step": 2' in notebook_text
     assert '"policy_update_freq": 2' in notebook_text
+    assert 'checkpoint_controls = {' in notebook_text
+    assert 'test_controls = {' in notebook_text
+    assert "prepare_madrl_run_paths(" in notebook_text
+    assert "resolve_madrl_model_root(" in notebook_text
+    assert "write_notebook_run_metadata(" in notebook_text
     assert 'if launch_mode == "external":' in notebook_text
     assert 'if launch_mode == "inline":' in notebook_text
     assert "runner = build_runner(" in notebook_text

@@ -32,24 +32,31 @@ class EnvConfig:
 
 @dataclass
 class RewardConfig:
-    """Reward selection and weights."""
+    """Reward weights for the default NormalReward."""
 
-    type: str = "grid_composite"
-    w_pen: float = 6.0
-    w_soc: float = 0.30
-    lambda_bonus: float = 0.001
-    w_global_safe: float = 1.0
-    w_sens_credit: float = 0.2
-    sens_credit_scale: float = 0.05
+    w_action_pen: float = 6.0
+    lambda_throughput: float = 0.001
+    w_voltage_pen: float = 10.0
+    w_trafo_pen: float = 10.0
 
 
 @dataclass
 class ObsConfig:
     """Observation-builder settings."""
 
-    local_features: list[str] = field(default_factory=lambda: ["time", "soc"])
+    local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
     sequence_features: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
     adjacency_type: str = "identity"
+    normalization_enabled: bool = True
+    price_normalization: str = "robust_tanh"
+    load_normalization: str = "robust_tanh"
+    pv_normalization: str = "capacity"
+    soc_normalization: str = "linear_pm1"
+    normalization_clip_low_quantile: float = 0.01
+    normalization_clip_high_quantile: float = 0.99
+    price_tanh_scale: float = 2.0
+    load_tanh_scale: float = 3.0
+    pv_tanh_scale: float = 2.0
 
 @dataclass
 class ModelConfig:
@@ -188,6 +195,7 @@ class RuntimeConfig:
     worker_rank: int = 0
     observation_schema: dict[str, tuple[int, ...]] | None = None
     observation_layout: dict[str, dict[str, object]] | None = None
+    observation_normalization_state: dict[str, object] | None = None
     action_dim: int = 1
 
 
@@ -201,17 +209,7 @@ class GridConfig:
     v_min_pu: float = 0.95
     v_max_pu: float = 1.05
     line_max_loading_pct: float = 100.0
-    w_v_pen: float = 10.0
-    w_line_pen: float = 10.0
-    w_trafo_pen: float = 10.0
-    sensitivity_delta_kw: float = 1.0
     train_compact_info: bool = True
-    sensitivity_trigger_action_delta_kw: float = 1.0
-    sensitivity_trigger_load_delta_kw: float = 2.0
-    sensitivity_trigger_psi_delta: float = 0.001
-    sensitivity_max_staleness_steps: int = 32
-    sensitivity_trigger_on_pf_recovery: bool = True
-    sensitivity_trigger_on_violation_change: bool = True
 
 
 @dataclass

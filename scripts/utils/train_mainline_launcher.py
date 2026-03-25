@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scripts.utils.project_paths import get_checkpoint_root, get_training_artifact_root
+from scripts.checkpoints import build_training_run_paths, slugify_checkpoint_token
+from scripts.utils.project_paths import get_checkpoint_root
 
 
 def _default_algorithm(experiment_controls: dict[str, Any], train_controls: dict[str, Any]) -> str:
@@ -32,6 +33,7 @@ def prepare_train_mainline_launch(
     experiment_controls: dict[str, Any],
     data_controls: dict[str, Any],
     train_controls: dict[str, Any],
+    checkpoint_controls: dict[str, Any] | None = None,
     data_dir=None,
     save_dir=None,
     env_name: str = "GridTrainMainline",
@@ -39,31 +41,71 @@ def prepare_train_mainline_launch(
 ) -> dict[str, Any]:
     project_root = Path(project_root).resolve()
     data_dir = Path(data_dir).resolve() if data_dir is not None else (project_root / "data").resolve()
+    checkpoint_controls = dict(checkpoint_controls or {})
 
     algorithm = _default_algorithm(experiment_controls, train_controls)
-    default_save_dir = get_checkpoint_root(project_root) / f"{algorithm}_Grid_Mainline"
-    save_dir = Path(save_dir).resolve() if save_dir is not None else default_save_dir.resolve()
-
-    launch_dir = (
-        get_training_artifact_root(project_root)
-        / "launches"
-        / f"mainline_seed_{int(experiment_controls.get('seed', 0))}_{int(time.time() * 1000)}"
+    prediction_mode = str(data_controls.get("prediction_mode", "perfect")).strip().lower()
+    checkpoint_root = Path(
+        checkpoint_controls.get("checkpoint_root") or get_checkpoint_root(project_root)
+    ).resolve()
+    experiment_name = slugify_checkpoint_token(
+        checkpoint_controls.get("experiment_name", "grid_mainline"),
+        default="grid_mainline",
     )
-    launch_dir.mkdir(parents=True, exist_ok=True)
 
-    experiment_controls_path = _write_json(launch_dir / "experiment_controls.json", experiment_controls)
-    data_controls_path = _write_json(launch_dir / "data_controls.json", data_controls)
-    train_controls_path = _write_json(launch_dir / "train_controls.json", train_controls)
-    result_json_path = launch_dir / "train_result.json"
+    if save_dir is None:
+        run_paths = build_training_run_paths(
+            checkpoint_root,
+            algorithm=algorithm,
+            prediction_mode=prediction_mode,
+            experiment_name=experiment_name,
+            train_episodes=train_controls.get("train_episodes"),
+            max_train_steps=train_controls.get("max_train_steps"),
+        )
+        model_root = Path(run_paths["model_root"]).resolve()
+        meta_dir = Path(run_paths["meta_dir"]).resolve()
+        run_label = str(run_paths["run_label"])
+        prediction_mode = str(run_paths["prediction_mode"])
+        experiment_name = str(run_paths["experiment_name"])
+    else:
+        model_root = Path(save_dir).resolve()
+        meta_dir = (model_root / "_meta").resolve()
+        run_label = model_root.name
+
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_payload = {
+        "experiment_name": experiment_name,
+        "checkpoint_root": str(checkpoint_root),
+        "prediction_mode": prediction_mode,
+        "run_label": run_label,
+        "model_root": str(model_root),
+    }
+
+    experiment_controls_path = _write_json(meta_dir / "experiment_controls.json", experiment_controls)
+    data_controls_path = _write_json(meta_dir / "data_controls.json", data_controls)
+    train_controls_path = _write_json(meta_dir / "train_controls.json", train_controls)
+    checkpoint_controls_path = _write_json(meta_dir / "checkpoint_controls.json", checkpoint_payload)
+    result_json_path = meta_dir / "train_result.json"
+    progress_json_path = meta_dir / "progress.json"
+    log_path = meta_dir / "train.log"
 
     return {
         "project_root": str(project_root),
         "experiment_controls_path": str(experiment_controls_path),
         "data_controls_path": str(data_controls_path),
         "train_controls_path": str(train_controls_path),
+        "checkpoint_controls_path": str(checkpoint_controls_path),
         "result_json_path": str(result_json_path),
+        "progress_json_path": str(progress_json_path),
+        "log_path": str(log_path),
         "data_dir": str(data_dir),
-        "save_dir": str(save_dir),
+        "save_dir": str(model_root),
+        "model_root": str(model_root),
+        "meta_dir": str(meta_dir),
+        "checkpoint_root": str(checkpoint_root),
+        "prediction_mode": str(prediction_mode),
+        "experiment_name": str(experiment_name),
+        "run_label": str(run_label),
         "env_name": str(env_name),
         "run_number": int(run_number),
     }
@@ -85,6 +127,8 @@ def build_train_mainline_command(
         str(launch_info["data_controls_path"]),
         "--train-controls",
         str(launch_info["train_controls_path"]),
+        "--checkpoint-controls",
+        str(launch_info["checkpoint_controls_path"]),
         "--data-dir",
         str(launch_info["data_dir"]),
         "--save-dir",
@@ -102,20 +146,55 @@ def load_train_mainline_result(result_json_path) -> dict[str, Any]:
     return json.loads(Path(result_json_path).read_text(encoding="utf-8"))
 
 
-def _relay_process_output(process: subprocess.Popen[str]) -> None:
-    if process.stdout is None:
-        return
+def _load_progress_payload(progress_json_path: Path) -> dict[str, Any] | None:
     try:
-        while True:
-            chunk = process.stdout.read(1)
-            if chunk == "" and process.poll() is not None:
-                break
-            if not chunk:
-                continue
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-    finally:
-        process.stdout.close()
+        return json.loads(progress_json_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _format_progress_summary(payload: dict[str, Any]) -> str:
+    interaction_step = int(payload.get("interaction_step", 0))
+    target_interactions = max(int(payload.get("target_interactions", 0)), 1)
+    episodes_completed = int(payload.get("episodes_completed", 0))
+    avg_reward = float(payload.get("avg_reward", 0.0))
+    steps_per_sec = float(payload.get("steps_per_sec", 0.0))
+    percent = 100.0 * interaction_step / target_interactions
+    status = str(payload.get("status", "running"))
+    return (
+        f"[train:{status}] {interaction_step}/{target_interactions} iters ({percent:5.1f}%) | "
+        f"episodes={episodes_completed} | avg_reward={avg_reward:8.3f} | steps/s={steps_per_sec:7.1f}"
+    )
+
+
+def _monitor_process_progress(
+    process: subprocess.Popen[str],
+    *,
+    progress_json_path: Path,
+    summary_interval_s: float,
+) -> None:
+    last_mtime_ns = -1
+    last_print_time = 0.0
+    last_summary = ""
+
+    while process.poll() is None:
+        payload = _load_progress_payload(progress_json_path)
+        if payload is not None and progress_json_path.exists():
+            stat = progress_json_path.stat()
+            summary = _format_progress_summary(payload)
+            now = time.monotonic()
+            if stat.st_mtime_ns != last_mtime_ns and (now - last_print_time >= summary_interval_s):
+                print(summary)
+                last_summary = summary
+                last_mtime_ns = stat.st_mtime_ns
+                last_print_time = now
+        time.sleep(0.5)
+
+    payload = _load_progress_payload(progress_json_path)
+    if payload is not None:
+        summary = _format_progress_summary(payload)
+        if summary != last_summary:
+            print(summary)
 
 
 def run_external_train_mainline(
@@ -124,18 +203,21 @@ def run_external_train_mainline(
     experiment_controls: dict[str, Any],
     data_controls: dict[str, Any],
     train_controls: dict[str, Any],
+    checkpoint_controls: dict[str, Any] | None = None,
     data_dir=None,
     save_dir=None,
     env_name: str = "GridTrainMainline",
     run_number: int = 1,
     python_executable: str | None = None,
     stream_output: bool = True,
+    summary_interval_s: float = 2.0,
 ) -> dict[str, Any]:
     launch_info = prepare_train_mainline_launch(
         project_root=project_root,
         experiment_controls=experiment_controls,
         data_controls=data_controls,
         train_controls=train_controls,
+        checkpoint_controls=checkpoint_controls,
         data_dir=data_dir,
         save_dir=save_dir,
         env_name=env_name,
@@ -144,26 +226,29 @@ def run_external_train_mainline(
     command = build_train_mainline_command(launch_info, python_executable=python_executable)
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
-    popen_kwargs: dict[str, Any] = {
-        "cwd": str(project_root),
-        "env": env,
-    }
-    if stream_output:
-        popen_kwargs.update(
-            {
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.STDOUT,
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "bufsize": 0,
-            }
-        )
 
-    process = subprocess.Popen(command, **popen_kwargs)
-    if stream_output:
-        _relay_process_output(process)
-    returncode = process.wait()
+    log_path = Path(launch_info["log_path"])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(project_root),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        if stream_output:
+            print(f"Training log: {log_path}")
+            _monitor_process_progress(
+                process,
+                progress_json_path=Path(launch_info["progress_json_path"]),
+                summary_interval_s=float(summary_interval_s),
+            )
+        returncode = process.wait()
 
     result = (
         load_train_mainline_result(launch_info["result_json_path"])

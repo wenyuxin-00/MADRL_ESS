@@ -90,11 +90,6 @@ def apply_model_profile(cfg: ExperimentConfig, family: str) -> ExperimentConfig:
     raise ValueError(f"Unknown model family: '{family}'")
 
 
-def apply_reward_profile(cfg: ExperimentConfig, reward_type: str) -> ExperimentConfig:
-    cfg.reward.type = reward_type
-    return cfg
-
-
 def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> ExperimentConfig:
     normalized = str(forecast_type).strip().lower()
     if normalized not in {"perfect", "lstm"}:
@@ -127,7 +122,6 @@ def compose_experiment_config(
     profile: str = "base",
     algorithm: str | None = None,
     model_family: str = "mlp",
-    reward_type: str | None = None,
     forecast_type: str | None = None,
     vec_env_type: str | None = None,
     local_features: list[str] | None = None,
@@ -146,8 +140,6 @@ def compose_experiment_config(
         "MATD3" if algorithm is None and profile == "gpu_fast" else (algorithm or "MADDPG")
     )
 
-    if reward_type is not None:
-        apply_reward_profile(cfg, reward_type)
     if forecast_type is not None:
         apply_forecast_profile(cfg, forecast_type)
     if vec_env_type is not None:
@@ -193,7 +185,7 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
     summary: dict[str, object] = {
         "algo": cfg.algo.name,
         "model_family": cfg.model.family,
-        "reward": cfg.reward.type,
+        "reward": "NormalReward",
         "forecast": cfg.forecast.type,
         "local_features": list(cfg.obs.local_features),
         "sequence_features": list(cfg.obs.sequence_features),

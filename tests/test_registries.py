@@ -31,6 +31,7 @@ def test_observation_builder_helper_builds_default_builder(tmp_path):
     builder = build_obs_builder(cfg)
 
     assert isinstance(builder, DefaultObservationBuilder)
+    assert builder.normalizer is not None
     assert get_obs_builder_cls() is DefaultObservationBuilder
     assert get_obs_builder_cls("default") is DefaultObservationBuilder
 
@@ -44,8 +45,11 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16"]
     assert cfg.data.train_year == 2019
     assert cfg.data.test_year == 2020
-    assert cfg.reward.type == "grid_composite"
+    assert cfg.reward.w_action_pen == 6.0
+    assert cfg.reward.lambda_throughput == 0.001
+    assert cfg.reward.w_voltage_pen == 10.0
+    assert cfg.reward.w_trafo_pen == 10.0
     assert cfg.grid.sb_code == "1-LV-rural1--0-sw"
     assert cfg.grid.agent_bus_ids == [10, 6, 12]
-    assert cfg.obs.local_features == ["time", "soc"]
+    assert cfg.obs.local_features == ["calendar_time", "soc"]
     assert cfg.obs.sequence_features == ["price", "load", "pv"]

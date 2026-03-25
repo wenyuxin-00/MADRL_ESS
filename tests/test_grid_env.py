@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from envs.rewards import NormalReward
 from tests.support.helpers import write_prosumer_processed_dataset
 
 N_AGENTS = 3
@@ -24,44 +24,34 @@ class FakeGridCore:
         self.n_trafos = 2
         self.last_pf_error = ""
         self._return_violations = True
-        self.sensitivity_snapshot_calls = 0
 
     def reset(self, base_load_kw, base_pv_kw) -> None:
         del base_load_kw, base_pv_kw
-
-    def compute_sensitivity_snapshot(self, p_batt_kw, base_load_kw, delta_kw=1.0):
-        """Return zero sensitivity matrices and track refresh calls."""
-        del base_load_kw, delta_kw
-        self.sensitivity_snapshot_calls += 1
-        n = len(p_batt_kw)
-        return {
-            "dvm_dp": np.zeros((self.n_buses, n), dtype=np.float32),
-            "dline_loading_dp": np.zeros((self.n_lines, n), dtype=np.float32),
-            "dtrafo_loading_dp": np.zeros((self.n_trafos, n), dtype=np.float32),
-        }
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
         from envs.grid.core.grid_types import GridStepResult
 
         n = len(p_batt_kw)
+        line_loading_pct = np.zeros(self.n_lines, dtype=np.float32)
+        trafo_loading_pct = np.zeros(self.n_trafos, dtype=np.float32)
         if self._return_violations:
             v_violation = np.array([0.02, 0.00, 0.01], dtype=np.float32)
             bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
             bus_v_excess[3] = 0.03
             bus_v_excess[7] = 0.02
-            bus_v_signed_indicator = np.zeros(self.n_buses, dtype=np.float32)
-            bus_v_signed_indicator[3] = -1.0
-            bus_v_signed_indicator[7] = 1.0
             line_excess = np.zeros(self.n_lines, dtype=np.float32)
             line_excess[5] = 0.05
+            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
+            trafo_excess[0] = 0.04
+            line_loading_pct[5] = 105.0
+            trafo_loading_pct[0] = 104.0
         else:
             v_violation = np.zeros(n, dtype=np.float32)
             bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
-            bus_v_signed_indicator = np.zeros(self.n_buses, dtype=np.float32)
             line_excess = np.zeros(self.n_lines, dtype=np.float32)
+            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
 
-        trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
         psi_v_raw = float(np.sum(bus_v_excess ** 2))
         psi_line_raw = float(np.sum(line_excess ** 2))
         psi_trafo_raw = float(np.sum(trafo_excess ** 2))
@@ -70,8 +60,8 @@ class FakeGridCore:
             converged=True,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
             va_degree=np.zeros(self.n_buses, dtype=np.float32),
-            line_loading_pct=np.zeros(self.n_lines, dtype=np.float32),
-            trafo_loading_pct=np.zeros(self.n_trafos, dtype=np.float32),
+            line_loading_pct=line_loading_pct,
+            trafo_loading_pct=trafo_loading_pct,
             p_mw_from=np.zeros(self.n_lines, dtype=np.float32),
             agent_vm_pu=1.0 - v_violation,
             v_violation=v_violation,
@@ -82,7 +72,6 @@ class FakeGridCore:
             n_lines=self.n_lines,
             n_trafos=self.n_trafos,
             bus_v_excess=bus_v_excess,
-            bus_v_signed_indicator=bus_v_signed_indicator,
             line_excess=line_excess,
             trafo_excess=trafo_excess,
             psi_v_raw=psi_v_raw,
@@ -98,16 +87,14 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
         profile="debug",
         algorithm="MADDPG",
         model_family="mlp",
-        reward_type="grid_composite",
         forecast_type="perfect",
     )
     cfg.env.num_agents = n_agents
     cfg.env.episode_limit = episode_limit
-    cfg.obs.local_features = ["time", "soc"]
+    cfg.obs.local_features = ["calendar_time", "soc"]
     cfg.obs.sequence_features = ["price", "load", "pv"]
     cfg.forecast.target_signals = ["price", "load", "pv"]
-    cfg.grid.w_line_pen = 5.0
-    cfg.grid.w_trafo_pen = 7.5
+    cfg.reward.w_trafo_pen = 7.5
     cfg.grid.train_compact_info = False
     cfg.grid.agent_bus_ids = [10, 6, 12][:n_agents]
     cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16"][:n_agents]
@@ -137,7 +124,6 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
     from envs.observation.default_builder import DefaultObservationBuilder
-    from envs.rewards import get_reward_fn
     from models import validate_and_finalize_model_config
     from predictors.registry import build_forecaster
     from scripts.builder import _finalize_runtime_from_env
@@ -146,7 +132,7 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     grid_core = grid_core or FakeGridCore(n_agents=int(cfg.env.num_agents))
 
     dataset = build_dataset(cfg, mode="test")
-    reward_fn = get_reward_fn(cfg.reward.type, cfg)
+    reward_fn = NormalReward(cfg)
     forecaster = build_forecaster(cfg)
     obs_builder = DefaultObservationBuilder(
         local_features=cfg.obs.local_features,
@@ -275,20 +261,29 @@ def test_episode_recorder_compatible(grid_env) -> None:
     assert len(history["base_net_load"][0]) == 1
     assert len(history["e_bat_exec"][0]) == 1
     assert len(history["r_total_per_agent"][0]) == 1
-    assert "r_safe_line_global_sum" in history
-    assert "r_safe_trafo_global_sum" in history
-    assert "r_safe_v_global_per_agent" in history
-    assert "r_sens_credit_per_agent" in history
-    assert history["r_safe_line_global_per_agent"][0][0] == history["r_safe_line_global_per_agent"][1][0]
-    assert history["r_safe_trafo_global_per_agent"][0][0] == history["r_safe_trafo_global_per_agent"][2][0]
+    assert "r_cost_sum" in history
+    assert "r_throughput_sum" in history
+    assert "r_action_pen_sum" in history
+    assert "r_safe_v_per_agent" in history
+    assert "r_safe_trafo_per_agent" in history
+    assert history["r_safe_trafo_per_agent"][0][0] == history["r_safe_trafo_per_agent"][2][0]
+    assert history["r_safe_v_per_agent"][0][0] != history["r_safe_v_per_agent"][2][0]
 
 
-def test_hybrid_reward_tracks_local_voltage_differences(grid_env) -> None:
+def test_reward_tracks_local_voltage_differences(grid_env) -> None:
     grid_env.reset()
     actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
     _, reward_list, _, _, info = grid_env.step(actions)
     assert not np.allclose(info["v_violation"], info["v_violation"][0])
-    assert np.any(np.asarray(reward_list, dtype=np.float32) != 0.0)
+    assert info["r_safe_v"][0] > info["r_safe_v"][2]
+    assert np.any(np.asarray(reward_list, dtype=np.float32) != reward_list[1])
+
+
+def test_trafo_penalty_is_shared(grid_env) -> None:
+    grid_env.reset()
+    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    _, _, _, _, info = grid_env.step(actions)
+    assert info["r_safe_trafo"][0] == info["r_safe_trafo"][1] == info["r_safe_trafo"][2]
 
 
 def test_grid_fields_shapes(grid_env) -> None:
@@ -336,63 +331,8 @@ def test_compact_info_omits_large_arrays() -> None:
     env.close()
 
 
-def test_sensitivity_trigger_staleness() -> None:
-    cfg = _make_cfg()
-    cfg.grid.sensitivity_trigger_action_delta_kw = 1e9
-    cfg.grid.sensitivity_trigger_load_delta_kw = 1e9
-    cfg.grid.sensitivity_trigger_psi_delta = 1e9
-    cfg.grid.sensitivity_max_staleness_steps = 3
-
-    grid_core = FakeGridCore(n_agents=N_AGENTS)
-    grid_core._return_violations = False
-    env = _build_env(cfg, grid_core=grid_core)
-    env.reset()
-
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
-    assert grid_core.sensitivity_snapshot_calls == 1
-
-    for _ in range(cfg.grid.sensitivity_max_staleness_steps - 1):
-        env.step(actions)
-    assert grid_core.sensitivity_snapshot_calls == 1
-
-    env.step(actions)
-    assert grid_core.sensitivity_snapshot_calls == 2
-    assert env._last_sensitivity_trigger == "staleness"
-    env.close()
-
-
-def test_sensitivity_trigger_violation_change() -> None:
-    cfg = _make_cfg()
-    cfg.grid.sensitivity_trigger_action_delta_kw = 1e9
-    cfg.grid.sensitivity_trigger_load_delta_kw = 1e9
-    cfg.grid.sensitivity_trigger_psi_delta = 1e9
-    cfg.grid.sensitivity_max_staleness_steps = 999
-
-    grid_core = FakeGridCore(n_agents=N_AGENTS)
-    grid_core._return_violations = False
-    env = _build_env(cfg, grid_core=grid_core)
-    env.reset()
-
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
-    env.step(actions)
-    assert grid_core.sensitivity_snapshot_calls == 1
-
-    grid_core._return_violations = True
-    env.step(actions)
-    assert grid_core.sensitivity_snapshot_calls == 2
-    assert env._last_sensitivity_trigger == "violation_change"
-
-    grid_core._return_violations = False
-    env.step(actions)
-    assert grid_core.sensitivity_snapshot_calls == 3
-    assert env._last_sensitivity_trigger == "violation_change"
-    env.close()
-
-
-def test_sensitivity_no_old_interval_attribute() -> None:
+def test_legacy_sensitivity_attributes_removed() -> None:
     env = _build_env(_make_cfg())
-    assert not hasattr(env, "_sensitivity_step_counter")
-    assert not hasattr(env, "_sensitivity_update_interval")
-    assert hasattr(env, "_sensitivity_steps_since_update")
-    assert hasattr(env, "_sensitivity_max_staleness")
+    assert not hasattr(env, "_sensitivity_cache")
+    assert not hasattr(env, "_last_sensitivity_trigger")
     env.close()

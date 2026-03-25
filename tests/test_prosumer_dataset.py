@@ -8,7 +8,7 @@ from data.loaders.registry import build_dataset
 from data.loaders.prosumer import ProsumerDataset
 from envs.grid_env import GridEnv
 from envs.observation.registry import build_obs_builder
-from envs.rewards import get_reward_fn
+from envs.rewards import NormalReward
 from predictors.registry import build_forecaster
 from predictors.training import _load_signal_matrix_from_source, resolve_signal_csv_source
 from tests.support.helpers import (
@@ -33,15 +33,6 @@ class TinyGridCore:
     def reset(self, base_load_kw, base_pv_kw) -> None:
         del base_load_kw, base_pv_kw
 
-    def compute_sensitivity_snapshot(self, p_batt_kw, base_load_kw, delta_kw=1.0):
-        del base_load_kw, delta_kw
-        n = len(p_batt_kw)
-        return {
-            "dvm_dp": np.zeros((self.n_buses, n), dtype=np.float32),
-            "dline_loading_dp": np.zeros((self.n_lines, n), dtype=np.float32),
-            "dtrafo_loading_dp": np.zeros((self.n_trafos, n), dtype=np.float32),
-        }
-
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
         from envs.grid.core.grid_types import GridStepResult
@@ -63,7 +54,6 @@ class TinyGridCore:
             n_lines=self.n_lines,
             n_trafos=self.n_trafos,
             bus_v_excess=np.zeros(self.n_buses, dtype=np.float32),
-            bus_v_signed_indicator=np.zeros(self.n_buses, dtype=np.float32),
             line_excess=np.zeros(self.n_lines, dtype=np.float32),
             trafo_excess=np.zeros(self.n_trafos, dtype=np.float32),
             psi_v_raw=0.0,
@@ -307,7 +297,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         cfg,
         mode="train",
         dataset=dataset,
-        reward_fn=get_reward_fn(cfg.reward.type, cfg),
+        reward_fn=NormalReward(cfg),
         forecaster=build_forecaster(cfg),
         obs_builder=build_obs_builder(cfg),
         grid_core=TinyGridCore(cfg.env.num_agents),
@@ -333,7 +323,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         cfg,
         mode="test",
         dataset=None,
-        reward_fn=get_reward_fn(cfg.reward.type, cfg),
+        reward_fn=NormalReward(cfg),
         forecaster=build_forecaster(cfg),
         obs_builder=build_obs_builder(cfg),
         grid_core=TinyGridCore(cfg.env.num_agents),

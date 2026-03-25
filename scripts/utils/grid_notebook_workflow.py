@@ -14,6 +14,8 @@ from predictors.training import ensure_lstm_artifacts
 
 PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
+ORACLE_EVAL_MODE = "oracle_eval"
+FORECAST_EVAL_MODE = "forecast_eval"
 
 
 def normalize_prediction_mode(prediction_mode: str) -> str:
@@ -57,6 +59,16 @@ def resolve_forecast_backend(prediction_mode: str, future_horizon: int) -> str:
     return "lstm"
 
 
+def resolve_evaluation_mode(prediction_mode: str) -> str:
+    mode = normalize_prediction_mode(prediction_mode)
+    return ORACLE_EVAL_MODE if mode == PERFECT_PREDICTION_MODE else FORECAST_EVAL_MODE
+
+
+def resolve_prediction_mode_from_forecast_backend(forecast_backend: str) -> str:
+    normalized = str(forecast_backend).strip().lower()
+    return PERFECT_PREDICTION_MODE if normalized == "perfect" else NORMAL_PREDICTION_MODE
+
+
 def apply_notebook_experiment_settings(
     cfg,
     *,
@@ -71,7 +83,7 @@ def apply_notebook_experiment_settings(
     train_year: int | None = None,
     test_year: int | None = None,
 ) -> dict[str, object]:
-    cfg.obs.local_features = ["time", "soc"]
+    cfg.obs.local_features = ["calendar_time", "soc"]
     cfg.obs.sequence_features = ["price", "load", "pv"]
     cfg.forecast.target_signals = ["price", "load", "pv"]
 
@@ -106,11 +118,13 @@ def apply_notebook_experiment_settings(
 
     resolved_prediction_mode = normalize_prediction_mode(prediction_mode)
     cfg.forecast.type = resolve_forecast_backend(resolved_prediction_mode, cfg.env.future_horizon)
+    cfg.runtime.observation_normalization_state = None
     if cfg.forecast.type == "lstm" and cfg.forecast.lstm_artifact_root is None:
         cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
 
     return {
         "prediction_mode": resolved_prediction_mode,
+        "evaluation_mode": resolve_evaluation_mode(resolved_prediction_mode),
         "forecast_backend": cfg.forecast.type,
         "future_horizon": int(cfg.env.future_horizon),
         "test_start_date": cfg.data.test_start_date,
@@ -270,6 +284,7 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> list[np.ndarray]:
 class RolloutResult:
     step_df: pd.DataFrame
     agent_df: pd.DataFrame
+    grid_df: pd.DataFrame
     summary: pd.DataFrame
     meta: dict[str, object]
 
@@ -289,28 +304,38 @@ def collect_controller_rollout(
     env = build_env(cfg, mode="test")
     step_rows: list[dict[str, object]] = []
     agent_rows: list[dict[str, object]] = []
+    grid_rows: list[dict[str, object]] = []
+    bus_ids = [int(bus_id) for bus_id in env._grid_core.net.bus.index.tolist()]
+    agent_bus_ids = [int(bus_id) for bus_id in getattr(env._grid_core, "agent_bus_ids", cfg.grid.agent_bus_ids)]
+    agent_bus_set = set(agent_bus_ids)
     try:
         for episode_idx in range(env.num_available_episodes):
             obs, reset_info = env.reset(episode_idx=episode_idx)
+            raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
             if controller is not None:
                 controller.reset()
-            previous_obs = None
+            previous_raw_obs = None
             done = False
             step_in_episode = 0
 
             while not done:
-                price_pred = _aligned_prediction(previous_obs, obs, "price_seq")
-                load_pred = _aligned_prediction(previous_obs, obs, "load_seq")
-                pv_pred = _aligned_prediction(previous_obs, obs, "pv_seq")
+                price_pred = _aligned_prediction(previous_raw_obs, raw_obs, "price_seq")
+                load_pred = _aligned_prediction(previous_raw_obs, raw_obs, "load_seq")
+                pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
                 timestamp = _step_timestamp(reset_info, step_in_episode)
 
                 if controller is not None:
                     actions = controller.act(obs, deterministic=True)
                 else:
-                    actions = action_fn(env, obs)
+                    actions = action_fn(env, raw_obs)
 
                 next_obs, reward, terminated, truncated, info = env.step(actions)
                 del reward, terminated, truncated
+                raw_next_obs = (
+                    env.obs_builder.build_raw(env)
+                    if hasattr(env.obs_builder, "build_raw") and not bool(info.get("episode_done", False))
+                    else next_obs
+                )
 
                 cost_per_agent = _operating_cost_per_agent(info, float(env.dt))
                 step_rows.append(
@@ -344,13 +369,30 @@ def collect_controller_rollout(
                         }
                     )
 
+                vm_pu = np.asarray(info.get("vm_pu", np.zeros(len(bus_ids), dtype=np.float32)), dtype=np.float32)
+                if vm_pu.shape[0] == len(bus_ids):
+                    for bus_id, vm_value in zip(bus_ids, vm_pu, strict=False):
+                        grid_rows.append(
+                            {
+                                "controller": label,
+                                "episode_idx": episode_idx,
+                                "step": step_in_episode,
+                                "timestamp": timestamp,
+                                "bus_id": int(bus_id),
+                                "vm_pu": float(vm_value),
+                                "is_agent_bus": bool(int(bus_id) in agent_bus_set),
+                            }
+                        )
+
                 done = bool(info.get("episode_done", False))
-                previous_obs = obs
+                previous_raw_obs = raw_obs
                 obs = next_obs
+                raw_obs = raw_next_obs
                 step_in_episode += 1
 
         step_df = pd.DataFrame(step_rows).sort_values(["episode_idx", "step"]).reset_index(drop=True)
         agent_df = pd.DataFrame(agent_rows).sort_values(["episode_idx", "step", "agent_id"]).reset_index(drop=True)
+        grid_df = pd.DataFrame(grid_rows).sort_values(["episode_idx", "step", "bus_id"]).reset_index(drop=True)
         summary = (
             agent_df.groupby(["controller", "agent_profile"], as_index=False)["operating_cost"].sum()
             if not agent_df.empty
@@ -359,13 +401,21 @@ def collect_controller_rollout(
         return RolloutResult(
             step_df=step_df,
             agent_df=agent_df,
+            grid_df=grid_df,
             summary=summary,
             meta={
                 "controller": label,
                 "n_agents": int(env.n),
                 "agent_profiles": list(cfg.data.agent_profiles),
+                "agent_bus_ids": agent_bus_ids,
+                "bus_ids": bus_ids,
+                "v_min_pu": float(cfg.grid.v_min_pu),
+                "v_max_pu": float(cfg.grid.v_max_pu),
                 "future_horizon": int(cfg.env.future_horizon),
-                "prediction_mode": cfg.forecast.type,
+                "prediction_mode": resolve_prediction_mode_from_forecast_backend(cfg.forecast.type),
+                "evaluation_mode": resolve_evaluation_mode(
+                    resolve_prediction_mode_from_forecast_backend(cfg.forecast.type)
+                ),
                 "dt_hours": float(cfg.env.dt),
             },
         )
@@ -373,24 +423,31 @@ def collect_controller_rollout(
         env.close()
 
 
-def collect_madrl_rollout(cfg, *, model_root, algorithm: str | None = None, episode_tag: int | None = None) -> RolloutResult:
+def collect_madrl_rollout(
+    cfg,
+    *,
+    model_root=None,
+    algorithm: str | None = None,
+    episode_tag: int | None = None,
+    experiment_name: str = "grid_mainline",
+    checkpoint_root=None,
+) -> RolloutResult:
     from scripts.utils.experiment_notebook_utils import load_madrl_controller
 
+    prediction_mode = resolve_prediction_mode_from_forecast_backend(cfg.forecast.type)
     loaded = load_madrl_controller(
         cfg,
         model_root,
         algorithm=algorithm,
         episode_tag=episode_tag,
         device=cfg.runtime.device,
-    )
-    prediction_mode = (
-        PERFECT_PREDICTION_MODE
-        if str(loaded["cfg"].forecast.type) == "perfect"
-        else NORMAL_PREDICTION_MODE
+        prediction_mode=prediction_mode,
+        experiment_name=experiment_name,
+        checkpoint_root=checkpoint_root,
     )
     return collect_controller_rollout(
         loaded["cfg"],
-        label=f"DRL ({prediction_mode})",
+        label=f"DRL ({resolve_evaluation_mode(prediction_mode)})",
         controller=loaded["controller"],
     )
 
@@ -398,7 +455,7 @@ def collect_madrl_rollout(cfg, *, model_root, algorithm: str | None = None, epis
 def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) -> RolloutResult:
     comparison_cfg = build_comparison_cfg(cfg, prediction_mode=prediction_mode)
     resolved_mode = normalize_prediction_mode(prediction_mode)
-    rollout_label = label or f"MPC ({resolved_mode})"
+    rollout_label = label or f"MPC ({resolve_evaluation_mode(resolved_mode)})"
     return collect_controller_rollout(
         comparison_cfg,
         label=rollout_label,
@@ -496,6 +553,54 @@ def plot_test_rollout(rollout: RolloutResult, *, figsize: tuple[float, float] | 
     return figure
 
 
+def plot_test_voltage_profile(
+    rollout: RolloutResult,
+    *,
+    figsize: tuple[float, float] = (18.0, 4.8),
+):
+    grid_df = rollout.grid_df.copy()
+    if grid_df.empty:
+        raise ValueError("Rollout does not contain full-grid voltage traces.")
+
+    figure, axis = plt.subplots(1, 1, figsize=figsize)
+    muted_color = "#cbd5e1"
+    highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+
+    for bus_id, frame in grid_df.loc[~grid_df["is_agent_bus"]].groupby("bus_id"):
+        axis.plot(
+            frame["timestamp"],
+            frame["vm_pu"],
+            color=muted_color,
+            linewidth=0.9,
+            alpha=0.35,
+            zorder=1,
+        )
+
+    for color_idx, bus_id in enumerate(rollout.meta["agent_bus_ids"]):
+        frame = grid_df.loc[grid_df["bus_id"] == int(bus_id)]
+        if frame.empty:
+            continue
+        axis.plot(
+            frame["timestamp"],
+            frame["vm_pu"],
+            color=highlight_palette[color_idx % len(highlight_palette)],
+            linewidth=2.1,
+            alpha=0.95,
+            label=f"Agent bus {bus_id}",
+            zorder=3,
+        )
+
+    axis.axhline(float(rollout.meta["v_min_pu"]), color="#dc2626", linestyle="--", linewidth=1.1, label="V min")
+    axis.axhline(float(rollout.meta["v_max_pu"]), color="#ea580c", linestyle="--", linewidth=1.1, label="V max")
+    axis.set_title(f"Node Voltage Profile - {rollout.meta['controller']}")
+    axis.set_ylabel("Voltage [p.u.]")
+    axis.set_xlabel("Timestamp")
+    axis.grid(True, alpha=0.25)
+    axis.legend(loc="upper right", ncol=2)
+    figure.tight_layout()
+    return figure
+
+
 def plot_operating_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[float, float] = (10.0, 4.5)):
     if cost_df.empty:
         raise ValueError("cost_df is empty; nothing to plot.")
@@ -510,7 +615,9 @@ def plot_operating_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[floa
 
 
 __all__ = [
+    "FORECAST_EVAL_MODE",
     "NORMAL_PREDICTION_MODE",
+    "ORACLE_EVAL_MODE",
     "PERFECT_PREDICTION_MODE",
     "RolloutResult",
     "apply_notebook_experiment_settings",
@@ -524,5 +631,8 @@ __all__ = [
     "normalize_prediction_mode",
     "plot_operating_cost_comparison",
     "plot_test_rollout",
+    "plot_test_voltage_profile",
+    "resolve_evaluation_mode",
     "resolve_forecast_backend",
+    "resolve_prediction_mode_from_forecast_backend",
 ]
