@@ -17,6 +17,8 @@ out/
 *.png
 *.pt
 *.pth
+*.npy
+*.json
 # 忽略 TensorBoard 日志
 events.out.tfevents.*
 
