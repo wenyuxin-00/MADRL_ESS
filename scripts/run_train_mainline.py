@@ -82,6 +82,35 @@ def _apply_train_controls(cfg, train_controls: dict[str, Any]) -> None:
         cfg.algo.policy_update_freq = int(train_controls["policy_update_freq"])
 
 
+def _apply_model_controls(cfg, model_controls: dict[str, Any] | None) -> None:
+    controls = dict(model_controls or {})
+    if "hidden_dim" in controls:
+        hidden_dim = int(controls["hidden_dim"])
+        if hidden_dim <= 0:
+            raise ValueError(f"model_controls.hidden_dim must be positive, got {hidden_dim}.")
+        cfg.model.hidden_dim = hidden_dim
+
+
+def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> None:
+    controls = dict(runtime_controls or {})
+    bool_fields = (
+        "pin_memory",
+        "non_blocking_transfers",
+        "enable_amp",
+        "enable_compile",
+        "compile_fullgraph",
+        "compile_dynamic",
+    )
+    str_fields = ("amp_dtype", "compile_mode", "matmul_precision")
+
+    for field_name in bool_fields:
+        if field_name in controls:
+            setattr(cfg.runtime, field_name, bool(controls[field_name]))
+    for field_name in str_fields:
+        if field_name in controls:
+            setattr(cfg.runtime, field_name, str(controls[field_name]))
+
+
 def _resolve_save_dir(
     *,
     args,
@@ -243,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         seed=seed,
         require_cuda=experiment_controls.get("require_cuda"),
     )
+    _apply_model_controls(cfg, experiment_controls.get("model_controls"))
+    _apply_runtime_controls(cfg, experiment_controls.get("runtime_controls"))
     applied_controls = apply_notebook_experiment_settings(
         cfg,
         prediction_mode=str(data_controls.get("prediction_mode", "perfect")),
