@@ -95,7 +95,7 @@ class ForecastConfig:
 
     type: str = "perfect"
     target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
-    history_window: int = 96
+    history_window: int = 96*3
     load_model_mode: str = "per_agent"
     load_time_feature_mode: str = "hour_week_year"
     load_hybrid_mode: str = "baseline_blend"
@@ -111,6 +111,8 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
+    load_component_split: bool = False
+    load_scaler_type: str = "standard"
 
     @property
     def lstm_model_path(self) -> None:

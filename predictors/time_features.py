@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 import numpy as np
@@ -10,6 +11,8 @@ import pandas as pd
 TIME_FEATURE_MODE_NONE = "none"
 TIME_FEATURE_MODE_HOUR_WEEK_YEAR = "hour_week_year"
 DEFAULT_FORECAST_STEP = pd.Timedelta(minutes=15)
+DEFAULT_LOCAL_TIMEZONE = "Europe/Berlin"
+_TZ_SUFFIX_PATTERN = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
 
 
 def normalize_time_feature_mode(mode: str | None) -> str:
@@ -36,7 +39,18 @@ def coerce_timestamp_index(
     values = list(timestamps)
     if not values:
         return pd.DatetimeIndex([])
-    return pd.DatetimeIndex(pd.to_datetime(values))
+    requires_utc = False
+    for value in values:
+        if isinstance(value, str):
+            if _TZ_SUFFIX_PATTERN.search(value.strip()):
+                requires_utc = True
+                break
+            continue
+        if getattr(value, "tzinfo", None) is not None:
+            requires_utc = True
+            break
+    parsed = pd.to_datetime(values, utc=requires_utc)
+    return pd.DatetimeIndex(parsed)
 
 
 def infer_timestamp_step(
@@ -84,6 +98,8 @@ def encode_forecast_time_features(
 ) -> np.ndarray:
     normalized_mode = normalize_time_feature_mode(mode)
     index = coerce_timestamp_index(timestamps)
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_convert(DEFAULT_LOCAL_TIMEZONE)
     if normalized_mode == TIME_FEATURE_MODE_NONE:
         return np.zeros((len(index), 0), dtype=np.float32)
 

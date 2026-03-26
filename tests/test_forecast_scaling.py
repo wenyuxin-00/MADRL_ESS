@@ -4,6 +4,7 @@ import copy
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -26,7 +27,11 @@ from predictors.training import (
     expected_lstm_artifact_meta,
     fit_signal_scaler,
 )
-from predictors.time_features import TIME_FEATURE_MODE_HOUR_WEEK_YEAR
+from predictors.time_features import (
+    TIME_FEATURE_MODE_HOUR_WEEK_YEAR,
+    coerce_timestamp_index,
+    encode_forecast_time_features,
+)
 from tests.support.helpers import make_smoke_config
 
 
@@ -254,6 +259,27 @@ def test_lstm_forecaster_zero_load_scale_collapses_prediction_to_zero() -> None:
     prediction = forecaster.predict(zero_history, horizon=3, signal_name="load")
 
     assert np.allclose(prediction, np.zeros((1, 3), dtype=np.float32))
+
+
+def test_time_features_accept_mixed_dst_offsets_and_preserve_local_clock_time() -> None:
+    timestamps = [
+        "2019-10-27 01:30:00+02:00",
+        "2019-10-27 01:45:00+02:00",
+        "2019-10-27 02:00:00+02:00",
+        "2019-10-27 02:15:00+02:00",
+        "2019-10-27 02:00:00+01:00",
+        "2019-10-27 02:15:00+01:00",
+    ]
+
+    index = coerce_timestamp_index(timestamps)
+    assert len(index) == len(timestamps)
+    assert getattr(index, "tz", None) is not None
+
+    local_index = pd.to_datetime(timestamps, utc=True).tz_convert("Europe/Berlin")
+    encoded_from_strings = encode_forecast_time_features(timestamps, TIME_FEATURE_MODE_HOUR_WEEK_YEAR)
+    encoded_from_local_index = encode_forecast_time_features(local_index, TIME_FEATURE_MODE_HOUR_WEEK_YEAR)
+
+    assert np.allclose(encoded_from_strings, encoded_from_local_index)
 
 
 def test_load_baseline_blend_weight_zero_matches_last_value_baseline() -> None:

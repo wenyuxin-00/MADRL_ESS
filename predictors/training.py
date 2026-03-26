@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
@@ -150,6 +150,20 @@ def resolve_signal_blend_candidates(cfg, signal_name: str) -> tuple[float, ...]:
     if normalized == "load":
         return _normalize_load_blend_candidates(getattr(cfg.forecast, "load_blend_candidates", None))
     return (1.0,)
+
+
+def resolve_signal_scaler_type(cfg, signal_name: str) -> str:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return str(getattr(cfg.forecast, "load_scaler_type", "standard")).strip().lower()
+    return "standard"
+
+
+def resolve_signal_component_split(cfg, signal_name: str) -> bool:
+    normalized = _normalize_signal_name(signal_name)
+    if normalized == "load":
+        return bool(getattr(cfg.forecast, "load_component_split", False))
+    return False
 
 
 def resolve_signal_artifact_format(signal_name: str, settings: dict[str, object]) -> str:
@@ -388,6 +402,8 @@ def resolve_signal_training_settings(
         "postprocess_mode": resolve_signal_postprocess_mode(local_cfg, signal_name),
         "baseline_mode": resolve_signal_baseline_mode(local_cfg, signal_name),
         "blend_candidates": resolve_signal_blend_candidates(local_cfg, signal_name),
+        "scaler_type": resolve_signal_scaler_type(local_cfg, signal_name),
+        "component_split": resolve_signal_component_split(local_cfg, signal_name),
     }
     return local_cfg, settings
 
@@ -589,10 +605,12 @@ def _prosumer_value_columns(agent_profiles: Sequence[str], signal_name: str) -> 
 
 
 def _resolve_prosumer_signal_source(cfg, data_dir: Path, signal_name: str) -> SignalCsvSource | None:
-    if signal_name not in {"price", "load", "pv"}:
+    known_components = {f"load_{comp}" for comp in cfg.data.load_components}
+    if signal_name not in {"price", "load", "pv"} and signal_name not in known_components:
         return None
     agent_profiles = [str(profile) for profile in cfg.data.agent_profiles]
-    value_columns = _prosumer_value_columns(agent_profiles, signal_name)
+    base_signal = "load" if signal_name in known_components else signal_name
+    value_columns = _prosumer_value_columns(agent_profiles, base_signal)
     return SignalCsvSource(
         signal_name=signal_name,
         train_path=None,
@@ -619,7 +637,8 @@ def _load_prosumer_signal_frame_from_source(
 
     dataset = ProsumerDataset(**dataset_kwargs)
     timestamps = pd.Series(dataset._timestamps).reset_index(drop=True)
-    signal_values = np.asarray(dataset._signals[signal_name], dtype=np.float32)
+    dataset_signal_key = source.signal_name if source.signal_name in dataset._signals else signal_name
+    signal_values = np.asarray(dataset._signals[dataset_signal_key], dtype=np.float32)
 
     if signal_values.ndim == 1:
         value_columns = ("price",)
@@ -935,8 +954,9 @@ def fit_signal_scaler(
     values: np.ndarray | list[np.ndarray],
     *,
     physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
-) -> StandardScaler:
-    """在一类信号的所有数值上拟合 StandardScaler。"""
+    scaler_type: str = "standard",
+) -> StandardScaler | RobustScaler:
+    """在一类信号的所有数值上拟合 scaler（StandardScaler 或 RobustScaler）。"""
     if isinstance(values, list):
         flattened = np.concatenate(
             [
@@ -951,7 +971,10 @@ def fit_signal_scaler(
             physical_scale_by_column,
         ).reshape(-1)
 
-    scaler = StandardScaler()
+    if str(scaler_type).lower() == "robust":
+        scaler = RobustScaler()
+    else:
+        scaler = StandardScaler()
     scaler.fit(flattened.reshape(-1, 1))
     return scaler
 
@@ -1793,6 +1816,7 @@ def _managed_lstm_artifact_paths(
     signal_name: str,
     *,
     agent_index: int | None = None,
+    component: str | None = None,
 ) -> dict[str, Path]:
     """返回当前配置下单个 signal 的标准 artifact 路径。"""
     return get_default_lstm_artifact_paths(
@@ -1800,6 +1824,7 @@ def _managed_lstm_artifact_paths(
         signal_name=_normalize_signal_name(signal_name),
         future_horizon=int(cfg.env.future_horizon),
         agent_index=agent_index,
+        component=component,
     )
 
 
@@ -1853,15 +1878,21 @@ def _signal_artifact_specs(cfg, signal_name: str) -> list[dict[str, object]]:
     normalized_signal = _normalize_signal_name(signal_name)
     if normalized_signal == "load" and resolve_signal_model_mode(cfg, normalized_signal) == "per_agent":
         profiles = [str(profile) for profile in cfg.data.agent_profiles][: int(cfg.env.num_agents)]
-        return [
-            {
-                "signal_name": normalized_signal,
-                "agent_index": int(agent_index),
-                "agent_profile": profile,
-                "paths": _managed_lstm_artifact_paths(cfg, normalized_signal, agent_index=agent_index),
-            }
-            for agent_index, profile in enumerate(profiles)
-        ]
+        use_component_split = resolve_signal_component_split(cfg, normalized_signal)
+        components = list(cfg.data.load_components) if use_component_split else [None]
+        specs = []
+        for agent_index, profile in enumerate(profiles):
+            for component in components:
+                specs.append({
+                    "signal_name": normalized_signal,
+                    "agent_index": int(agent_index),
+                    "agent_profile": profile,
+                    "component": component,
+                    "paths": _managed_lstm_artifact_paths(
+                        cfg, normalized_signal, agent_index=agent_index, component=component,
+                    ),
+                })
+        return specs
     return [
         {
             "signal_name": normalized_signal,
@@ -2069,6 +2100,7 @@ def _train_single_signal_lstm(
     show_progress: bool = False,
     agent_index: int | None = None,
     agent_profile: str | None = None,
+    component: str | None = None,
 ) -> dict[str, object]:
     seq_len = int(local_cfg.forecast.history_window)
     pred_len = int(local_cfg.env.future_horizon)
@@ -2097,6 +2129,7 @@ def _train_single_signal_lstm(
         scaler = fit_signal_scaler(
             train_values_only,
             physical_scale_by_column=train_physical_scale,
+            scaler_type=str(settings.get("scaler_type", "standard")),
         )
         x_train, y_train = build_supervised_windows_from_time_feature_frames(
             split["train_segments"],
@@ -2153,6 +2186,7 @@ def _train_single_signal_lstm(
         scaler = fit_signal_scaler(
             train_values_only,
             physical_scale_by_column=train_physical_scale,
+            scaler_type=str(settings.get("scaler_type", "standard")),
         )
         train_loader = make_matrix_loader(
             train_values_only,
@@ -2180,6 +2214,8 @@ def _train_single_signal_lstm(
         val_segment_count = len(split["val_segments"])
 
     progress_name = signal_name if agent_profile is None else f"{signal_name}[{agent_profile}]"
+    if component is not None:
+        progress_name = f"{progress_name}/{component}"
     print(
         f"[forecast] {progress_name}: train_segments={train_segment_count}, "
         f"val_segments={val_segment_count}, columns={list(value_columns)}, "
@@ -2234,6 +2270,7 @@ def _train_single_signal_lstm(
         local_cfg,
         signal_name,
         agent_index=agent_index if str(settings["model_mode"]) == "per_agent" else None,
+        component=component,
     )
     artifact_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
     saved_paths = save_lstm_forecaster_artifacts(
@@ -2259,6 +2296,8 @@ def _train_single_signal_lstm(
         baseline_mode=str(hybrid_config["baseline_mode"]),
         blend_weight=hybrid_config["blend_weight"],
         optimized_metric=hybrid_config["optimized_metric"],
+        component=component,
+        scaler_type=str(settings.get("scaler_type", "standard")),
     )
 
     refreshed_validation = validate_lstm_artifact(
@@ -2339,6 +2378,7 @@ def _train_single_signal_lstm(
         "runtime": runtime_state,
         "agent_index": agent_index,
         "agent_profile": agent_profile,
+        "component": component,
         "hybrid": hybrid_config,
     }
 
@@ -2370,21 +2410,49 @@ def train_signal_lstm(
     if signal_name == "load" and str(settings["model_mode"]) == "per_agent":
         profiles = [str(profile) for profile in local_cfg.data.agent_profiles][: len(source.value_columns)]
         agent_results: list[dict[str, object]] = []
+        use_component_split = bool(settings.get("component_split", False))
+        components = list(local_cfg.data.load_components) if use_component_split else [None]
+
         for agent_index, agent_profile in enumerate(profiles):
-            agent_source = select_signal_source_columns(source, [agent_index])
-            agent_results.append(
-                _train_single_signal_lstm(
-                    local_cfg,
-                    signal_name,
-                    source=agent_source,
-                    settings=settings,
-                    runtime_state=runtime_state,
-                    overrides=overrides,
-                    show_progress=show_progress,
-                    agent_index=agent_index,
-                    agent_profile=agent_profile,
-                )
-            )
+            for component in components:
+                if component is not None:
+                    comp_signal = f"load_{component}"
+                    comp_source = resolve_signal_csv_source(data_dir, comp_signal, cfg=local_cfg)
+                    if comp_source is None:
+                        raise FileNotFoundError(
+                            f"No source for component signal '{comp_signal}'. "
+                            f"Ensure ProsumerDataset exposes load_{component}."
+                        )
+                    comp_source = select_signal_source_columns(comp_source, [agent_index])
+                    agent_results.append(
+                        _train_single_signal_lstm(
+                            local_cfg,
+                            signal_name,
+                            source=comp_source,
+                            settings=settings,
+                            runtime_state=runtime_state,
+                            overrides=overrides,
+                            show_progress=show_progress,
+                            agent_index=agent_index,
+                            agent_profile=agent_profile,
+                            component=component,
+                        )
+                    )
+                else:
+                    agent_source = select_signal_source_columns(source, [agent_index])
+                    agent_results.append(
+                        _train_single_signal_lstm(
+                            local_cfg,
+                            signal_name,
+                            source=agent_source,
+                            settings=settings,
+                            runtime_state=runtime_state,
+                            overrides=overrides,
+                            show_progress=show_progress,
+                            agent_index=agent_index,
+                            agent_profile=agent_profile,
+                        )
+                    )
 
         online_evaluation = _aggregate_per_agent_evaluations(
             signal_name,
@@ -2453,6 +2521,7 @@ def train_signal_lstm(
     scaler = fit_signal_scaler(
         train_values_only,
         physical_scale_by_column=train_physical_scale,
+        scaler_type=str(settings.get("scaler_type", "standard")),
     )
     train_loader = make_matrix_loader(
         train_values_only,

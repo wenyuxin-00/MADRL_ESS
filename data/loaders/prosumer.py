@@ -266,6 +266,9 @@ class ProsumerDataset(BaseEpisodeDataset):
             "load": load,
             "pv": pv,
         }
+        for comp_name in self.load_components:
+            comp_values = component_frames[comp_name][self.agent_profiles].to_numpy(np.float32)
+            self._signals[f"load_{comp_name}"] = comp_values * self.load_scale[None, :]
         self._meta_template = {
             "node_ids": list(self.node_ids),
             "agent_profiles": list(self.agent_profiles),
@@ -317,12 +320,17 @@ class ProsumerDataset(BaseEpisodeDataset):
 
         start, end = self._episode_slices[episode_idx]
         timestamps = self._timestamps.iloc[start:end].reset_index(drop=True)
+        episode_signals = {
+            "price": self._signals["price"][start:end].copy(),
+            "load": self._signals["load"][start:end, :].copy(),
+            "pv": self._signals["pv"][start:end, :].copy(),
+        }
+        for comp_name in self.load_components:
+            comp_key = f"load_{comp_name}"
+            if comp_key in self._signals:
+                episode_signals[comp_key] = self._signals[comp_key][start:end, :].copy()
         return {
-            "signals": {
-                "price": self._signals["price"][start:end].copy(),
-                "load": self._signals["load"][start:end, :].copy(),
-                "pv": self._signals["pv"][start:end, :].copy(),
-            },
+            "signals": episode_signals,
             "meta": {
                 "episode_idx": int(episode_idx),
                 "segment_id": int(self.year),
