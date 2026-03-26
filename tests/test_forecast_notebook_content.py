@@ -28,3 +28,6 @@ def test_forecast_notebook_declares_load_hybrid_configuration() -> None:
     assert "collect_available_lstm_artifacts(cfg, overrides_by_signal=signal_training_overrides)" in notebook_text
     assert "LSTMForecaster.from_signal_artifacts(" in notebook_text
     assert "history_timestamps=history_timestamps" in notebook_text
+    assert "resolve_signal_physical_scale_from_source" in notebook_text
+    assert '"pv_peak_kw": scale_values' in notebook_text
+    assert '"load_scale": scale_values' in notebook_text
