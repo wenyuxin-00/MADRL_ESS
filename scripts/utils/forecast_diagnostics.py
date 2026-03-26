@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
-import json
+import gc
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 import torch
+from tqdm.auto import tqdm
 
 from predictors.lstm_forecaster import load_lstm_forecaster_artifacts
 from predictors.lstm_model import LSTMForecastModel
@@ -49,6 +51,27 @@ DEFAULT_BIAS_THRESHOLD_KW = 0.15
 DEFAULT_CONTROL_DEGRADATION_PCT = 2.0
 DEFAULT_CURRENT_BLEND_UPPER_BOUND = 0.557490
 DEFAULT_BASELINE_TARGET = 0.474082
+
+
+def _cuda_runtime_active(runtime_state: TorchRuntimeState) -> bool:
+    return runtime_state.device.type == "cuda" and torch.cuda.is_available()
+
+
+def _clear_runtime_memory(runtime_state: TorchRuntimeState | None = None) -> None:
+    gc.collect()
+    if runtime_state is None or not _cuda_runtime_active(runtime_state):
+        return
+    try:
+        torch.cuda.empty_cache()
+    except (AttributeError, RuntimeError):
+        pass
+
+
+def _module_device(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
 
 
 @dataclass(frozen=True)
@@ -254,8 +277,9 @@ def _predict_next_step_batch(
 ) -> np.ndarray:
     predictions: list[np.ndarray] = []
     normalized_mode = normalize_time_feature_mode(time_feature_mode if int(input_size) > 1 else "none")
+    use_amp = _cuda_runtime_active(runtime_state)
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, len(histories), max(int(batch_size), 1)):
             end = start + max(int(batch_size), 1)
             history_batch = np.asarray(histories[start:end], dtype=np.float32)
@@ -271,7 +295,15 @@ def _predict_next_step_batch(
                     axis=2,
                 ).astype(np.float32)
             tensor = torch.tensor(features, dtype=torch.float32, device=runtime_state.device)
-            batch_prediction = model(tensor).detach().cpu().numpy().astype(np.float32)[:, 0]
+            autocast_context = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if use_amp
+                else nullcontext()
+            )
+            with autocast_context:
+                batch_prediction = model(tensor)
+            batch_prediction = batch_prediction.detach().float().cpu().numpy().astype(np.float32)[:, 0]
+            del tensor
             if scaler is not None:
                 batch_prediction = scaler.inverse_transform(batch_prediction.reshape(-1, 1)).reshape(-1).astype(np.float32)
             predictions.append(batch_prediction.astype(np.float32))
@@ -455,15 +487,24 @@ def _predict_supervised_windows(
     batch_size: int = 4096,
 ) -> np.ndarray:
     predictions: list[np.ndarray] = []
+    use_amp = _cuda_runtime_active(runtime_state)
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, len(windows), max(int(batch_size), 1)):
             batch = torch.tensor(
                 windows[start : start + max(int(batch_size), 1)],
                 dtype=torch.float32,
                 device=runtime_state.device,
             )
-            predictions.append(model(batch).detach().cpu().numpy().astype(np.float32))
+            autocast_context = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if use_amp
+                else nullcontext()
+            )
+            with autocast_context:
+                batch_prediction = model(batch)
+            predictions.append(batch_prediction.detach().float().cpu().numpy().astype(np.float32))
+            del batch
     if not predictions:
         raise ValueError("No supervised windows were available for prediction.")
     return np.concatenate(predictions, axis=0).astype(np.float32)
@@ -510,31 +551,40 @@ def _compute_step1_payload(
         physical_scale_by_column=None,
         time_feature_mode=time_feature_mode if int(input_size) > 1 else "none",
     )
-    raw_predictions = _predict_supervised_windows(
-        model,
-        x,
-        runtime_state=runtime_state,
-        batch_size=batch_size,
-    )
-    raw_step1 = _restore_values(raw_predictions[:, 0], scaler=scaler)
-    baseline_step1 = _restore_values(x[:, -1, 0], scaler=scaler)
-    target_step1 = _restore_values(y[:, 0], scaler=scaler)
-    blended_step1 = baseline_step1 + np.float32(blend_weight) * (raw_step1 - baseline_step1)
-    timestamps = _build_window_timestamps(frames, seq_len=seq_len, pred_len=pred_len)
-    if len(timestamps) != len(target_step1):
-        raise ValueError(
-            "Step-1 timestamps did not align with target windows, "
-            f"got len(timestamps)={len(timestamps)} vs len(target)={len(target_step1)}."
+    original_device = _module_device(model)
+    restore_model = original_device != runtime_state.device
+    if restore_model:
+        model = model.to(runtime_state.device)
+    try:
+        raw_predictions = _predict_supervised_windows(
+            model,
+            x,
+            runtime_state=runtime_state,
+            batch_size=batch_size,
         )
-    return Step1WindowPayload(
-        profile=str(profile),
-        timestamps=timestamps,
-        target=target_step1.astype(np.float32),
-        baseline=baseline_step1.astype(np.float32),
-        raw=raw_step1.astype(np.float32),
-        blended=blended_step1.astype(np.float32),
-        blend_weight=float(blend_weight),
-    )
+        raw_step1 = _restore_values(raw_predictions[:, 0], scaler=scaler)
+        baseline_step1 = _restore_values(x[:, -1, 0], scaler=scaler)
+        target_step1 = _restore_values(y[:, 0], scaler=scaler)
+        blended_step1 = baseline_step1 + np.float32(blend_weight) * (raw_step1 - baseline_step1)
+        timestamps = _build_window_timestamps(frames, seq_len=seq_len, pred_len=pred_len)
+        if len(timestamps) != len(target_step1):
+            raise ValueError(
+                "Step-1 timestamps did not align with target windows, "
+                f"got len(timestamps)={len(timestamps)} vs len(target)={len(target_step1)}."
+            )
+        return Step1WindowPayload(
+            profile=str(profile),
+            timestamps=timestamps,
+            target=target_step1.astype(np.float32),
+            baseline=baseline_step1.astype(np.float32),
+            raw=raw_step1.astype(np.float32),
+            blended=blended_step1.astype(np.float32),
+            blend_weight=float(blend_weight),
+        )
+    finally:
+        if restore_model:
+            model.to(original_device)
+            _clear_runtime_memory(runtime_state)
 
 
 def _compute_metric_row(
@@ -1911,260 +1961,6 @@ def build_rollout_experiment_summary(
     return ordered, recommendation
 
 
-def write_sfh14_load_report(
-    report: dict[str, object],
-    *,
-    output_dir: str | Path,
-) -> dict[str, Path]:
-    """Write the main report tables to disk for later comparison."""
-
-    out_dir = Path(output_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    written: dict[str, Path] = {}
-
-    table_map: dict[str, pd.DataFrame] = {
-        "step1_metrics": report["step1_metrics"],
-        "sfh14_monthly_metrics": report["sfh14_monthly_metrics"],
-        "horizon_metrics": report["horizon_metrics"],
-        "sfh14_month_horizon_metrics": report["sfh14_month_horizon_metrics"],
-        "component_drift": report["component_drift"],
-        "experiment_summary": report["experiment_summary"],
-        "rollout_experiment_summary": report["rollout_experiment_summary"],
-        "e1_step1_metrics": report["experiments"]["e1"]["step1_metrics"],
-        "e1_monthly_metrics": report["experiments"]["e1"]["sfh14_monthly_metrics"],
-        "e2_summary": report["experiments"]["e2"]["summary"],
-        "e2_monthly_metrics": report["experiments"]["e2"]["sfh14_monthly_metrics"],
-        "e2_candidate_metrics": report["experiments"]["e2"]["candidate_metrics"],
-        "e2_block_metrics": report["experiments"]["e2"]["block_metrics"],
-        "e3_component_metrics": report["experiments"]["e3"]["component_metrics"],
-        "e3_total_metrics": report["experiments"]["e3"]["total_metrics"],
-        "e3_monthly_metrics": report["experiments"]["e3"]["sfh14_monthly_metrics"],
-    }
-    for name, table in table_map.items():
-        if table.empty:
-            continue
-        target_path = out_dir / f"{name}.csv"
-        table.to_csv(target_path, index=False)
-        written[name] = target_path
-
-    recommendation_path = out_dir / "recommendation.json"
-    recommendation_path.write_text(
-        json.dumps(report["recommendation"], indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
-    written["recommendation"] = recommendation_path
-    return written
-
-
-def run_sfh14_load_repair_report(
-    cfg,
-    *,
-    runtime_state: TorchRuntimeState | str | torch.device | None = None,
-    load_result: dict[str, object] | None = None,
-    load_overrides: dict[str, object] | None = None,
-    focus_profile: str = DEFAULT_ANALYSIS_PROFILE,
-    output_dir: str | Path | None = None,
-    show_progress: bool = False,
-) -> dict[str, object]:
-    """Run the full diagnostics and offline experiment bundle described in the notebook plan."""
-
-    runtime = _resolve_runtime_state(runtime_state)
-    val_segments, value_columns = _load_validation_segments(cfg)
-    test_segments, test_value_columns = _load_test_segments(cfg)
-    if tuple(value_columns) != tuple(test_value_columns):
-        raise ValueError("Validation/test value columns do not align for SFH14 rollout diagnostics.")
-    baseline = collect_load_step1_diagnostics(
-        cfg,
-        runtime_state=runtime,
-        load_result=load_result,
-        load_overrides=load_overrides,
-    )
-    baseline_monthly = build_profile_monthly_error_report(baseline["test_payloads"][focus_profile], profile=focus_profile)
-    drift = build_component_drift_report(cfg, profiles=list(cfg.data.agent_profiles))
-    e1 = run_time_feature_none_experiment(
-        cfg,
-        runtime_state=runtime,
-        load_overrides=load_overrides,
-        focus_profile=focus_profile,
-        show_progress=show_progress,
-    )
-    e2 = run_blocked_blend_experiment(
-        cfg,
-        runtime_state=runtime,
-        load_result=load_result,
-        load_overrides=load_overrides,
-    )
-    e3 = run_component_split_experiment(
-        cfg,
-        runtime_state=runtime,
-        load_overrides=load_overrides,
-        focus_profile=focus_profile,
-        show_progress=show_progress,
-    )
-    step1_experiment_summary, step1_recommendation = build_experiment_summary(
-        current_step1_metrics=baseline["step1_metrics"],
-        e1_result=e1,
-        e2_result=e2,
-        e3_result=e3,
-    )
-
-    focus_value_column = _select_profile_value_column(value_columns, profile=focus_profile)
-    focus_val_segments = _filter_segment_frames_to_value_column(val_segments, value_column=focus_value_column)
-    focus_test_segments = _filter_segment_frames_to_value_column(test_segments, value_column=focus_value_column)
-    artifact_bundle = baseline["artifact_bundle"]
-    current_val_rollout = _build_saved_profile_rollout_payload(
-        cfg,
-        runtime_state=runtime,
-        segment_frames=val_segments,
-        artifact_bundle=artifact_bundle,
-        value_columns=value_columns,
-        profile=focus_profile,
-    )
-    current_test_rollout = _build_saved_profile_rollout_payload(
-        cfg,
-        runtime_state=runtime,
-        segment_frames=test_segments,
-        artifact_bundle=artifact_bundle,
-        value_columns=value_columns,
-        profile=focus_profile,
-    )
-
-    e1_model = e1["model_artifacts"]
-    e1_val_rollout = _compute_rollout_payload(
-        profile=focus_profile,
-        segment_frames=focus_val_segments,
-        value_column=focus_value_column,
-        model=e1_model.model,
-        scaler=e1_model.scaler,
-        seq_len=e1_model.seq_len,
-        pred_len=e1_model.pred_len,
-        time_feature_mode=e1_model.time_feature_mode,
-        input_size=e1_model.input_size,
-        blend_weight=e1_model.blend_weight,
-        runtime_state=runtime,
-    )
-    e1_test_rollout = _compute_rollout_payload(
-        profile=focus_profile,
-        segment_frames=focus_test_segments,
-        value_column=focus_value_column,
-        model=e1_model.model,
-        scaler=e1_model.scaler,
-        seq_len=e1_model.seq_len,
-        pred_len=e1_model.pred_len,
-        time_feature_mode=e1_model.time_feature_mode,
-        input_size=e1_model.input_size,
-        blend_weight=e1_model.blend_weight,
-        runtime_state=runtime,
-    )
-
-    e2_selected_weight = float(
-        e2["summary"].loc[e2["summary"]["profile"] == focus_profile, "selected_weight"].iloc[0]
-    )
-    e2_val_rollout = _build_saved_profile_rollout_payload(
-        cfg,
-        runtime_state=runtime,
-        segment_frames=val_segments,
-        artifact_bundle=artifact_bundle,
-        value_columns=value_columns,
-        profile=focus_profile,
-        blend_weight_override=e2_selected_weight,
-    )
-    e2_test_rollout = _build_saved_profile_rollout_payload(
-        cfg,
-        runtime_state=runtime,
-        segment_frames=test_segments,
-        artifact_bundle=artifact_bundle,
-        value_columns=value_columns,
-        profile=focus_profile,
-        blend_weight_override=e2_selected_weight,
-    )
-
-    component_rollouts = _build_component_split_rollout_payloads(
-        cfg,
-        runtime_state=runtime,
-        component_models=e3["component_models"],
-        focus_profile=focus_profile,
-    )
-    e3_mode_labels = {
-        "baseline": "household_raw_plus_heatpump_baseline",
-        "raw": "household_raw_plus_heatpump_raw",
-        "blended": "household_raw_plus_heatpump_blended",
-    }
-    horizon_metrics = pd.concat(
-        [
-            build_rollout_horizon_metrics(current_val_rollout, split_name="val2019", experiment="current_default"),
-            build_rollout_horizon_metrics(current_test_rollout, split_name="test2020", experiment="current_default"),
-            build_rollout_horizon_metrics(e1_val_rollout, split_name="val2019", experiment="E1_time_feature_none"),
-            build_rollout_horizon_metrics(e1_test_rollout, split_name="test2020", experiment="E1_time_feature_none"),
-            build_rollout_horizon_metrics(e2_val_rollout, split_name="val2019", experiment="E2_blocked_blend"),
-            build_rollout_horizon_metrics(e2_test_rollout, split_name="test2020", experiment="E2_blocked_blend"),
-            build_rollout_horizon_metrics(
-                component_rollouts["val2019"],
-                split_name="val2019",
-                experiment="E3_component_split",
-                mode_labels=e3_mode_labels,
-            ),
-            build_rollout_horizon_metrics(
-                component_rollouts["test2020"],
-                split_name="test2020",
-                experiment="E3_component_split",
-                mode_labels=e3_mode_labels,
-            ),
-        ],
-        ignore_index=True,
-    )
-    sfh14_month_horizon_metrics = pd.concat(
-        [
-            build_profile_month_horizon_report(
-                current_test_rollout,
-                split_name="test2020",
-                experiment="current_default",
-                profile=focus_profile,
-            ),
-            build_profile_month_horizon_report(
-                e1_test_rollout,
-                split_name="test2020",
-                experiment="E1_time_feature_none",
-                profile=focus_profile,
-            ),
-            build_profile_month_horizon_report(
-                e2_test_rollout,
-                split_name="test2020",
-                experiment="E2_blocked_blend",
-                profile=focus_profile,
-            ),
-            build_profile_month_horizon_report(
-                component_rollouts["test2020"],
-                split_name="test2020",
-                experiment="E3_component_split",
-                profile=focus_profile,
-                mode_labels=e3_mode_labels,
-            ),
-        ],
-        ignore_index=True,
-    )
-    rollout_experiment_summary, recommendation = build_rollout_experiment_summary(
-        horizon_metrics=horizon_metrics,
-        month_horizon_metrics=sfh14_month_horizon_metrics,
-    )
-
-    report = {
-        "step1_metrics": baseline["step1_metrics"],
-        "sfh14_monthly_metrics": baseline_monthly,
-        "horizon_metrics": horizon_metrics,
-        "sfh14_month_horizon_metrics": sfh14_month_horizon_metrics,
-        "component_drift": drift,
-        "experiment_summary": step1_experiment_summary,
-        "rollout_experiment_summary": rollout_experiment_summary,
-        "recommendation": recommendation,
-        "step1_recommendation": step1_recommendation,
-        "experiments": {"e1": e1, "e2": e2, "e3": e3},
-    }
-    if output_dir is not None:
-        report["written_paths"] = write_sfh14_load_report(report, output_dir=output_dir)
-    return report
-
-
 __all__ = [
     "DEFAULT_ANALYSIS_PROFILE",
     "DEFAULT_BIAS_THRESHOLD_KW",
@@ -2175,8 +1971,6 @@ __all__ = [
     "collect_load_step1_diagnostics",
     "run_blocked_blend_experiment",
     "run_component_split_experiment",
-    "run_sfh14_load_repair_report",
     "run_time_feature_none_experiment",
     "select_blocked_blend_weight",
-    "write_sfh14_load_report",
 ]

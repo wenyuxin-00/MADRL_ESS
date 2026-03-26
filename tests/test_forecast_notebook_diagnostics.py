@@ -15,7 +15,6 @@ def test_forecast_notebook_exposes_sfh14_repair_report() -> None:
         if cell.get("cell_type") == "code"
     )
 
-    assert "run_sfh14_load_repair_report" not in notebook_text
     assert 'analysis_output_dir = project_root / "artifacts" / "forecast" / "analysis" / "sfh14_load"' not in notebook_text
     assert 'load_result=results.get("load")' not in notebook_text
     assert 'load_overrides=signal_training_overrides["load"]' not in notebook_text

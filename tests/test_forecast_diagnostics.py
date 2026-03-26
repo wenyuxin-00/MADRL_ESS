@@ -9,7 +9,6 @@ from scripts.utils.forecast_diagnostics import (
     build_component_drift_report,
     build_profile_monthly_error_report,
     collect_load_step1_diagnostics,
-    run_sfh14_load_repair_report,
     select_blocked_blend_weight,
 )
 from tests.support.helpers import make_smoke_config
@@ -78,20 +77,3 @@ def test_collect_load_step1_diagnostics_smoke(tmp_path) -> None:
     assert {"baseline", "raw", "blended"} == set(diagnostics["step1_metrics"]["mode"])
     assert set(diagnostics["step1_metrics"]["profile"]) == set(cfg.data.agent_profiles)
     assert set(monthly["month"]) == {1}
-
-
-def test_run_sfh14_load_repair_report_smoke(tmp_path) -> None:
-    cfg = _make_load_only_cfg(tmp_path)
-    load_result = train_signal_lstm(cfg, "load", show_progress=False)
-
-    report = run_sfh14_load_repair_report(
-        cfg,
-        load_result=load_result,
-        load_overrides={"epochs": 1, "hidden_size": 8, "num_layers": 1, "dropout": 0.0, "batch_size": 4, "lr": 1e-3},
-        output_dir=tmp_path / "analysis",
-        show_progress=False,
-    )
-
-    assert {"step1_metrics", "sfh14_monthly_metrics", "component_drift", "experiment_summary"} <= set(report)
-    assert "recommendation" in report
-    assert "written_paths" in report
