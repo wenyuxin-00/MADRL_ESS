@@ -80,6 +80,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "runtime_mode": "performance",
         "device_request": "cpu",
         "require_cuda": False,
+        "observation_cache_root": str(tmp_path / "cache"),
     }
     data_controls = {
         "prediction_mode": "perfect",
@@ -182,7 +183,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
     assert result["battery_controls"]["mode"] == "from_pv"
-    assert result["vec_env"] == "SubprocVecEnv"
+    assert result["vec_env"] == "SubprocVecEnvFastLab"
     assert result["device"] == "cpu"
     assert result["started_at"]
     assert result["finished_at"]
@@ -201,3 +202,5 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]
+    assert "cache_build_time_s" in result["perf_summary"]
+    assert "cache_hit" in result["perf_summary"]

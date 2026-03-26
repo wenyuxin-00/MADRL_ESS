@@ -7,7 +7,7 @@ from scripts.benchmarks.run_fastlab_ab import main as benchmark_main
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
-def test_run_fastlab_ab_smoke_outputs_mainline_and_fastlab_rows(tmp_path):
+def test_run_fastlab_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
     data_dir = tmp_path / "data"
     write_prosumer_processed_dataset(
         data_dir,
@@ -108,12 +108,12 @@ def test_run_fastlab_ab_smoke_outputs_mainline_and_fastlab_rows(tmp_path):
     assert exit_code == 0
     summary = json.loads((output_dir / "benchmark_summary.json").read_text(encoding="utf-8"))
     assert Path(summary["leaderboard_path"]).exists()
-    assert len(summary["rows"]) == 3
+    assert len(summary["rows"]) == 2
 
     candidate_names = {row["candidate_name"] for row in summary["rows"]}
-    assert candidate_names == {"mainline", "fastlab_cold", "fastlab_warm"}
+    assert candidate_names == {"mainline_cold", "mainline_warm"}
 
-    warm_row = next(row for row in summary["rows"] if row["candidate_name"] == "fastlab_warm")
+    warm_row = next(row for row in summary["rows"] if row["candidate_name"] == "mainline_warm")
     assert warm_row["cache_hit"] is True
     for row in summary["rows"]:
         assert Path(row["reward_summary_path"]).exists()

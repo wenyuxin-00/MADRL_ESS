@@ -1,4 +1,4 @@
-"""Run mainline vs fast-lab A/B benchmarks for MADRL training."""
+"""Run cold-cache vs warm-cache benchmarks for the fast-lab-backed MADRL mainline."""
 
 from __future__ import annotations
 
@@ -36,9 +36,8 @@ from scripts.utils.torch_runtime import configure_torch_runtime, describe_device
 
 
 BENCHMARK_CASES = (
-    ("mainline", "scripts.run_train_mainline", False),
-    ("fastlab_cold", "scripts.run_train_mainline_fastlab", True),
-    ("fastlab_warm", "scripts.run_train_mainline_fastlab", True),
+    ("mainline_cold", "scripts.run_train_mainline"),
+    ("mainline_warm", "scripts.run_train_mainline"),
 )
 
 
@@ -102,20 +101,17 @@ def _build_candidate_controls(
         },
     )
 
-    if candidate_name == "mainline":
-        candidate_experiment = dict(experiment_controls)
-    else:
-        refresh = candidate_name == "fastlab_cold"
-        candidate_experiment = merge_control_overrides(
-            experiment_controls,
-            {
-                "observation_cache_mode": "precomputed_exact",
-                "refresh_observation_cache": refresh,
-                "train_info_mode": "minimal",
-                "fast_grid_core": True,
-                "observation_cache_root": str(cache_root),
-            },
-        )
+    refresh = candidate_name.endswith("_cold")
+    candidate_experiment = merge_control_overrides(
+        experiment_controls,
+        {
+            "observation_cache_mode": "precomputed_exact",
+            "refresh_observation_cache": refresh,
+            "train_info_mode": "minimal",
+            "fast_grid_core": True,
+            "observation_cache_root": str(cache_root),
+        },
+    )
     return candidate_experiment, candidate_train, candidate_checkpoint
 
 
@@ -334,7 +330,7 @@ def _build_benchmark_row(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark MADRL mainline vs fast-lab.")
+    parser = argparse.ArgumentParser(description="Benchmark cold-cache vs warm-cache performance for the fast-lab-backed MADRL mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
     parser.add_argument("--battery-controls")
@@ -367,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     run_manifest: list[dict[str, Any]] = []
 
     for episode_budget in [int(value) for value in args.episode_budgets]:
-        for candidate_name, module_name, needs_fastlab in BENCHMARK_CASES:
+        for candidate_name, module_name in BENCHMARK_CASES:
             candidate_experiment, candidate_train, candidate_checkpoint = _build_candidate_controls(
                 experiment_controls=experiment_controls,
                 train_controls=train_controls,
@@ -386,9 +382,10 @@ def main(argv: list[str] | None = None) -> int:
                 train_controls=candidate_train,
                 checkpoint_controls=candidate_checkpoint,
             )
+            refresh_cache = candidate_name.endswith("_cold")
             print(
                 f"[fastlab_ab] running {candidate_name} ep{episode_budget} via {module_name} "
-                f"(fastlab={needs_fastlab})"
+                f"(refresh_cache={refresh_cache})"
             )
             train_run = _run_training_case(
                 module_name=module_name,
@@ -449,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     for episode_budget, frame in leaderboard.groupby("episode_budget", sort=True):
         recommendation_by_budget[str(int(episode_budget))] = recommend_perf_candidate(
             frame.reset_index(drop=True),
-            baseline_name="mainline",
+            baseline_name="mainline_cold",
         )
 
     leaderboard_path = output_dir / "leaderboard.csv"

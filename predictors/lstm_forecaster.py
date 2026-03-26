@@ -119,6 +119,8 @@ def save_lstm_forecaster_artifacts(
     baseline_mode: str = BASELINE_MODE_NONE,
     blend_weight: float | None = None,
     optimized_metric: str | None = None,
+    component: str | None = None,
+    scaler_type: str = "standard",
 ) -> dict[str, str]:
     if scaler is None:
         raise ValueError("LSTM forecaster artifacts require a fitted scaler object.")
@@ -144,6 +146,8 @@ def save_lstm_forecaster_artifacts(
         "source_signature": dict(source_signature or {}),
         "agent_index": None if agent_index is None else int(agent_index),
         "agent_profile": None if agent_profile is None else str(agent_profile),
+        "component": None if component is None else str(component),
+        "scaler_type": str(scaler_type),
     }
     if meta["artifact_format"] == LSTM_LOAD_HYBRID_ARTIFACT_FORMAT or str(postprocess_mode) != POSTPROCESS_MODE_NONE:
         meta.update(
@@ -216,6 +220,7 @@ class _SignalForecasterRuntime:
     baseline_mode: str = BASELINE_MODE_NONE
     blend_weight: float | None = None
     optimized_metric: str | None = None
+    component: str | None = None
 
 
 class LSTMForecaster(Forecaster):
@@ -310,6 +315,7 @@ class LSTMForecaster(Forecaster):
         baseline_mode: str = BASELINE_MODE_NONE,
         blend_weight: float | None = None,
         optimized_metric: str | None = None,
+        component: str | None = None,
     ) -> _SignalForecasterRuntime:
         model = LSTMForecastModel(
             hidden_size=hidden_size,
@@ -342,6 +348,7 @@ class LSTMForecaster(Forecaster):
             baseline_mode=str(baseline_mode or BASELINE_MODE_NONE),
             blend_weight=None if blend_weight is None else float(blend_weight),
             optimized_metric=None if optimized_metric is None else str(optimized_metric),
+            component=None if component is None else str(component),
         )
 
     @classmethod
@@ -429,6 +436,7 @@ class LSTMForecaster(Forecaster):
                         baseline_mode=meta.get("baseline_mode", BASELINE_MODE_NONE),
                         blend_weight=meta.get("blend_weight"),
                         optimized_metric=meta.get("optimized_metric"),
+                        component=meta.get("component"),
                         device=device,
                     )
                 )
@@ -473,7 +481,11 @@ class LSTMForecaster(Forecaster):
         episode_signals: dict[str, np.ndarray] | np.ndarray,
         episode_meta: dict[str, object] | None = None,
     ) -> None:
-        del episode_signals
+        self._episode_component_signals: dict[str, np.ndarray] = {}
+        if isinstance(episode_signals, dict):
+            for key, value in episode_signals.items():
+                if key.startswith("load_"):
+                    self._episode_component_signals[key] = np.asarray(value, dtype=np.float32)
         meta = dict(episode_meta or {})
         load_scale = _coerce_physical_scale_array(meta.get("load_scale"))
         pv_peak_kw = _coerce_physical_scale_array(meta.get("pv_peak_kw"))
@@ -600,6 +612,229 @@ class LSTMForecaster(Forecaster):
             prediction = runtime.scaler.inverse_transform(prediction.reshape(-1, 1)).reshape(-1)
         return self._restore_prediction_scale(prediction, runtime, scale=scale)
 
+    @staticmethod
+    def _coerce_episode_timestamp_index(
+        history_timestamps: Sequence[str | pd.Timestamp] | None,
+        total_length: int,
+    ) -> pd.DatetimeIndex:
+        total_length = int(total_length)
+        if total_length <= 0:
+            return pd.DatetimeIndex([])
+
+        index = coerce_timestamp_index(history_timestamps)
+        if len(index) == total_length:
+            return index
+        if len(index) > total_length:
+            return index[:total_length]
+
+        step_delta = infer_timestamp_step(index)
+        if len(index) == 0:
+            return pd.date_range(
+                start=LSTMForecaster._default_timestamp_start(),
+                periods=total_length,
+                freq=step_delta,
+            )
+
+        extension = pd.date_range(
+            start=index[-1] + step_delta,
+            periods=total_length - len(index),
+            freq=step_delta,
+        )
+        return index.append(extension)
+
+    @staticmethod
+    def _build_padded_history_windows(values: np.ndarray, seq_len: int) -> np.ndarray:
+        history = np.asarray(values, dtype=np.float32).reshape(-1)
+        seq_len = int(seq_len)
+        if history.size == 0:
+            return np.zeros((0, seq_len), dtype=np.float32)
+        if seq_len <= 0:
+            raise ValueError(f"seq_len must be positive, got {seq_len}.")
+
+        prefix = np.zeros((max(seq_len - 1, 0),), dtype=np.float32)
+        padded = np.concatenate([prefix, history], axis=0)
+        windows = np.lib.stride_tricks.sliding_window_view(padded, seq_len)
+        return np.asarray(windows[: history.size], dtype=np.float32)
+
+    @staticmethod
+    def _append_prediction_chunk_to_windows(
+        windows: np.ndarray,
+        prediction_chunk: np.ndarray,
+    ) -> np.ndarray:
+        base = np.asarray(windows, dtype=np.float32)
+        chunk = np.asarray(prediction_chunk, dtype=np.float32)
+        if chunk.ndim == 1:
+            chunk = chunk[:, None]
+        if chunk.size == 0:
+            return base
+        if chunk.shape[1] >= base.shape[1]:
+            return chunk[:, -base.shape[1] :].astype(np.float32, copy=False)
+        return np.concatenate([base[:, chunk.shape[1] :], chunk], axis=1).astype(np.float32, copy=False)
+
+    @staticmethod
+    def _build_time_window_view(
+        timestamp_index: pd.DatetimeIndex,
+        *,
+        seq_len: int,
+        horizon: int,
+        time_feature_mode: str,
+    ) -> np.ndarray | None:
+        normalized_mode = normalize_time_feature_mode(time_feature_mode)
+        if normalized_mode == TIME_FEATURE_MODE_NONE:
+            return None
+
+        seq_len = int(seq_len)
+        horizon = int(horizon)
+        total_steps = len(timestamp_index)
+        if total_steps == 0:
+            return np.zeros((0, seq_len, 0), dtype=np.float32)
+
+        step_delta = infer_timestamp_step(timestamp_index)
+        prefix = pd.date_range(
+            end=timestamp_index[0] - step_delta,
+            periods=max(seq_len - 1, 0),
+            freq=step_delta,
+        )
+        extension = pd.date_range(
+            start=timestamp_index[-1] + step_delta,
+            periods=max(horizon - 1, 0),
+            freq=step_delta,
+        )
+        full_index = prefix.append(timestamp_index).append(extension)
+        encoded = encode_forecast_time_features(full_index, normalized_mode)
+        windows = np.lib.stride_tricks.sliding_window_view(encoded, seq_len, axis=0)
+        return np.transpose(windows, (0, 2, 1)).astype(np.float32, copy=False)
+
+    def _predict_model_chunk_batch(
+        self,
+        runtime: _SignalForecasterRuntime,
+        history_windows: np.ndarray,
+        *,
+        time_windows: np.ndarray | None,
+        column_idx: int | None,
+        batch_size: int,
+    ) -> np.ndarray:
+        histories = np.asarray(history_windows, dtype=np.float32)
+        if histories.size == 0:
+            return np.zeros((0, int(runtime.pred_len)), dtype=np.float32)
+
+        batch_size = max(int(batch_size), 1)
+        predictions: list[np.ndarray] = []
+        normalized_mode = normalize_time_feature_mode(runtime.time_feature_mode if int(runtime.input_size) > 1 else "none")
+
+        with torch.inference_mode():
+            for start in range(0, len(histories), batch_size):
+                end = start + batch_size
+                history_batch = histories[start:end]
+                normalized_history, scale = self._normalize_model_input(
+                    history_batch,
+                    runtime,
+                    column_idx=column_idx,
+                )
+                if runtime.scaler is not None:
+                    load_channel = runtime.scaler.transform(normalized_history.reshape(-1, 1)).reshape(
+                        normalized_history.shape
+                    ).astype(np.float32)
+                else:
+                    load_channel = normalized_history.astype(np.float32)
+
+                if int(runtime.input_size) <= 1 or normalized_mode == TIME_FEATURE_MODE_NONE:
+                    features = load_channel
+                else:
+                    if time_windows is None:
+                        raise ValueError("time_windows are required when runtime.input_size > 1.")
+                    features = np.concatenate(
+                        [load_channel[:, :, None], np.asarray(time_windows[start:end], dtype=np.float32)],
+                        axis=2,
+                    ).astype(np.float32)
+
+                tensor = torch.tensor(features, dtype=torch.float32, device=self.device)
+                prediction = runtime.model(tensor).detach().cpu().numpy().astype(np.float32)
+
+                if runtime.scaler is not None:
+                    prediction = runtime.scaler.inverse_transform(prediction.reshape(-1, 1)).reshape(
+                        prediction.shape
+                    ).astype(np.float32)
+                predictions.append(self._restore_prediction_scale(prediction, runtime, scale=scale))
+
+        if not predictions:
+            return np.zeros((0, int(runtime.pred_len)), dtype=np.float32)
+        return np.concatenate(predictions, axis=0).astype(np.float32, copy=False)
+
+    def _predict_univariate_episode_matrix(
+        self,
+        runtime: _SignalForecasterRuntime,
+        history: np.ndarray,
+        horizon: int,
+        *,
+        column_idx: int | None = None,
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
+        batch_size: int = 8192,
+    ) -> np.ndarray:
+        values = np.asarray(history, dtype=np.float32).reshape(-1)
+        total_steps = int(values.size)
+        horizon = int(horizon)
+        if horizon <= 0:
+            return np.zeros((total_steps, 0), dtype=np.float32)
+        if total_steps == 0:
+            return np.zeros((0, horizon), dtype=np.float32)
+
+        current_value = values[:, None].astype(np.float32, copy=False)
+        if horizon == 1:
+            return current_value.copy()
+
+        timestamp_index = self._coerce_episode_timestamp_index(history_timestamps, total_steps)
+        rolling_windows = self._build_padded_history_windows(values, runtime.seq_len)
+        time_window_view = self._build_time_window_view(
+            timestamp_index,
+            seq_len=runtime.seq_len,
+            horizon=horizon,
+            time_feature_mode=runtime.time_feature_mode if int(runtime.input_size) > 1 else TIME_FEATURE_MODE_NONE,
+        )
+
+        remaining = horizon - 1
+        if str(runtime.postprocess_mode) == POSTPROCESS_MODE_BASELINE_BLEND:
+            if str(runtime.baseline_mode) != BASELINE_MODE_LAST_VALUE:
+                raise ValueError(f"Unsupported baseline_mode '{runtime.baseline_mode}'.")
+            future = np.empty((total_steps, remaining), dtype=np.float32)
+            weight = np.float32(1.0 if runtime.blend_weight is None else float(runtime.blend_weight))
+            for step_idx in range(remaining):
+                current_time_windows = None if time_window_view is None else time_window_view[step_idx : step_idx + total_steps]
+                raw_batch = self._predict_model_chunk_batch(
+                    runtime,
+                    rolling_windows,
+                    time_windows=current_time_windows,
+                    column_idx=column_idx,
+                    batch_size=batch_size,
+                )
+                baseline_values = rolling_windows[:, -1].astype(np.float32, copy=False)
+                next_values = (baseline_values + weight * (raw_batch[:, 0] - baseline_values)).astype(np.float32)
+                future[:, step_idx] = next_values
+                if step_idx + 1 < remaining:
+                    rolling_windows = self._append_prediction_chunk_to_windows(rolling_windows, next_values[:, None])
+            return np.concatenate([current_value, future], axis=1).astype(np.float32, copy=False)
+
+        future_chunks: list[np.ndarray] = []
+        produced = 0
+        while produced < remaining:
+            current_time_windows = None if time_window_view is None else time_window_view[produced : produced + total_steps]
+            raw_batch = self._predict_model_chunk_batch(
+                runtime,
+                rolling_windows,
+                time_windows=current_time_windows,
+                column_idx=column_idx,
+                batch_size=batch_size,
+            )
+            take = min(int(runtime.pred_len), remaining - produced)
+            prediction_chunk = np.asarray(raw_batch[:, :take], dtype=np.float32)
+            future_chunks.append(prediction_chunk)
+            produced += take
+            if produced < remaining:
+                rolling_windows = self._append_prediction_chunk_to_windows(rolling_windows, prediction_chunk)
+
+        future = np.concatenate(future_chunks, axis=1).astype(np.float32, copy=False)
+        return np.concatenate([current_value, future], axis=1).astype(np.float32, copy=False)
+
     def _predict_univariate(
         self,
         runtime: _SignalForecasterRuntime,
@@ -695,6 +930,11 @@ class LSTMForecaster(Forecaster):
         runtimes = self.signal_runtimes[signal_name]
         history = np.asarray(history, dtype=np.float32)
 
+        if any(r.component is not None for r in runtimes):
+            return self._predict_component_split(
+                runtimes, history, horizon, history_timestamps=history_timestamps,
+            )
+
         if history.ndim == 1:
             runtime = runtimes[0]
             return self._predict_univariate(
@@ -722,3 +962,133 @@ class LSTMForecaster(Forecaster):
                 )
             )
         return np.stack(predictions, axis=0).astype(np.float32)
+
+    def predict_episode_matrix(
+        self,
+        history: np.ndarray,
+        horizon: int,
+        *,
+        signal_name: str = "price",
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
+        batch_size: int = 8192,
+    ) -> np.ndarray:
+        if signal_name not in self.signal_runtimes:
+            if len(self.signal_runtimes) == 1:
+                signal_name = next(iter(self.signal_runtimes))
+            else:
+                raise KeyError(
+                    f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {self.available_signals()}"
+                )
+
+        self._sync_legacy_price_runtime()
+        runtimes = self.signal_runtimes[signal_name]
+        history = np.asarray(history, dtype=np.float32)
+
+        if any(r.component is not None for r in runtimes):
+            return self._predict_component_split_episode_matrix(
+                runtimes,
+                history,
+                horizon,
+                history_timestamps=history_timestamps,
+                batch_size=batch_size,
+            )
+
+        if history.ndim == 1:
+            runtime = runtimes[0]
+            return self._predict_univariate_episode_matrix(
+                runtime,
+                history,
+                horizon,
+                column_idx=0,
+                history_timestamps=history_timestamps,
+                batch_size=batch_size,
+            )
+
+        if history.ndim != 2:
+            raise ValueError(f"LSTMForecaster expects 1D or 2D history, got shape {history.shape}")
+
+        predictions: list[np.ndarray] = []
+        for column_idx in range(history.shape[1]):
+            runtime = runtimes[column_idx] if len(runtimes) == history.shape[1] else runtimes[0]
+            runtime_column_idx = 0 if len(runtimes) == history.shape[1] else column_idx
+            predictions.append(
+                self._predict_univariate_episode_matrix(
+                    runtime,
+                    history[:, column_idx],
+                    horizon,
+                    column_idx=runtime_column_idx,
+                    history_timestamps=history_timestamps,
+                    batch_size=batch_size,
+                )
+            )
+        return np.stack(predictions, axis=1).astype(np.float32, copy=False)
+
+    def _predict_component_split(
+        self,
+        runtimes: list[_SignalForecasterRuntime],
+        history: np.ndarray,
+        horizon: int,
+        *,
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
+    ) -> np.ndarray:
+        """Predict by summing independent component forecasts per agent."""
+        n_agents = history.shape[1] if history.ndim == 2 else 1
+        agent_predictions: list[np.ndarray] = []
+
+        for agent_idx in range(n_agents):
+            agent_runtimes = [r for r in runtimes if r.agent_index == agent_idx]
+            agent_total = np.zeros(horizon, dtype=np.float32)
+            for runtime in agent_runtimes:
+                comp_key = f"load_{runtime.component}"
+                comp_signals = getattr(self, "_episode_component_signals", {})
+                if comp_key in comp_signals:
+                    comp_history = comp_signals[comp_key][:history.shape[0], agent_idx]
+                else:
+                    comp_history = history[:, agent_idx] if history.ndim == 2 else history
+                comp_pred = self._predict_univariate(
+                    runtime,
+                    comp_history,
+                    horizon,
+                    column_idx=0,
+                    history_timestamps=history_timestamps,
+                )
+                agent_total += comp_pred
+            agent_predictions.append(agent_total)
+
+        return np.stack(agent_predictions, axis=0).astype(np.float32)
+
+    def _predict_component_split_episode_matrix(
+        self,
+        runtimes: list[_SignalForecasterRuntime],
+        history: np.ndarray,
+        horizon: int,
+        *,
+        history_timestamps: Sequence[str | pd.Timestamp] | None = None,
+        batch_size: int = 8192,
+    ) -> np.ndarray:
+        n_agents = history.shape[1] if history.ndim == 2 else 1
+        total_steps = history.shape[0] if history.ndim >= 1 else 0
+        agent_predictions: list[np.ndarray] = []
+
+        for agent_idx in range(n_agents):
+            agent_runtimes = [r for r in runtimes if r.agent_index == agent_idx]
+            agent_total = np.zeros((total_steps, int(horizon)), dtype=np.float32)
+            for runtime in agent_runtimes:
+                comp_key = f"load_{runtime.component}"
+                comp_signals = getattr(self, "_episode_component_signals", {})
+                if comp_key in comp_signals:
+                    comp_history = np.asarray(comp_signals[comp_key], dtype=np.float32)[:total_steps, agent_idx]
+                else:
+                    comp_history = history[:, agent_idx] if history.ndim == 2 else history
+                comp_pred = self._predict_univariate_episode_matrix(
+                    runtime,
+                    comp_history,
+                    horizon,
+                    column_idx=0,
+                    history_timestamps=history_timestamps,
+                    batch_size=batch_size,
+                )
+                agent_total += comp_pred
+            agent_predictions.append(agent_total.astype(np.float32, copy=False))
+
+        return np.stack(agent_predictions, axis=1).astype(np.float32, copy=False)

@@ -21,13 +21,14 @@ warnings.filterwarnings(
 import torch
 
 from configs import compose_experiment_config, print_experiment_summary
-from scripts.builder import build_train_runner
+from scripts.builder_fastlab import build_train_runner_fastlab
 from scripts.checkpoints import (
     build_training_run_paths,
     resolve_checkpoint_to_load,
     slugify_checkpoint_token,
 )
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings, ensure_forecast_ready
+from scripts.utils.madrl_observation_cache_lab import build_or_load_observation_cache
 from scripts.utils.project_paths import get_checkpoint_root, get_tensorboard_run_dir, project_root
 from scripts.utils.torch_runtime import configure_torch_runtime, describe_device
 
@@ -212,7 +213,7 @@ def _build_result_payload(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the accelerated Grid MADRL training mainline.")
+    parser = argparse.ArgumentParser(description="Run the fast-lab-backed Grid MADRL training mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
     parser.add_argument("--battery-controls")
@@ -298,6 +299,30 @@ def main(argv: list[str] | None = None) -> int:
         require_cuda=experiment_controls.get("require_cuda"),
     )
     forecast_ready = ensure_forecast_ready(cfg)
+    observation_cache_mode = str(experiment_controls.get("observation_cache_mode", "precomputed_exact"))
+    refresh_observation_cache = bool(experiment_controls.get("refresh_observation_cache", False))
+    train_info_mode = str(experiment_controls.get("train_info_mode", "minimal"))
+    fast_grid_core = bool(experiment_controls.get("fast_grid_core", True))
+    observation_cache_root = experiment_controls.get("observation_cache_root")
+    observation_cache_batch_size = int(experiment_controls.get("observation_cache_batch_size", 8192))
+    if observation_cache_mode != "precomputed_exact":
+        raise ValueError(
+            f"Unsupported observation_cache_mode '{observation_cache_mode}', expected 'precomputed_exact'."
+        )
+
+    cache_result = build_or_load_observation_cache(
+        cfg,
+        split="train",
+        forecast_ready=forecast_ready,
+        refresh=refresh_observation_cache,
+        root=observation_cache_root,
+        batch_size=observation_cache_batch_size,
+    )
+    cfg.runtime.fastlab_observation_cache_dir = str(cache_result.cache_dir)
+    cfg.runtime.fastlab_train_info_mode = train_info_mode
+    cfg.runtime.fastlab_fast_grid_core = fast_grid_core
+    cfg.runtime.fastlab_observation_cache_batch_size = observation_cache_batch_size
+
     summary = print_experiment_summary(cfg)
     summary["applied_controls"] = applied_controls
     summary["device_info"] = describe_device(runtime_state)
@@ -307,8 +332,14 @@ def main(argv: list[str] | None = None) -> int:
     summary["meta_dir"] = str(meta_dir)
     summary["log_path"] = str(log_path)
     summary["run_label"] = str(save_dir.name)
+    summary["training_backend"] = "fastlab"
+    summary["observation_cache_mode"] = observation_cache_mode
+    summary["train_info_mode"] = train_info_mode
+    summary["fast_grid_core"] = fast_grid_core
+    summary["observation_cache_dir"] = str(cache_result.cache_dir)
+    summary["observation_cache_batch_size"] = int(observation_cache_batch_size)
 
-    runner = build_train_runner(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
+    runner = build_train_runner_fastlab(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
     episodes_completed = 0
     try:
         episodes_completed = runner.run()
@@ -336,6 +367,15 @@ def main(argv: list[str] | None = None) -> int:
             run_number=int(args.run_number),
             seed=seed,
             applied_controls=applied_controls,
+        )
+        result_payload["perf_summary"].update(
+            {
+                "cache_build_time_s": float(cache_result.cache_build_time_s),
+                "cache_hit": bool(cache_result.cache_hit),
+                "train_info_mode": train_info_mode,
+                "observation_cache_mode": observation_cache_mode,
+                "observation_cache_batch_size": int(observation_cache_batch_size),
+            }
         )
         _write_json(result_json, result_payload)
         print(json.dumps(result_payload, indent=2, default=_json_default))

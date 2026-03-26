@@ -86,6 +86,31 @@ def _make_lstm_cfg(tmp_path):
     return cfg
 
 
+def _build_stepwise_episode_forecast_matrix(
+    forecaster,
+    history: np.ndarray,
+    *,
+    signal_name: str,
+    timestamps,
+    horizon: int,
+) -> np.ndarray:
+    values = np.asarray(history, dtype=np.float32)
+    rows: list[np.ndarray] = []
+    for step_idx in range(values.shape[0]):
+        history_slice = values[: step_idx + 1]
+        timestamp_slice = list(timestamps[: step_idx + 1])
+        prediction = forecaster.predict(
+            history_slice,
+            horizon,
+            signal_name=signal_name,
+            history_timestamps=timestamp_slice,
+        )
+        rows.append(np.asarray(prediction, dtype=np.float32))
+    if values.ndim == 1:
+        return np.stack(rows, axis=0).astype(np.float32)
+    return np.stack(rows, axis=0).astype(np.float32)
+
+
 def test_fastlab_cache_matches_default_builder_for_lstm(tmp_path) -> None:
     cfg = _make_lstm_cfg(tmp_path)
     cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
@@ -123,6 +148,41 @@ def test_fastlab_cache_matches_default_builder_for_lstm(tmp_path) -> None:
             base_env.step([np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)])
     finally:
         base_env.close()
+
+
+def test_lstm_forecaster_predict_episode_matrix_matches_stepwise_predict(tmp_path) -> None:
+    cfg = _make_lstm_cfg(tmp_path)
+    forecaster = build_forecaster(cfg)
+    dataset = build_dataset(cfg, mode="train")
+    episode = dataset.get_episode(0)
+    signals = {
+        key: np.asarray(value, dtype=np.float32)
+        for key, value in dict(episode.get("signals", {})).items()
+    }
+    meta = dict(episode.get("meta", {}))
+    timestamps = list(meta.get("timestamps") or [])
+    horizon = int(cfg.env.future_horizon) + 1
+
+    forecaster.reset()
+    forecaster.set_episode(signals, meta)
+
+    for signal_name in ("price", "load", "pv"):
+        expected = _build_stepwise_episode_forecast_matrix(
+            forecaster,
+            signals[signal_name],
+            signal_name=signal_name,
+            timestamps=timestamps,
+            horizon=horizon,
+        )
+        actual = forecaster.predict_episode_matrix(
+            signals[signal_name],
+            horizon,
+            signal_name=signal_name,
+            history_timestamps=timestamps,
+            batch_size=8,
+        )
+        assert actual.shape == expected.shape
+        assert np.allclose(actual, expected)
 
 
 def test_fastlab_env_matches_base_env_and_minimal_info_history(tmp_path) -> None:

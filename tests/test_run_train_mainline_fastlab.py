@@ -28,6 +28,8 @@ def test_run_train_mainline_fastlab_cli_smoke_with_subproc(tmp_path):
         "refresh_observation_cache": False,
         "train_info_mode": "minimal",
         "fast_grid_core": True,
+        "observation_cache_batch_size": 8,
+        "observation_cache_root": str(tmp_path / "cache"),
     }
     data_controls = {
         "prediction_mode": "perfect",
@@ -127,5 +129,6 @@ def test_run_train_mainline_fastlab_cli_smoke_with_subproc(tmp_path):
     assert progress_payload["remaining_seconds"] == 0.0
     assert result["perf_summary"]["observation_cache_mode"] == "precomputed_exact"
     assert result["perf_summary"]["train_info_mode"] == "minimal"
+    assert result["perf_summary"]["observation_cache_batch_size"] == 8
     assert "cache_build_time_s" in result["perf_summary"]
     assert "cache_hit" in result["perf_summary"]

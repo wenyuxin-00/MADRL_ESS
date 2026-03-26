@@ -32,7 +32,7 @@ def test_grid_notebook_exposes_external_mainline_and_reloadable_test_paths():
     assert '"from_pv_power_ratio": 0.5' in notebook_text
     assert '"algorithm": "MATD3"' in notebook_text
     assert '"vec_env_type": "subproc"' in notebook_text
-    assert '"batch_size": 4096' in notebook_text
+    assert "\"batch_size\": 2048" in notebook_text
     assert '"buffer_size": 200000' in notebook_text
     assert '"update_interval": 1' in notebook_text
     assert '"updates_per_step": 2' in notebook_text
@@ -44,6 +44,13 @@ def test_grid_notebook_exposes_external_mainline_and_reloadable_test_paths():
     assert 'reward_summary_path = Path(train_result["reward_summary_path"])' in notebook_text
     assert "plot_reward_decomposition(" in notebook_text
     assert "reward_summary=reward_summary_path" in notebook_text
+    assert "\"refresh_observation_cache\": False" in notebook_text
+    assert "\"observation_cache_batch_size\": 8192" in notebook_text
+    assert "\"observation_cache_root\": None" in notebook_text
+    assert "Training backend: fastlab" in notebook_text
+    assert "Cache hit:" in notebook_text
+    assert "Cache build time (s):" in notebook_text
+    assert "Avg env ms/iter:" in notebook_text
     assert "cfg.algo.name = algorithm" in notebook_text
 
     assert "write_notebook_run_metadata(" not in notebook_text

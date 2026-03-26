@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
+from numpy.lib.format import open_memmap
 
 from data.loaders.registry import build_dataset
-from envs.observation.feature_blocks import build_calendar_time_features
+from predictors.time_features import DEFAULT_LOCAL_TIMEZONE, coerce_timestamp_index
 from predictors.lstm_forecaster import load_lstm_forecaster_artifacts
 from predictors.registry import build_forecaster
 from scripts.utils.project_paths import project_root
@@ -112,32 +114,54 @@ def _signature_hash(signature: dict[str, object]) -> str:
 
 
 def _compute_future_mean_price(price: np.ndarray, future_horizon: int) -> tuple[np.ndarray, np.ndarray]:
-    price = np.asarray(price, dtype=np.float32).reshape(-1)
-    horizon = int(max(future_horizon, 1))
-    mu_t = np.zeros_like(price, dtype=np.float32)
-    mu_next = np.zeros_like(price, dtype=np.float32)
-    for t in range(price.shape[0]):
-        start = t + 1
-        end = min(t + 1 + horizon, price.shape[0])
-        if start >= price.shape[0]:
-            mu_t[t] = np.float32(price[min(t, price.shape[0] - 1)])
-        else:
-            chunk = price[start:end]
-            mu_t[t] = np.float32(np.mean(chunk)) if chunk.size else np.float32(price[min(t, price.shape[0] - 1)])
+    values = np.asarray(price, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
 
-        t_next = min(t + 1, price.shape[0] - 1)
-        start_next = t_next + 1
-        end_next = min(t_next + 1 + horizon, price.shape[0])
-        if start_next >= price.shape[0]:
-            mu_next[t] = np.float32(price[t_next])
-        else:
-            chunk_next = price[start_next:end_next]
-            mu_next[t] = (
-                np.float32(np.mean(chunk_next))
-                if chunk_next.size
-                else np.float32(price[t_next])
-            )
-    return mu_t.astype(np.float32), mu_next.astype(np.float32)
+    horizon = int(max(future_horizon, 1))
+    idx = np.arange(values.size, dtype=np.int64)
+    csum = np.concatenate([[0.0], np.cumsum(values.astype(np.float64), dtype=np.float64)], axis=0)
+
+    start = idx + 1
+    end = np.minimum(idx + 1 + horizon, values.size)
+    valid = start < values.size
+    sums = csum[end] - csum[start]
+    lengths = np.maximum(end - start, 1)
+    mu_t = np.where(valid, sums / lengths, values[np.minimum(idx, values.size - 1)]).astype(np.float32)
+
+    next_idx = np.minimum(idx + 1, values.size - 1)
+    start_next = next_idx + 1
+    end_next = np.minimum(next_idx + 1 + horizon, values.size)
+    valid_next = start_next < values.size
+    sums_next = csum[end_next] - csum[start_next]
+    lengths_next = np.maximum(end_next - start_next, 1)
+    mu_next = np.where(valid_next, sums_next / lengths_next, values[next_idx]).astype(np.float32)
+    return mu_t.astype(np.float32, copy=False), mu_next.astype(np.float32, copy=False)
+
+
+def _build_calendar_time_matrix(
+    timestamps: list[str | pd.Timestamp] | np.ndarray | tuple[str | pd.Timestamp, ...],
+    n_agents: int,
+) -> np.ndarray:
+    index = coerce_timestamp_index(timestamps)
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_convert(DEFAULT_LOCAL_TIMEZONE)
+
+    hour_of_day = (
+        index.hour.to_numpy(dtype=np.float32)
+        + index.minute.to_numpy(dtype=np.float32) / np.float32(60.0)
+    )
+    day_of_year = (index.dayofyear.to_numpy(dtype=np.float32) - np.float32(1.0)) + hour_of_day / np.float32(24.0)
+
+    hour_phase = np.float32(2.0 * np.pi) * hour_of_day / np.float32(24.0)
+    year_phase = np.float32(2.0 * np.pi) * day_of_year / np.float32(365.25)
+
+    per_step = np.empty((len(index), 4), dtype=np.float32)
+    per_step[:, 0] = np.sin(hour_phase).astype(np.float32)
+    per_step[:, 1] = np.cos(hour_phase).astype(np.float32)
+    per_step[:, 2] = np.sin(year_phase).astype(np.float32)
+    per_step[:, 3] = np.cos(year_phase).astype(np.float32)
+    return np.broadcast_to(per_step[:, None, :], (len(index), int(n_agents), 4)).astype(np.float32, copy=False)
 
 
 def _default_cache_root(root: str | Path | None = None) -> Path:
@@ -192,6 +216,7 @@ def build_or_load_observation_cache(
     forecast_ready: dict[str, object] | None = None,
     refresh: bool = False,
     root: str | Path | None = None,
+    batch_size: int | None = None,
 ) -> ObservationCacheResult:
     signature = _cache_signature(cfg, split=str(split), forecast_ready=forecast_ready)
     cache_root = _default_cache_root(root)
@@ -218,22 +243,68 @@ def build_or_load_observation_cache(
     episode_length = int(cfg.env.episode_limit)
     n_agents = int(cfg.env.num_agents)
     sequence_length = int(cfg.env.future_horizon) + 1
+    resolved_batch_size = max(
+        int(
+            batch_size
+            if batch_size is not None
+            else getattr(getattr(cfg, "runtime", None), "fastlab_observation_cache_batch_size", 8192)
+        ),
+        1,
+    )
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    arrays: dict[str, np.ndarray] = {}
+    files: dict[str, str] = {}
+    arrays: dict[str, np.memmap] = {}
     if "calendar_time" in required_names:
-        arrays["calendar_time"] = np.zeros((n_episodes, episode_length, n_agents, 4), dtype=np.float32)
+        files["calendar_time"] = "calendar_time.npy"
+        arrays["calendar_time"] = open_memmap(
+            cache_dir / files["calendar_time"],
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_episodes, episode_length, n_agents, 4),
+        )
     if "price_seq" in required_names:
-        arrays["price_seq"] = np.zeros((n_episodes, episode_length, sequence_length), dtype=np.float32)
+        files["price_seq"] = "price_seq.npy"
+        arrays["price_seq"] = open_memmap(
+            cache_dir / files["price_seq"],
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_episodes, episode_length, sequence_length),
+        )
     if "load_seq" in required_names:
-        arrays["load_seq"] = np.zeros((n_episodes, episode_length, n_agents, sequence_length), dtype=np.float32)
+        files["load_seq"] = "load_seq.npy"
+        arrays["load_seq"] = open_memmap(
+            cache_dir / files["load_seq"],
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_episodes, episode_length, n_agents, sequence_length),
+        )
     if "pv_seq" in required_names:
-        arrays["pv_seq"] = np.zeros((n_episodes, episode_length, n_agents, sequence_length), dtype=np.float32)
-    arrays["mu_t"] = np.zeros((n_episodes, episode_length), dtype=np.float32)
-    arrays["mu_next"] = np.zeros((n_episodes, episode_length), dtype=np.float32)
+        files["pv_seq"] = "pv_seq.npy"
+        arrays["pv_seq"] = open_memmap(
+            cache_dir / files["pv_seq"],
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_episodes, episode_length, n_agents, sequence_length),
+        )
+    files["mu_t"] = "mu_t.npy"
+    files["mu_next"] = "mu_next.npy"
+    arrays["mu_t"] = open_memmap(
+        cache_dir / files["mu_t"],
+        mode="w+",
+        dtype=np.float32,
+        shape=(n_episodes, episode_length),
+    )
+    arrays["mu_next"] = open_memmap(
+        cache_dir / files["mu_next"],
+        mode="w+",
+        dtype=np.float32,
+        shape=(n_episodes, episode_length),
+    )
 
     forecaster = build_forecaster(cfg)
+    vectorized_forecaster = hasattr(forecaster, "predict_episode_matrix")
 
     for episode_idx in range(n_episodes):
         episode = dataset.get_episode(episode_idx)
@@ -250,12 +321,37 @@ def build_or_load_observation_cache(
         arrays["mu_t"][episode_idx] = mu_t
         arrays["mu_next"][episode_idx] = mu_next
 
+        if "calendar_time" in arrays:
+            arrays["calendar_time"][episode_idx] = _build_calendar_time_matrix(timestamps, n_agents)
+
+        if vectorized_forecaster:
+            if "price_seq" in arrays:
+                arrays["price_seq"][episode_idx] = forecaster.predict_episode_matrix(
+                    signals["price"],
+                    sequence_length,
+                    signal_name="price",
+                    history_timestamps=timestamps,
+                    batch_size=resolved_batch_size,
+                ).astype(np.float32)
+            if "load_seq" in arrays:
+                arrays["load_seq"][episode_idx] = forecaster.predict_episode_matrix(
+                    signals["load"],
+                    sequence_length,
+                    signal_name="load",
+                    history_timestamps=timestamps,
+                    batch_size=resolved_batch_size,
+                ).astype(np.float32)
+            if "pv_seq" in arrays:
+                arrays["pv_seq"][episode_idx] = forecaster.predict_episode_matrix(
+                    signals["pv"],
+                    sequence_length,
+                    signal_name="pv",
+                    history_timestamps=timestamps,
+                    batch_size=resolved_batch_size,
+                ).astype(np.float32)
+            continue
+
         for step_idx in range(episode_length):
-            if "calendar_time" in arrays:
-                arrays["calendar_time"][episode_idx, step_idx] = build_calendar_time_features(
-                    timestamps[step_idx],
-                    n_agents,
-                )
             history_timestamps = timestamps[: step_idx + 1]
             if "price_seq" in arrays:
                 price_history = signals["price"][: step_idx + 1]
@@ -282,11 +378,8 @@ def build_or_load_observation_cache(
                     history_timestamps=history_timestamps,
                 ).astype(np.float32)
 
-    files: dict[str, str] = {}
-    for name, array in arrays.items():
-        file_name = f"{name}.npy"
-        np.save(cache_dir / file_name, array, allow_pickle=False)
-        files[name] = file_name
+    for array in arrays.values():
+        array.flush()
 
     manifest = {
         "signature": signature,
