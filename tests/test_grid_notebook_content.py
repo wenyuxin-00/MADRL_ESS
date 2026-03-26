@@ -20,9 +20,9 @@ def test_grid_notebook_exposes_external_mainline_and_reloadable_test_paths():
     assert "ensure_forecast_ready(" in notebook_text
     assert "collect_madrl_rollout(" in notebook_text
     assert "collect_mpc_rollout(" in notebook_text
-    assert "plot_test_rollout(" in notebook_text
-    assert "plot_test_voltage_profile(" in notebook_text
-    assert "plot_operating_cost_comparison(" in notebook_text
+    assert "plot_rollout_dashboard(" in notebook_text
+    assert "compare_rollout_metrics(" in notebook_text
+    assert "plot_rollout_comparison_dashboard(" in notebook_text
     assert "recommended_gpu_fast_num_envs()" in notebook_text
     assert "run_external_train_mainline(" in notebook_text
     assert '"launch_mode": "external"' in notebook_text

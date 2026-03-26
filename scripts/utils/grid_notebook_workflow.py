@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from controllers.mpc import solve_single_agent_gurobi_mpc_action
 from predictors.artifacts import get_default_lstm_artifact_dir
 from predictors.training import ensure_lstm_artifacts
 
@@ -261,61 +262,19 @@ def _solve_single_agent_mpc_action(
     efficiency: float,
     soc_min: float,
     soc_max: float,
-    soc_target: float,
-    energy_grid_size: int = 61,
-    terminal_weight: float = 0.25,
 ) -> float:
-    if battery_capacity_kwh <= 0.0 or p_max_kw <= 0.0:
-        return 0.0
-
-    prices = np.asarray(price_seq, dtype=np.float32).reshape(-1)
-    net_load = (np.asarray(load_seq, dtype=np.float32) - np.asarray(pv_seq, dtype=np.float32)).reshape(-1)
-    horizon = int(min(len(prices), len(net_load)))
-    if horizon <= 0:
-        return 0.0
-
-    eff = max(float(efficiency), 1e-6)
-    energy_min = float(soc_min) * float(battery_capacity_kwh)
-    energy_max = float(soc_max) * float(battery_capacity_kwh)
-    energy_now = float(np.clip(soc, soc_min, soc_max) * battery_capacity_kwh)
-    target_energy = float(np.clip(soc_target, soc_min, soc_max) * battery_capacity_kwh)
-    energy_grid = np.linspace(energy_min, energy_max, int(max(3, energy_grid_size)), dtype=np.float32)
-
-    terminal = terminal_weight * (prices.max(initial=0.0) + 1e-3) * np.square(energy_grid - target_energy)
-    cost_to_go = terminal.astype(np.float32)
-
-    for step_idx in range(horizon - 1, -1, -1):
-        next_cost = np.full_like(cost_to_go, np.inf, dtype=np.float32)
-        for state_idx, energy in enumerate(energy_grid):
-            delta = energy_grid - energy
-            power = np.where(
-                delta >= 0.0,
-                delta / (eff * float(dt_hours)),
-                delta * eff / float(dt_hours),
-            ).astype(np.float32)
-            feasible = np.abs(power) <= float(p_max_kw) + 1e-6
-            if not np.any(feasible):
-                continue
-            feasible_idx = np.flatnonzero(feasible)
-            stage_cost = (net_load[step_idx] + power[feasible]) * float(dt_hours) * prices[step_idx]
-            total_cost = stage_cost + cost_to_go[feasible_idx]
-            next_cost[state_idx] = float(np.min(total_cost))
-        cost_to_go = next_cost
-
-    delta0 = energy_grid - energy_now
-    power0 = np.where(
-        delta0 >= 0.0,
-        delta0 / (eff * float(dt_hours)),
-        delta0 * eff / float(dt_hours),
-    ).astype(np.float32)
-    feasible0 = np.abs(power0) <= float(p_max_kw) + 1e-6
-    if not np.any(feasible0):
-        return 0.0
-
-    feasible_idx0 = np.flatnonzero(feasible0)
-    stage0 = (net_load[0] + power0[feasible0]) * float(dt_hours) * prices[0]
-    total0 = stage0 + cost_to_go[feasible_idx0]
-    return float(power0[feasible_idx0[int(np.argmin(total0))]])
+    return solve_single_agent_gurobi_mpc_action(
+        price_seq=price_seq,
+        load_seq=load_seq,
+        pv_seq=pv_seq,
+        soc=soc,
+        battery_capacity_kwh=battery_capacity_kwh,
+        p_max_kw=p_max_kw,
+        dt_hours=dt_hours,
+        efficiency=efficiency,
+        soc_min=soc_min,
+        soc_max=soc_max,
+    )
 
 
 def _mpc_policy(env, obs: dict[str, np.ndarray]) -> list[np.ndarray]:
@@ -335,7 +294,6 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> list[np.ndarray]:
             efficiency=float(env.eff),
             soc_min=float(env.soc_min),
             soc_max=float(env.soc_max),
-            soc_target=float(env.soc_target),
         )
         actions.append(_power_to_normalized_action(power_kw, float(env.agent_p_max[agent_idx])))
     return actions
@@ -537,6 +495,213 @@ def compare_operating_costs(*rollouts: RolloutResult) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("total_operating_cost").reset_index(drop=True)
 
 
+def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
+    step_df = rollout.step_df.copy()
+    agent_df = rollout.agent_df.copy()
+    grid_df = rollout.grid_df.copy()
+
+    total_operating_cost = float(agent_df["operating_cost"].sum()) if not agent_df.empty else 0.0
+    price_mae = (
+        float(np.abs(step_df["price"] - step_df["price_pred"]).mean())
+        if not step_df.empty
+        else float("nan")
+    )
+    load_mae = (
+        float(np.abs(agent_df["load"] - agent_df["load_pred"]).mean())
+        if not agent_df.empty
+        else float("nan")
+    )
+    pv_mae = (
+        float(np.abs(agent_df["pv"] - agent_df["pv_pred"]).mean())
+        if not agent_df.empty
+        else float("nan")
+    )
+
+    v_min = float(rollout.meta.get("v_min_pu", np.nan))
+    v_max = float(rollout.meta.get("v_max_pu", np.nan))
+    if grid_df.empty or not np.isfinite(v_min) or not np.isfinite(v_max):
+        voltage_violation_bus_points = 0
+        voltage_violation_steps = 0
+        min_vm_pu = float("nan")
+        max_vm_pu = float("nan")
+    else:
+        violation_mask = (grid_df["vm_pu"] < v_min) | (grid_df["vm_pu"] > v_max)
+        voltage_violation_bus_points = int(violation_mask.sum())
+        voltage_violation_steps = int(
+            grid_df.loc[violation_mask, ["episode_idx", "step"]].drop_duplicates().shape[0]
+        )
+        min_vm_pu = float(grid_df["vm_pu"].min())
+        max_vm_pu = float(grid_df["vm_pu"].max())
+
+    return {
+        "controller": str(rollout.meta.get("controller", "unknown")),
+        "total_operating_cost": total_operating_cost,
+        "price_mae": price_mae,
+        "load_mae": load_mae,
+        "pv_mae": pv_mae,
+        "voltage_violation_steps": voltage_violation_steps,
+        "voltage_violation_bus_points": voltage_violation_bus_points,
+        "min_vm_pu": min_vm_pu,
+        "max_vm_pu": max_vm_pu,
+        "v_min_pu": v_min,
+        "v_max_pu": v_max,
+    }
+
+
+def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
+    rows = [summarize_rollout_metrics(rollout) for rollout in rollouts]
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "controller",
+                "total_operating_cost",
+                "price_mae",
+                "load_mae",
+                "pv_mae",
+                "voltage_violation_steps",
+                "voltage_violation_bus_points",
+                "min_vm_pu",
+                "max_vm_pu",
+                "v_min_pu",
+                "v_max_pu",
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_rollout_dashboard(
+    rollout: RolloutResult,
+    *,
+    figsize: tuple[float, float] | None = None,
+):
+    step_df = rollout.step_df.copy()
+    agent_df = rollout.agent_df.copy()
+    grid_df = rollout.grid_df.copy()
+    if step_df.empty or agent_df.empty:
+        raise ValueError("Rollout is empty; nothing to plot.")
+
+    agent_profiles = list(rollout.meta["agent_profiles"])
+    n_agents = len(agent_profiles)
+    main_axis_count = 4 + n_agents
+    if figsize is None:
+        figsize = (18.0, 2.8 * main_axis_count)
+
+    figure, axes = plt.subplots(main_axis_count, 1, figsize=figsize, sharex=True)
+    axes = np.atleast_1d(axes)
+    palette = ["#0f172a", "#2563eb", "#16a34a", "#ea580c", "#dc2626", "#7c3aed"]
+
+    axes[0].plot(step_df["timestamp"], step_df["price"], color="#111827", linewidth=1.6, label="Actual")
+    axes[0].plot(
+        step_df["timestamp"],
+        step_df["price_pred"],
+        color="#dc2626",
+        linewidth=1.4,
+        linestyle="--",
+        label="Forecast",
+    )
+    axes[0].set_ylabel("Price")
+    axes[0].set_title(f"Test Rollout Dashboard - {rollout.meta['controller']}")
+    axes[0].grid(True, alpha=0.25)
+    axes[0].legend(loc="upper right")
+
+    for axis_idx, signal_name in enumerate(["pv", "load"], start=1):
+        axis = axes[axis_idx]
+        for agent_idx, profile in enumerate(agent_profiles):
+            agent_frame = agent_df.loc[agent_df["agent_profile"] == profile]
+            color = palette[agent_idx % len(palette)]
+            axis.plot(
+                agent_frame["timestamp"],
+                agent_frame[signal_name],
+                color=color,
+                linewidth=1.4,
+                label=f"{profile} actual",
+            )
+            axis.plot(
+                agent_frame["timestamp"],
+                agent_frame[f"{signal_name}_pred"],
+                color=color,
+                linewidth=1.2,
+                linestyle="--",
+                label=f"{profile} forecast",
+            )
+        axis.set_ylabel(signal_name.upper())
+        axis.grid(True, alpha=0.25)
+        axis.legend(loc="upper right", ncol=2)
+
+    for agent_offset, profile in enumerate(agent_profiles, start=3):
+        axis = axes[agent_offset]
+        agent_frame = agent_df.loc[agent_df["agent_profile"] == profile]
+        charge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), 0.0, None)
+        discharge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), None, 0.0)
+        axis.bar(agent_frame["timestamp"], charge, width=0.008, color="#dc2626", alpha=0.7, label="Charge")
+        axis.bar(agent_frame["timestamp"], discharge, width=0.008, color="#2563eb", alpha=0.7, label="Discharge")
+        axis.set_ylabel(f"{profile}\nP_bat")
+        axis.grid(True, alpha=0.25)
+
+        soc_axis = axis.twinx()
+        soc_axis.plot(agent_frame["timestamp"], agent_frame["soc"], color="#111827", linewidth=1.2, label="SoC")
+        soc_axis.set_ylabel("SoC")
+        soc_axis.set_ylim(0.0, 1.0)
+
+        handles_1, labels_1 = axis.get_legend_handles_labels()
+        handles_2, labels_2 = soc_axis.get_legend_handles_labels()
+        axis.legend(handles_1 + handles_2, labels_1 + labels_2, loc="upper right")
+
+    voltage_axis = axes[-1]
+    if grid_df.empty:
+        raise ValueError("Rollout does not contain full-grid voltage traces.")
+
+    muted_color = "#cbd5e1"
+    highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+
+    for bus_id, frame in grid_df.loc[~grid_df["is_agent_bus"]].groupby("bus_id"):
+        voltage_axis.plot(
+            frame["timestamp"],
+            frame["vm_pu"],
+            color=muted_color,
+            linewidth=0.9,
+            alpha=0.35,
+            zorder=1,
+        )
+
+    for color_idx, bus_id in enumerate(rollout.meta["agent_bus_ids"]):
+        frame = grid_df.loc[grid_df["bus_id"] == int(bus_id)]
+        if frame.empty:
+            continue
+        voltage_axis.plot(
+            frame["timestamp"],
+            frame["vm_pu"],
+            color=highlight_palette[color_idx % len(highlight_palette)],
+            linewidth=2.1,
+            alpha=0.95,
+            label=f"Agent bus {bus_id}",
+            zorder=3,
+        )
+
+    voltage_axis.axhline(
+        float(rollout.meta["v_min_pu"]),
+        color="#dc2626",
+        linestyle="--",
+        linewidth=1.1,
+        label="V min",
+    )
+    voltage_axis.axhline(
+        float(rollout.meta["v_max_pu"]),
+        color="#ea580c",
+        linestyle="--",
+        linewidth=1.1,
+        label="V max",
+    )
+    voltage_axis.set_ylabel("Voltage [p.u.]")
+    voltage_axis.set_xlabel("Timestamp")
+    voltage_axis.grid(True, alpha=0.25)
+    voltage_axis.legend(loc="upper right", ncol=2)
+
+    figure.tight_layout()
+    figure._dashboard_main_axes = list(axes)
+    return figure
+
+
 def plot_test_rollout(rollout: RolloutResult, *, figsize: tuple[float, float] | None = None):
     step_df = rollout.step_df.copy()
     agent_df = rollout.agent_df.copy()
@@ -675,6 +840,67 @@ def plot_operating_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[floa
     return figure
 
 
+def plot_rollout_comparison_dashboard(
+    metrics_df: pd.DataFrame,
+    *,
+    figsize: tuple[float, float] = (16.0, 9.0),
+):
+    if metrics_df.empty:
+        raise ValueError("metrics_df is empty; nothing to plot.")
+
+    figure, axes = plt.subplots(2, 3, figsize=figsize)
+    axes = np.asarray(axes).reshape(-1)
+    controllers = metrics_df["controller"].astype(str).tolist()
+    x = np.arange(len(controllers))
+    bar_palette = ["#2563eb", "#16a34a", "#dc2626", "#ea580c", "#7c3aed", "#0891b2"]
+    colors = [bar_palette[idx % len(bar_palette)] for idx in range(len(controllers))]
+
+    metric_specs = [
+        ("total_operating_cost", "Total Operating Cost"),
+        ("price_mae", "Price MAE"),
+        ("load_mae", "Load MAE"),
+        ("pv_mae", "PV MAE"),
+        ("voltage_violation_steps", "Voltage Violation Steps"),
+    ]
+    for axis, (column, title) in zip(axes[:5], metric_specs, strict=False):
+        axis.bar(x, metrics_df[column].astype(float).to_numpy(), color=colors)
+        axis.set_xticks(x)
+        axis.set_xticklabels(controllers, rotation=15, ha="right")
+        axis.set_title(title)
+        axis.grid(True, axis="y", alpha=0.25)
+
+    voltage_axis = axes[5]
+    min_values = metrics_df["min_vm_pu"].astype(float).to_numpy()
+    max_values = metrics_df["max_vm_pu"].astype(float).to_numpy()
+    voltage_axis.vlines(x, min_values, max_values, color=colors, linewidth=3.0, alpha=0.9)
+    voltage_axis.scatter(x, min_values, color=colors, s=42, marker="v", label="Min vm_pu")
+    voltage_axis.scatter(x, max_values, color=colors, s=42, marker="^", label="Max vm_pu")
+    if "v_min_pu" in metrics_df.columns and metrics_df["v_min_pu"].notna().any():
+        voltage_axis.axhline(
+            float(metrics_df["v_min_pu"].dropna().iloc[0]),
+            color="#dc2626",
+            linestyle="--",
+            linewidth=1.1,
+            label="V min",
+        )
+    if "v_max_pu" in metrics_df.columns and metrics_df["v_max_pu"].notna().any():
+        voltage_axis.axhline(
+            float(metrics_df["v_max_pu"].dropna().iloc[0]),
+            color="#ea580c",
+            linestyle="--",
+            linewidth=1.1,
+            label="V max",
+        )
+    voltage_axis.set_xticks(x)
+    voltage_axis.set_xticklabels(controllers, rotation=15, ha="right")
+    voltage_axis.set_title("Voltage Range")
+    voltage_axis.grid(True, axis="y", alpha=0.25)
+    voltage_axis.legend(loc="upper right")
+
+    figure.tight_layout()
+    return figure
+
+
 __all__ = [
     "FORECAST_EVAL_MODE",
     "NORMAL_PREDICTION_MODE",
@@ -686,14 +912,18 @@ __all__ = [
     "collect_madrl_rollout",
     "collect_mpc_rollout",
     "collect_controller_rollout",
+    "compare_rollout_metrics",
     "compare_operating_costs",
     "ensure_forecast_ready",
     "normalize_date_input",
     "normalize_prediction_mode",
     "plot_operating_cost_comparison",
+    "plot_rollout_comparison_dashboard",
+    "plot_rollout_dashboard",
     "plot_test_rollout",
     "plot_test_voltage_profile",
     "resolve_evaluation_mode",
     "resolve_forecast_backend",
     "resolve_prediction_mode_from_forecast_backend",
+    "summarize_rollout_metrics",
 ]
