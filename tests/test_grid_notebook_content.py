@@ -47,7 +47,7 @@ def test_grid_notebook_exposes_external_mainline_and_reloadable_test_paths():
     assert "\"refresh_observation_cache\": False" in notebook_text
     assert "\"observation_cache_batch_size\": 8192" in notebook_text
     assert "\"observation_cache_root\": None" in notebook_text
-    assert "Training backend: fastlab" in notebook_text
+    assert "Training backend: mainline" in notebook_text
     assert "Cache hit:" in notebook_text
     assert "Cache build time (s):" in notebook_text
     assert "Avg env ms/iter:" in notebook_text

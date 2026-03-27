@@ -1,4 +1,4 @@
-"""CLI entrypoint for the high-throughput training mainline."""
+"""CLI entrypoint for the cached-observation MADRL training mainline."""
 
 from __future__ import annotations
 
@@ -112,6 +112,13 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
             setattr(cfg.runtime, field_name, str(controls[field_name]))
 
 
+def _public_vec_env_name(env: Any) -> str:
+    name = type(env).__name__
+    if name == 'SubprocVecEnvFastLab':
+        return 'SubprocVecEnv'
+    return name
+
+
 def _resolve_save_dir(
     *,
     args,
@@ -194,7 +201,7 @@ def _build_result_payload(
             )
         ),
         "device": str(cfg.runtime.device),
-        "vec_env": type(runner.env).__name__,
+        "vec_env": _public_vec_env_name(runner.env),
         "perf_summary": dict(runner.perf_summary),
         "started_at": run_metadata.get("started_at"),
         "finished_at": run_metadata.get("finished_at"),
@@ -213,7 +220,7 @@ def _build_result_payload(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the fast-lab-backed Grid MADRL training mainline.")
+    parser = argparse.ArgumentParser(description="Run the cached-observation Grid MADRL training mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
     parser.add_argument("--battery-controls")
@@ -332,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     summary["meta_dir"] = str(meta_dir)
     summary["log_path"] = str(log_path)
     summary["run_label"] = str(save_dir.name)
-    summary["training_backend"] = "fastlab"
+    summary["training_backend"] = "mainline"
     summary["observation_cache_mode"] = observation_cache_mode
     summary["train_info_mode"] = train_info_mode
     summary["fast_grid_core"] = fast_grid_core
@@ -386,4 +393,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

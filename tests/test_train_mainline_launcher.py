@@ -183,7 +183,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
     assert result["battery_controls"]["mode"] == "from_pv"
-    assert result["vec_env"] == "SubprocVecEnvFastLab"
+    assert result["vec_env"] == "SubprocVecEnv"
     assert result["device"] == "cpu"
     assert result["started_at"]
     assert result["finished_at"]

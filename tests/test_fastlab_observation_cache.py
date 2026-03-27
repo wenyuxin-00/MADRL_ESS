@@ -111,7 +111,7 @@ def _build_stepwise_episode_forecast_matrix(
     return np.stack(rows, axis=0).astype(np.float32)
 
 
-def test_fastlab_cache_matches_default_builder_for_lstm(tmp_path) -> None:
+def test_mainline_cache_matches_default_builder_for_lstm(tmp_path) -> None:
     cfg = _make_lstm_cfg(tmp_path)
     cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
     store = ObservationCacheStore(cache_result.cache_dir)
@@ -185,7 +185,7 @@ def test_lstm_forecaster_predict_episode_matrix_matches_stepwise_predict(tmp_pat
         assert np.allclose(actual, expected)
 
 
-def test_fastlab_env_matches_base_env_and_minimal_info_history(tmp_path) -> None:
+def test_mainline_cached_env_matches_base_env_and_minimal_info_history(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
     cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
 

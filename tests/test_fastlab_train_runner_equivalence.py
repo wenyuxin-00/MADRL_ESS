@@ -45,7 +45,7 @@ def _run_base_runner(cfg, *, seed: int):
         runner.close()
 
 
-def _run_fastlab_runner(cfg, *, seed: int, tmp_path):
+def _run_cached_mainline_runner(cfg, *, seed: int, tmp_path):
     cache_result = build_or_load_observation_cache(
         cfg,
         split="train",
@@ -57,7 +57,7 @@ def _run_fastlab_runner(cfg, *, seed: int, tmp_path):
     cfg.runtime.fastlab_train_info_mode = "minimal"
     cfg.runtime.fastlab_fast_grid_core = True
 
-    runner = build_train_runner_fastlab(cfg, seed=seed, env_name="GridTrainFastLabExact", number=1)
+    runner = build_train_runner_fastlab(cfg, seed=seed, env_name="GridTrainMainlineCachedExact", number=1)
     try:
         episodes = runner.run()
         return {
@@ -70,20 +70,20 @@ def _run_fastlab_runner(cfg, *, seed: int, tmp_path):
         runner.close()
 
 
-def test_fastlab_train_runner_matches_mainline_with_fixed_seed(tmp_path) -> None:
+def test_cached_mainline_train_runner_matches_base_runner_with_fixed_seed(tmp_path) -> None:
     seed = 11
     base_cfg = _make_train_equivalence_cfg(tmp_path / "base")
     fast_cfg = deepcopy(base_cfg)
 
     base_result = _run_base_runner(base_cfg, seed=seed)
-    fast_result = _run_fastlab_runner(fast_cfg, seed=seed, tmp_path=tmp_path)
+    cached_result = _run_cached_mainline_runner(fast_cfg, seed=seed, tmp_path=tmp_path)
 
-    assert base_result["episodes"] == fast_result["episodes"]
-    assert base_result["total_steps"] == fast_result["total_steps"]
-    assert np.allclose(base_result["episode_rewards"], fast_result["episode_rewards"], atol=1e-6)
+    assert base_result["episodes"] == cached_result["episodes"]
+    assert base_result["total_steps"] == cached_result["total_steps"]
+    assert np.allclose(base_result["episode_rewards"], cached_result["episode_rewards"], atol=1e-6)
 
     base_summary = base_result["reward_summary"]
-    fast_summary = fast_result["reward_summary"]
+    fast_summary = cached_result["reward_summary"]
     assert base_summary["episodes"] == fast_summary["episodes"]
     assert np.allclose(base_summary["episode_total_reward"], fast_summary["episode_total_reward"], atol=1e-6)
     assert set(base_summary["components"]) == set(fast_summary["components"])
