@@ -26,7 +26,6 @@ IGNORE_DIRS = {
     "venv",
     ".venv",
     "env",
-    "tests",
     ".env",
     ".conda",
     ".tox",
@@ -54,12 +53,12 @@ IGNORE_DIRS = {
     ".toml",
     ".sh",
     ".bat",
+    # 已经移除了 "tests" 和 "/test"，防止全局无差别过滤
 }
 
 ALLOWED_EXTENSIONS = {
     ".ipynb",
     ".py",
-
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +66,11 @@ OUTPUT_FILE = PROJECT_ROOT / "full_project_code.txt"
 
 
 def is_environment_dir(path: Path) -> bool:
-    """Skip virtual environments and generated caches."""
+    """Skip virtual environments, generated caches, and root tests dir."""
+    # 🌟 新增：仅精确过滤根目录下的 tests 文件夹
+    if path == PROJECT_ROOT / "tests":
+        return True
+
     if path.name in IGNORE_DIRS:
         return True
 
@@ -155,4 +158,3 @@ def export_project_code() -> None:
 
 if __name__ == "__main__":
     export_project_code()
-
