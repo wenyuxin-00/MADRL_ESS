@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import patch
 import warnings
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import json
 import numpy as np
 import pandas as pd
 
-from scripts.plots.plots import plot_last_k_episodes_price_action_soc
 from scripts.plots.reward_plots import plot_reward_decomposition
 from scripts.utils.grid_notebook_workflow import (
     RolloutResult,
@@ -19,30 +18,7 @@ from scripts.utils.grid_notebook_workflow import (
     plot_test_voltage_profile,
 )
 
-
-def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles():
-    history = [
-        {
-            "price": [0.1, 0.2, 0.3],
-            "soc": [[0.5, 0.55, 0.6, 0.65], [0.4, 0.45, 0.5, 0.55]],
-            "e_bat_req": [[0.1, -0.1, 0.0], [0.0, 0.1, -0.1]],
-            "e_bat_exec": [[0.1, -0.05, 0.0], [0.0, 0.1, -0.05]],
-            "r_cost_sum": [0.1, 0.05],
-            "r_throughput_sum": [0.02, 0.01],
-            "r_action_pen_sum": [-0.05, -0.02],
-            "r_safe_v_sum": [-0.2, -0.1],
-            "r_safe_trafo_sum": [-0.1, -0.2],
-        }
-    ]
-    reward_fn = SimpleNamespace(
-        component_meta=[
-            SimpleNamespace(key="r_cost", label="+ r_cost (incremental cost)", color="green", sign=+1),
-            SimpleNamespace(key="r_throughput", label="+ r_throughput (throughput bonus)", color="teal", sign=+1),
-            SimpleNamespace(key="r_action_pen", label="- r_action_pen (action penalty)", color="orange", sign=-1),
-            SimpleNamespace(key="r_safe_v", label="- r_safe_v (voltage penalty)", color="red", sign=-1),
-            SimpleNamespace(key="r_safe_trafo", label="- r_safe_trafo (trafo penalty)", color="maroon", sign=-1),
-        ]
-    )
+def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(tmp_path):
     reward_summary = {
         "episodes": [1],
         "episode_total_reward": [1.0],
@@ -52,19 +28,16 @@ def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(
         },
         "aggregates": {"grid_safety_penalty": [-0.3]},
     }
+    reward_summary_path = tmp_path / "reward_summary.json"
+    reward_summary_path.write_text(json.dumps(reward_summary), encoding="utf-8")
 
     with warnings.catch_warnings(record=True) as caught, patch(
         "scripts.plots.reward_plots.plt.show",
         side_effect=AssertionError("plot_reward_decomposition should not call plt.show()"),
-    ), patch(
-        "scripts.plots.plots.plt.show",
-        side_effect=AssertionError("plot_last_k_episodes_price_action_soc should not call plt.show()"),
     ):
         warnings.simplefilter("always")
         reward_figure = plot_reward_decomposition(
-            history=history,
-            episode_rewards=[1.0],
-            reward_fn=reward_fn,
+            reward_summary=reward_summary_path,
             title="Training Reward Decomposition",
             window=1,
         )
@@ -73,19 +46,11 @@ def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(
             title="External Training Reward Decomposition",
             window=1,
         )
-        episode_figure = plot_last_k_episodes_price_action_soc(
-            history=history,
-            k=1,
-            n_agents=2,
-            title_prefix="Eval",
-        )
 
     assert reward_figure is not None
     assert summary_figure is not None
-    assert episode_figure is not None
     plt.close(reward_figure)
     plt.close(summary_figure)
-    plt.close(episode_figure)
     glyph_warnings = [str(item.message) for item in caught if "Glyph" in str(item.message)]
     assert glyph_warnings == []
 

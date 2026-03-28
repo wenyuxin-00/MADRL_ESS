@@ -19,6 +19,58 @@ class AgentDeployment:
     efficiency: float = 0.95
 
 
+def _resolve_positive_scalar(value: object, *, name: str) -> float:
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive scalar, got {value!r}.") from exc
+    if scalar <= 0.0:
+        raise ValueError(f"{name} must be positive, got {scalar}.")
+    return scalar
+
+
+def _resolve_capacity_vector(
+    battery_capacity: float | list[float] | tuple[float, ...],
+    *,
+    n_agents: int,
+) -> list[float]:
+    if isinstance(battery_capacity, (list, tuple)):
+        values = [float(value) for value in battery_capacity]
+        if len(values) != n_agents:
+            raise ValueError(
+                "battery_capacity should provide "
+                f"{n_agents} value(s) for fixed battery mode, got {len(values)}."
+            )
+    else:
+        values = [_resolve_positive_scalar(battery_capacity, name="battery_capacity")] * n_agents
+
+    if any(value <= 0.0 for value in values):
+        raise ValueError(f"battery_capacity must be positive for all agents, got {values}.")
+    return values
+
+
+def resolve_fixed_battery_spec(
+    battery_capacity: float | list[float] | tuple[float, ...],
+    max_charge_rate: float,
+    *,
+    n_agents: int,
+) -> tuple[list[float], float, list[float]]:
+    """Resolve fixed-mode battery capacity and power vectors.
+
+    `max_charge_rate` is interpreted as a scalar C-rate in fixed mode.
+    """
+    if isinstance(max_charge_rate, (list, tuple)):
+        raise ValueError(
+            "fixed battery mode expects max_charge_rate to be a positive scalar C-rate, "
+            f"got {max_charge_rate!r}."
+        )
+
+    capacity_kwh = _resolve_capacity_vector(battery_capacity, n_agents=n_agents)
+    c_rate = _resolve_positive_scalar(max_charge_rate, name="max_charge_rate")
+    p_max_kw = [float(capacity * c_rate) for capacity in capacity_kwh]
+    return capacity_kwh, c_rate, p_max_kw
+
+
 def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     """Build per-agent storage deployments from the experiment config."""
     from envs.grid.topology.rural1_fixed import RURAL1_AGENT_DEPLOYMENTS
@@ -26,10 +78,20 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     n_agents = int(cfg.env.num_agents)
     bus_ids = list(cfg.grid.agent_bus_ids)
     if not bus_ids:
-        return list(RURAL1_AGENT_DEPLOYMENTS[:n_agents])
+        bus_ids = [deployment.bus_id for deployment in RURAL1_AGENT_DEPLOYMENTS[:n_agents]]
 
-    battery_capacity = float(cfg.env.battery_capacity)
-    battery_power = float(cfg.env.max_charge_rate)
+    battery_mode = str(getattr(cfg.env, "battery_mode", "from_pv")).strip().lower()
+    if battery_mode == "fixed":
+        capacity_kwh, _, power_kw = resolve_fixed_battery_spec(
+            cfg.env.battery_capacity,
+            cfg.env.max_charge_rate,
+            n_agents=n_agents,
+        )
+    else:
+        battery_capacity = _resolve_positive_scalar(cfg.env.battery_capacity, name="battery_capacity")
+        battery_power = _resolve_positive_scalar(cfg.env.max_charge_rate, name="max_charge_rate")
+        capacity_kwh = [battery_capacity] * n_agents
+        power_kw = [battery_power] * n_agents
     init_soc = float(cfg.env.init_soc)
     soc_min = float(cfg.env.soc_min)
     soc_max = float(cfg.env.soc_max)
@@ -38,8 +100,8 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     return [
         AgentDeployment(
             bus_id=int(bus_ids[idx]),
-            battery_capacity_kwh=battery_capacity,
-            battery_power_kw=battery_power,
+            battery_capacity_kwh=float(capacity_kwh[idx]),
+            battery_power_kw=float(power_kw[idx]),
             init_soc=init_soc,
             soc_min=soc_min,
             soc_max=soc_max,
@@ -52,4 +114,5 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
 __all__ = [
     "AgentDeployment",
     "build_agent_deployments",
+    "resolve_fixed_battery_spec",
 ]

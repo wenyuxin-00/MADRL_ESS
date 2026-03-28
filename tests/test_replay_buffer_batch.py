@@ -62,5 +62,10 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         assert direct_torch_batch["obs"]["local"].shape == torch_batch["obs"]["local"].shape
         assert direct_torch_batch["action"].shape == torch_batch["action"].shape
         assert direct_torch_batch["reward"].dtype == torch.float32
+
+        buffer._sample_indices = lambda: np.array([0, 1], dtype=np.int64)
+        direct_torch_batch["action"][0, 0, 0] = 123.0
+        repeated_torch_batch = buffer.sample_torch(cfg.runtime.device)
+        assert repeated_torch_batch["action"][0, 0, 0].item() != 123.0
     finally:
         env.close()

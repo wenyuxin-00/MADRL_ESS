@@ -44,17 +44,29 @@ class GridCore:
 
         self._original_load_p_mw: dict[int, float] = {}
         self._original_sgen_p_mw: dict[int, float] = {}
+        self._load_row_index_by_bus: dict[int, int | None] = {}
+        self._sgen_row_index_by_bus: dict[int, int | None] = {}
+        self._fast_path_supported = True
         for bus_id in self.agent_bus_ids:
             load_mask = self.net.load["bus"] == bus_id
+            load_index = int(self.net.load.index[load_mask][0]) if load_mask.any() else None
+            self._load_row_index_by_bus[bus_id] = load_index
             if load_mask.any():
                 self._original_load_p_mw[bus_id] = float(
-                    self.net.load.at[self.net.load.index[load_mask][0], "p_mw"]
+                    self.net.load.at[load_index, "p_mw"]
                 )
             sgen_mask = self.net.sgen["bus"] == bus_id
+            sgen_index = int(self.net.sgen.index[sgen_mask][0]) if sgen_mask.any() else None
+            self._sgen_row_index_by_bus[bus_id] = sgen_index
             if sgen_mask.any():
                 self._original_sgen_p_mw[bus_id] = float(
-                    self.net.sgen.at[self.net.sgen.index[sgen_mask][0], "p_mw"]
+                    self.net.sgen.at[sgen_index, "p_mw"]
                 )
+            if load_index is None and sgen_index is None:
+                self._fast_path_supported = False
+            if load_index is None and sgen_index is not None:
+                # The generic path may create a missing load row on demand.
+                self._fast_path_supported = False
 
         self._last_valid = self._make_zero_result()
         self.last_pf_error = ""
@@ -82,7 +94,10 @@ class GridCore:
         bus_id_to_p_kw = {
             self.agent_bus_ids[i]: float(p_inject_kw[i]) for i in range(self.n_agents)
         }
-        apply_bus_injections(self.net, bus_id_to_p_kw)
+        if self._fast_path_supported:
+            self._apply_bus_injections_cached(bus_id_to_p_kw)
+        else:
+            apply_bus_injections(self.net, bus_id_to_p_kw)
 
         try:
             self._runpp_with_fallback()
@@ -184,16 +199,34 @@ class GridCore:
     def _restore_agent_buses(self) -> None:
         """Restore tracked load/sgen values before writing the next step."""
         for bus_id in self.agent_bus_ids:
-            load_mask = self.net.load["bus"] == bus_id
-            if load_mask.any() and bus_id in self._original_load_p_mw:
-                self.net.load.at[
-                    self.net.load.index[load_mask][0], "p_mw"
-                ] = self._original_load_p_mw[bus_id]
-            sgen_mask = self.net.sgen["bus"] == bus_id
-            if sgen_mask.any() and bus_id in self._original_sgen_p_mw:
-                self.net.sgen.at[
-                    self.net.sgen.index[sgen_mask][0], "p_mw"
-                ] = self._original_sgen_p_mw[bus_id]
+            load_index = self._load_row_index_by_bus.get(bus_id)
+            if load_index is not None and bus_id in self._original_load_p_mw:
+                self.net.load.at[load_index, "p_mw"] = self._original_load_p_mw[bus_id]
+            sgen_index = self._sgen_row_index_by_bus.get(bus_id)
+            if sgen_index is not None and bus_id in self._original_sgen_p_mw:
+                self.net.sgen.at[sgen_index, "p_mw"] = self._original_sgen_p_mw[bus_id]
+
+    def _apply_bus_injections_cached(self, bus_id_to_p_kw: dict[int, float]) -> None:
+        for bus_id, p_kw in bus_id_to_p_kw.items():
+            p_mw = float(p_kw) / 1000.0
+            q_mvar = 0.0
+            sgen_index = self._sgen_row_index_by_bus.get(bus_id)
+            load_index = self._load_row_index_by_bus.get(bus_id)
+
+            if sgen_index is not None:
+                self.net.sgen.at[sgen_index, "p_mw"] = max(0.0, p_mw)
+                self.net.sgen.at[sgen_index, "q_mvar"] = q_mvar
+                if load_index is not None:
+                    self.net.load.at[load_index, "p_mw"] = max(0.0, -p_mw)
+                continue
+
+            if load_index is not None:
+                self.net.load.at[load_index, "p_mw"] = -p_mw
+                self.net.load.at[load_index, "q_mvar"] = -q_mvar
+                continue
+
+            self._fast_path_supported = False
+            apply_bus_injections(self.net, {bus_id: float(p_kw)})
 
     def _extract_result(self, *, converged: bool) -> GridStepResult:
         """Extract the subset of pandapower results used by training and plots."""

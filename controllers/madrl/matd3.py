@@ -50,7 +50,7 @@ class MATD3(BaseAgent):
         batch = to_torch_batch(replay_buffer.sample(), self.device)
         self.train_on_batch(batch, agent_n)
 
-    def train_on_batch(self, batch: dict, agent_n: list) -> None:
+    def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
         self.actor_pointer += 1
 
         obs = batch["obs"]
@@ -60,9 +60,12 @@ class MATD3(BaseAgent):
         done = batch["done"]
 
         with torch.no_grad():
+            clean_next_action = None if shared_ctx is None else shared_ctx.get("target_actor_actions_clean")
+            if clean_next_action is None:
+                clean_next_action = torch.stack([agent._actor_target_call(next_obs) for agent in agent_n], dim=1)
             next_action_list = []
-            for agent in agent_n:
-                next_action = agent._actor_target_call(next_obs)
+            for agent_id, _agent in enumerate(agent_n):
+                next_action = clean_next_action[:, agent_id]
                 noise = (torch.randn_like(next_action) * self.policy_noise).clamp(
                     -self.noise_clip,
                     self.noise_clip,

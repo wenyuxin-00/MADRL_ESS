@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,6 @@ from tqdm.auto import tqdm
 
 from controllers.madrl.registry import get_agent_cls
 from scripts.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
-from scripts.recorders.episode_recorder import append_step_record, init_episode_record
 from scripts.utils.nested import to_torch_nested
 from scripts.utils.project_paths import get_tensorboard_run_dir
 from scripts.utils.replay_buffer import ReplayBuffer
@@ -131,8 +129,11 @@ class TrainRunner:
         self.writer = SummaryWriter(log_dir=str(log_dir))
         self.vec_env_name = type(self.env).__name__
         self.agent_performance = dict(getattr(self.agent_n[0], "performance_summary", {}))
-
-        self.history: deque = deque(maxlen=2000)
+        self.progress_write_interval_seconds = max(
+            0.0,
+            float(getattr(self.cfg.train, "progress_write_interval_seconds", 5.0)),
+        )
+        self.history: list[dict[str, Any]] = []
         self.episode_rewards: list[float] = []
         self.total_steps = 0
         self.episodes_completed = 0
@@ -175,6 +176,19 @@ class TrainRunner:
             "terminated": terminated,
             "truncated": truncated,
             "info_list": info_list,
+        }
+
+    def _build_shared_update_ctx(self, batch: dict[str, Any]) -> dict[str, Any]:
+        next_obs = batch["next_obs"]
+        with torch.no_grad():
+            target_actor_actions_clean = torch.stack(
+                [agent._actor_target_call(next_obs) for agent in self.agent_n],
+                dim=1,
+            )
+        return {
+            "target_actor_actions_clean": target_actor_actions_clean,
+            "batch_size": int(batch["action"].shape[0]),
+            "device": batch["action"].device,
         }
 
     def save_model(self, model_dir: str, episode: int) -> None:
@@ -253,6 +267,10 @@ class TrainRunner:
         action_time_total = 0.0
         env_step_time_total = 0.0
         update_time_total = 0.0
+        sample_time_total = 0.0
+        history_time_total = 0.0
+        progress_io_time_total = 0.0
+        agent_update_time_total = 0.0
         update_calls = 0
         error_message = ""
         run_status = "completed"
@@ -262,15 +280,11 @@ class TrainRunner:
         self.episode_reward_components = {str(meta.key): [] for meta in reward_metas}
         progress_postfix_interval = max(1, int(getattr(self.cfg.train, "progress_postfix_interval", 10)))
         progress_state_path = getattr(self.cfg.runtime, "progress_state_path", None)
-        active_histories = [
-            init_episode_record(
-                n_agents=self.cfg.env.num_agents,
-                init_soc=float(self.cfg.env.init_soc),
-                reward_metas=reward_metas,
-            )
-            for _ in range(self.cfg.train.num_envs)
-        ]
         active_episode_rewards = np.zeros(self.cfg.train.num_envs, dtype=np.float32)
+        active_component_totals = {
+            str(meta.key): np.zeros(self.cfg.train.num_envs, dtype=np.float32)
+            for meta in reward_metas
+        }
 
         progress = tqdm(
             total=target_interactions,
@@ -280,6 +294,16 @@ class TrainRunner:
         )
         pending_progress_steps = 0
         last_progress_emit_step = -1
+        last_progress_write_at = run_start
+
+        def write_progress_snapshot(payload: dict[str, object]) -> None:
+            nonlocal progress_io_time_total, last_progress_write_at
+            if progress_state_path is None:
+                return
+            write_started = time.perf_counter()
+            _write_progress_snapshot(progress_state_path, payload)
+            progress_io_time_total += time.perf_counter() - write_started
+            last_progress_write_at = time.perf_counter()
 
         def emit_progress(*, force: bool = False) -> None:
             nonlocal pending_progress_steps, last_progress_emit_step
@@ -288,34 +312,43 @@ class TrainRunner:
                 or interaction_step % progress_postfix_interval == 0
                 or interaction_step >= target_interactions
             )
-            if not should_refresh:
+            avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+            should_write_progress = (
+                progress_state_path is not None
+                and (
+                    force
+                    or self.progress_write_interval_seconds <= 0.0
+                    or (time.perf_counter() - last_progress_write_at) >= self.progress_write_interval_seconds
+                )
+            )
+            if not should_refresh and not should_write_progress:
                 return
             if force and pending_progress_steps == 0 and last_progress_emit_step == interaction_step:
-                return
-            if pending_progress_steps > 0:
-                progress.update(pending_progress_steps)
-                pending_progress_steps = 0
-            avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
+                if not should_write_progress:
+                    return
             elapsed_seconds = max(time.perf_counter() - run_start, 0.0)
             remaining_seconds = _estimate_remaining_seconds(
                 interaction_step=interaction_step,
                 target_interactions=target_interactions,
                 elapsed_seconds=elapsed_seconds,
             )
-            last_progress_emit_step = interaction_step
-            progress.set_postfix(
-                {
-                    "avg_reward": f"{avg_reward:.2f}",
-                    "steps/s": f"{self.total_steps / max(time.perf_counter() - run_start, 1e-6):.1f}",
-                    "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
-                    "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
-                    "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
-                    "eta": "--" if remaining_seconds is None else f"{remaining_seconds:.1f}s",
-                }
-            )
-            if progress_state_path is not None:
-                _write_progress_snapshot(
-                    progress_state_path,
+            if should_refresh:
+                if pending_progress_steps > 0:
+                    progress.update(pending_progress_steps)
+                    pending_progress_steps = 0
+                last_progress_emit_step = interaction_step
+                progress.set_postfix(
+                    {
+                        "avg_reward": f"{avg_reward:.2f}",
+                        "steps/s": f"{self.total_steps / max(time.perf_counter() - run_start, 1e-6):.1f}",
+                        "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
+                        "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
+                        "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
+                        "eta": "--" if remaining_seconds is None else f"{remaining_seconds:.1f}s",
+                    }
+                )
+            if should_write_progress:
+                write_progress_snapshot(
                     _build_progress_payload(
                         interaction_step=interaction_step,
                         target_interactions=target_interactions,
@@ -329,12 +362,11 @@ class TrainRunner:
                         run_start=run_start,
                         started_at=started_at,
                         status="running",
-                    ),
+                    )
                 )
 
         if progress_state_path is not None:
-            _write_progress_snapshot(
-                progress_state_path,
+            write_progress_snapshot(
                 _build_progress_payload(
                     interaction_step=0,
                     target_interactions=target_interactions,
@@ -365,15 +397,15 @@ class TrainRunner:
                 done = np.logical_or(terminated, truncated).astype(np.float32)
                 env_step_time_total += time.perf_counter() - env_step_start
 
+                history_started = time.perf_counter()
                 for env_idx, info in enumerate(info_list):
                     step_total = float(np.sum(reward[env_idx]))
                     active_episode_rewards[env_idx] += step_total
-                    append_step_record(
-                        active_histories[env_idx],
-                        info,
-                        step_total=step_total,
-                        reward_metas=reward_metas,
-                    )
+                    for meta in reward_metas:
+                        component_key = str(meta.key)
+                        component_value = float(np.sum(np.asarray(info[meta.key], dtype=np.float32)))
+                        active_component_totals[component_key][env_idx] += float(meta.sign) * component_value
+                history_time_total += time.perf_counter() - history_started
 
                 self.replay_buffer.store_transitions_batched(
                     obs,
@@ -388,34 +420,30 @@ class TrainRunner:
                 pending_progress_steps += 1
                 self.total_steps += self.cfg.train.num_envs
 
+                history_started = time.perf_counter()
                 for env_idx, info in enumerate(info_list):
                     if not bool(info.get("episode_done", False)):
                         continue
 
-                    episode_history = active_histories[env_idx]
-                    self.history.append(episode_history)
-
                     episode_reward = float(active_episode_rewards[env_idx])
                     self.episode_rewards.append(episode_reward)
                     for meta in reward_metas:
-                        episode_component = float(
-                            np.sum(np.asarray(episode_history[f"{meta.key}_sum"], dtype=np.float32))
+                        component_key = str(meta.key)
+                        self.episode_reward_components[component_key].append(
+                            float(active_component_totals[component_key][env_idx])
                         )
-                        self.episode_reward_components[str(meta.key)].append(episode_component)
                     self.writer.add_scalar(
                         "train_episode_total_reward",
                         episode_reward,
                         global_step=self.total_steps,
                     )
 
-                    active_histories[env_idx] = init_episode_record(
-                        n_agents=self.cfg.env.num_agents,
-                        init_soc=float(self.cfg.env.init_soc),
-                        reward_metas=reward_metas,
-                    )
                     active_episode_rewards[env_idx] = 0.0
+                    for meta in reward_metas:
+                        active_component_totals[str(meta.key)][env_idx] = 0.0
                     episodes_completed += 1
                     self.episodes_completed = episodes_completed
+                history_time_total += time.perf_counter() - history_started
 
                 if self.cfg.train.use_noise_decay:
                     self.noise_std = max(
@@ -429,13 +457,19 @@ class TrainRunner:
                 ):
                     update_start = time.perf_counter()
                     for _ in range(self.cfg.train.updates_per_step):
+                        sample_start = time.perf_counter()
                         batch_torch = self.replay_buffer.sample_torch(
                             self.cfg.runtime.device,
                             pin_memory=bool(getattr(self.cfg.runtime, "pin_memory", False)),
                             non_blocking=bool(getattr(self.cfg.runtime, "non_blocking_transfers", False)),
                         )
+                        sample_time_total += time.perf_counter() - sample_start
+
+                        agent_update_start = time.perf_counter()
+                        shared_update_ctx = self._build_shared_update_ctx(batch_torch)
                         for agent in self.agent_n:
-                            agent.train_on_batch(batch_torch, self.agent_n)
+                            agent.train_on_batch(batch_torch, self.agent_n, shared_ctx=shared_update_ctx)
+                        agent_update_time_total += time.perf_counter() - agent_update_start
                         update_calls += 1
                     update_time_total += time.perf_counter() - update_start
 
@@ -448,8 +482,7 @@ class TrainRunner:
             emit_progress(force=True)
             if progress_state_path is not None:
                 avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
-                _write_progress_snapshot(
-                    progress_state_path,
+                write_progress_snapshot(
                     _build_progress_payload(
                         interaction_step=interaction_step,
                         target_interactions=target_interactions,
@@ -486,6 +519,10 @@ class TrainRunner:
             "action_time_s": action_time_total,
             "env_step_time_s": env_step_time_total,
             "update_time_s": update_time_total,
+            "sample_time_s": sample_time_total,
+            "history_time_s": history_time_total,
+            "progress_io_time_s": progress_io_time_total,
+            "agent_update_time_s": agent_update_time_total,
             "update_calls": update_calls,
             "steps_per_sec": self.total_steps / total_elapsed,
             "avg_action_ms_per_iter": 1000.0 * action_time_total / max(interaction_step, 1),

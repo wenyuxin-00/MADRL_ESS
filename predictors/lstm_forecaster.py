@@ -30,6 +30,7 @@ PHYSICAL_NORMALIZATION_LOAD_SCALE = "load_scale"
 PHYSICAL_NORMALIZATION_PV_PEAK = "pv_peak_kw"
 POSTPROCESS_MODE_NONE = "none"
 POSTPROCESS_MODE_BASELINE_BLEND = "baseline_blend"
+POSTPROCESS_MODE_PHYSICAL_CLIP = "physical_clip"
 BASELINE_MODE_NONE = "none"
 BASELINE_MODE_LAST_VALUE = "last_value"
 PHYSICAL_SCALE_EPS = np.float32(1e-6)
@@ -541,6 +542,11 @@ class LSTMForecaster(Forecaster):
         restored = np.asarray(values, dtype=np.float32)
         if runtime.physical_normalization_mode != PHYSICAL_NORMALIZATION_NONE:
             restored = (restored * np.float32(scale)).astype(np.float32)
+        if str(runtime.postprocess_mode) == POSTPROCESS_MODE_PHYSICAL_CLIP:
+            upper = None
+            if runtime.physical_normalization_mode == PHYSICAL_NORMALIZATION_PV_PEAK:
+                upper = np.float32(max(float(scale), 0.0))
+            restored = np.clip(restored, np.float32(0.0), upper).astype(np.float32)
         return restored
 
     @staticmethod

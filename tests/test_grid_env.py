@@ -194,17 +194,14 @@ def test_from_pv_battery_mode_uses_episode_pv_peak(grid_env) -> None:
 def test_fixed_battery_mode_uses_cfg_defaults() -> None:
     cfg = _make_cfg()
     cfg.env.battery_mode = "fixed"
-    cfg.env.battery_capacity = 7.5
-    cfg.env.max_charge_rate = 3.25
+    cfg.env.battery_capacity = [10.0, 12.0, 8.0]
+    cfg.env.max_charge_rate = 0.5
     env = _build_env(cfg, mode="test")
 
     try:
         _, reset_info = env.reset(episode_idx=0)
-        assert np.allclose(reset_info["p_max"], np.full((cfg.env.num_agents,), 3.25, dtype=np.float32))
-        assert np.allclose(
-            reset_info["battery_capacity_kwh"],
-            np.full((cfg.env.num_agents,), 7.5, dtype=np.float32),
-        )
+        assert np.allclose(reset_info["p_max"], np.array([5.0, 6.0, 4.0], dtype=np.float32))
+        assert np.allclose(reset_info["battery_capacity_kwh"], np.array([10.0, 12.0, 8.0], dtype=np.float32))
     finally:
         env.close()
 
@@ -343,25 +340,5 @@ def test_compact_info_omits_large_arrays() -> None:
     actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
     _, _, _, _, info = env.step(actions)
 
-    assert "vm_pu" not in info
-    assert "line_loading_pct" not in info
-    assert "trafo_loading_pct" not in info
-    assert "price" in info
-    assert "e_bat" in info
-    assert "soc_next" in info
-    assert "reward" in info
-    assert "pf_converged" in info
-    assert "psi_v_raw" in info
-    assert "psi_line_raw" in info
-    assert "agent_vm_pu" in info
-    assert "base_net_load" in info
-    for meta in reward_fn.component_meta:
-        assert meta.key in info, f"Missing reward component '{meta.key}' in compact info"
-    env.close()
-
-
-def test_legacy_sensitivity_attributes_removed() -> None:
-    env = _build_env(_make_cfg())
-    assert not hasattr(env, "_sensitivity_cache")
-    assert not hasattr(env, "_last_sensitivity_trigger")
+    assert set(info) == {"episode_done", *[str(meta.key) for meta in reward_fn.component_meta]}
     env.close()

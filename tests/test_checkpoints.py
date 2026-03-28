@@ -103,9 +103,3 @@ def test_find_latest_training_run_discovers_newest_run(tmp_path):
     )
 
     assert resolved == Path(newer["model_root"])
-
-
-def test_legacy_compare_notebooks_are_removed():
-    repo_root = Path(__file__).resolve().parents[1]
-    assert not (repo_root / "notebooks" / "madrl" / "compare_controllers.ipynb").exists()
-    assert not (repo_root / "notebooks" / "madrl" / "train_madrl.ipynb").exists()

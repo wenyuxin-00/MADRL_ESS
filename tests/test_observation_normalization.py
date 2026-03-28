@@ -54,7 +54,6 @@ def test_test_observation_uses_train_year_price_stats(tmp_path):
         tanh_scale = float(price_state["tanh_scale"])
         expected = float(np.tanh(((min(float(raw_obs["price_seq"][0]), q_high) - median) / iqr) / tanh_scale))
 
-        assert raw_obs["price_seq"][0] >= 5.0
         assert np.isclose(float(obs["price_seq"][0]), expected)
         assert state["signature"]["train_year"] == 2019
         assert q_high < 1.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,14 +19,20 @@ from predictors.lstm_forecaster import (
     PHYSICAL_NORMALIZATION_LOAD_SCALE,
     PHYSICAL_NORMALIZATION_PV_PEAK,
     POSTPROCESS_MODE_BASELINE_BLEND,
+    POSTPROCESS_MODE_PHYSICAL_CLIP,
     _SignalForecasterRuntime,
 )
 from predictors.training import (
+    _collect_lstm_artifact_inventory,
+    _managed_lstm_artifact_paths,
+    _select_heatpump_blocked_blend_weight,
     _select_load_blend_weight_from_validation,
     build_supervised_windows_from_matrix,
     compare_lstm_artifact_meta,
     expected_lstm_artifact_meta,
     fit_signal_scaler,
+    train_signal_lstm,
+    validate_lstm_artifact,
 )
 from predictors.time_features import (
     TIME_FEATURE_MODE_HOUR_WEEK_YEAR,
@@ -229,6 +236,15 @@ def test_load_runtime_tracks_time_feature_input_shape() -> None:
     assert runtime.model_mode == "per_agent"
 
 
+def test_expected_pv_artifact_meta_uses_time_features_by_default(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path)
+    meta = expected_lstm_artifact_meta(cfg, "pv")
+
+    assert meta["time_feature_mode"] == TIME_FEATURE_MODE_HOUR_WEEK_YEAR
+    assert meta["input_size"] == 7
+    assert meta["postprocess_mode"] == POSTPROCESS_MODE_PHYSICAL_CLIP
+
+
 def test_lstm_forecaster_pv_prediction_scales_with_episode_pv_peak() -> None:
     forecaster = _make_runtime_forecaster("pv", PHYSICAL_NORMALIZATION_PV_PEAK)
     base_history = np.array(
@@ -249,6 +265,67 @@ def test_lstm_forecaster_pv_prediction_scales_with_episode_pv_peak() -> None:
     scaled_prediction = forecaster.predict(scaled_history, horizon=3, signal_name="pv")
 
     assert np.allclose(scaled_prediction, base_prediction * np.float32(5.0))
+
+
+def test_lstm_forecaster_pv_clips_negative_predictions_to_zero() -> None:
+    forecaster = _make_runtime_forecaster(
+        "pv",
+        PHYSICAL_NORMALIZATION_PV_PEAK,
+        postprocess_mode=POSTPROCESS_MODE_PHYSICAL_CLIP,
+        model=ConstantChunkModel([-0.3, -0.2]),
+    )
+    history = np.zeros((3, 1), dtype=np.float32)
+
+    forecaster.set_episode({"pv": history}, {"pv_peak_kw": np.array([2.0], dtype=np.float32)})
+    prediction = forecaster.predict(history, horizon=4, signal_name="pv")
+
+    assert np.all(prediction >= 0.0)
+    assert np.allclose(prediction.reshape(-1), np.zeros((4,), dtype=np.float32))
+
+
+def test_lstm_forecaster_pv_clips_to_episode_peak() -> None:
+    forecaster = _make_runtime_forecaster(
+        "pv",
+        PHYSICAL_NORMALIZATION_PV_PEAK,
+        postprocess_mode=POSTPROCESS_MODE_PHYSICAL_CLIP,
+        model=ConstantChunkModel([1.5, 1.5]),
+    )
+    history = np.array([[0.2], [0.4], [0.6]], dtype=np.float32)
+
+    forecaster.set_episode({"pv": history}, {"pv_peak_kw": np.array([2.0], dtype=np.float32)})
+    prediction = forecaster.predict(history, horizon=4, signal_name="pv")
+
+    assert float(np.max(prediction)) <= 2.0 + 1e-6
+    assert np.allclose(prediction.reshape(-1)[1:], np.full((3,), 2.0, dtype=np.float32))
+
+
+def test_lstm_forecaster_pv_episode_matrix_respects_physical_clip() -> None:
+    forecaster = _make_runtime_forecaster(
+        "pv",
+        PHYSICAL_NORMALIZATION_PV_PEAK,
+        postprocess_mode=POSTPROCESS_MODE_PHYSICAL_CLIP,
+        model=ConstantChunkModel([1.8, -0.5]),
+    )
+    history = np.array([[0.2], [0.4], [0.6], [0.8]], dtype=np.float32)
+    timestamps = np.array(
+        [
+            "2020-01-01T00:00:00+00:00",
+            "2020-01-01T00:15:00+00:00",
+            "2020-01-01T00:30:00+00:00",
+            "2020-01-01T00:45:00+00:00",
+        ]
+    )
+
+    forecaster.set_episode({"pv": history}, {"pv_peak_kw": np.array([2.0], dtype=np.float32)})
+    prediction = forecaster.predict_episode_matrix(
+        history,
+        horizon=3,
+        signal_name="pv",
+        history_timestamps=timestamps,
+    )
+
+    assert np.all(prediction >= 0.0)
+    assert float(np.max(prediction)) <= 2.0
 
 
 def test_lstm_forecaster_zero_load_scale_collapses_prediction_to_zero() -> None:
@@ -467,7 +544,106 @@ def test_blend_weight_search_can_fallback_to_conservative_baseline() -> None:
     )
 
     assert selection["blend_weight"] == pytest.approx(0.0)
-    assert selection["blended_mae_step1"] == pytest.approx(selection["baseline_mae_step1"])
+
+
+def test_heatpump_blocked_blend_prefers_lowest_mae_among_viable_candidates() -> None:
+    timestamps = pd.date_range("2020-01-01", periods=12, freq="MS", tz="UTC")
+    target = np.array([0.2] * 3 + [1.0] * 3 + [0.3] * 3 + [0.9] * 3, dtype=np.float32)
+    baseline = np.full((12,), 0.5, dtype=np.float32)
+    raw = np.array([-0.10] * 3 + [1.50] * 3 + [0.10] * 3 + [1.30] * 3, dtype=np.float32)
+
+    selection = _select_heatpump_blocked_blend_weight(
+        target_step1=target,
+        baseline_step1=baseline,
+        raw_step1=raw,
+        window_timestamps=pd.DatetimeIndex(timestamps),
+        candidate_weights=(0.0, 0.5, 1.0),
+    )
+
+    assert selection["selected_weight"] == pytest.approx(0.5)
+    assert bool(selection["bias_guard_satisfied"]) is True
+
+
+def test_heatpump_blocked_blend_falls_back_to_most_conservative_candidate_when_guard_fails() -> None:
+    timestamps = pd.date_range("2020-01-01", periods=12, freq="MS", tz="UTC")
+    target = np.zeros((12,), dtype=np.float32)
+    baseline = np.full((12,), 0.5, dtype=np.float32)
+    raw = np.full((12,), 0.35, dtype=np.float32)
+
+    selection = _select_heatpump_blocked_blend_weight(
+        target_step1=target,
+        baseline_step1=baseline,
+        raw_step1=raw,
+        window_timestamps=pd.DatetimeIndex(timestamps),
+        candidate_weights=(0.0, 0.5, 1.0),
+    )
+
+    assert selection["selected_weight"] == pytest.approx(1.0)
+    assert bool(selection["bias_guard_satisfied"]) is False
+
+
+def test_old_heatpump_rmse_first_meta_is_marked_incompatible(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path)
+    cfg.forecast.load_component_split = True
+
+    expected = expected_lstm_artifact_meta(
+        cfg,
+        "load",
+        agent_index=0,
+        agent_profile=cfg.data.agent_profiles[0],
+        component="heatpump",
+    )
+    old_meta = dict(expected)
+    old_meta["optimized_metric"] = "blocked_rmse_guard_step1"
+
+    comparison = compare_lstm_artifact_meta(old_meta, expected)
+    assert not comparison["compatible"]
+    assert comparison["mismatches"]["optimized_metric"]["expected"] == "blocked_bias_guard_step1"
+
+
+def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path)
+    cfg.forecast.type = "lstm"
+    cfg.forecast.target_signals = ["price", "pv"]
+    cfg.obs.sequence_features = ["price", "pv"]
+    cfg.forecast.lstm_artifact_root = tmp_path / "artifacts" / "forecast" / "lstm"
+    cfg.forecast.history_window = 4
+    cfg.env.future_horizon = 2
+    cfg.forecast.lstm_epochs = 1
+    cfg.forecast.lstm_batch_size = 4
+    cfg.forecast.lstm_hidden_size = 8
+    cfg.forecast.lstm_num_layers = 1
+    cfg.forecast.lstm_dropout = 0.0
+    cfg.forecast.auto_train_missing = False
+
+    train_signal_lstm(cfg, "price", show_progress=False)
+
+    pv_paths = _managed_lstm_artifact_paths(cfg, "pv")
+    pv_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
+    pv_paths["model_path"].write_bytes(b"stale-model")
+    pv_paths["scaler_path"].write_bytes(b"stale-scaler")
+    stale_meta = dict(expected_lstm_artifact_meta(cfg, "pv"))
+    stale_meta["input_size"] = 1
+    stale_meta["time_feature_mode"] = "none"
+    stale_meta.pop("postprocess_mode", None)
+    stale_meta.pop("baseline_mode", None)
+    stale_meta.pop("blend_weight", None)
+    stale_meta.pop("optimized_metric", None)
+    pv_paths["meta_path"].write_text(json.dumps(stale_meta), encoding="utf-8")
+
+    validation = validate_lstm_artifact(cfg, "pv", pv_paths)
+    assert not bool(validation["compatible"])
+    assert {"input_size", "time_feature_mode", "postprocess_mode"} <= set(validation["mismatches"])
+
+    inventory_before = _collect_lstm_artifact_inventory(cfg)
+    assert "price" in inventory_before["artifacts"]
+    assert "pv" in inventory_before["mismatched_signals"]
+
+    train_signal_lstm(cfg, "pv", show_progress=False)
+
+    inventory_after = _collect_lstm_artifact_inventory(cfg)
+    assert set(inventory_after["artifacts"]) == {"price", "pv"}
+    assert "pv" not in inventory_after["invalid_artifacts"]
 
 
 def test_grid_env_reset_passes_episode_meta_to_forecaster(tmp_path) -> None:

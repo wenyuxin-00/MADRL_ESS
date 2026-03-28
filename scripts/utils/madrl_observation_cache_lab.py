@@ -1,4 +1,4 @@
-"""Build and load exact precomputed observation caches for MADRL fast-lab."""
+"""Build and load exact precomputed observation caches for the MADRL mainline."""
 
 from __future__ import annotations
 
@@ -166,7 +166,7 @@ def _build_calendar_time_matrix(
 
 def _default_cache_root(root: str | Path | None = None) -> Path:
     base = Path(root).resolve() if root is not None else project_root() / "artifacts" / "training" / "cache"
-    return (base / "fastlab" / "observation").resolve()
+    return (base / "mainline" / "observation").resolve()
 
 
 def _required_array_names(cfg) -> list[str]:
@@ -247,7 +247,7 @@ def build_or_load_observation_cache(
         int(
             batch_size
             if batch_size is not None
-            else getattr(getattr(cfg, "runtime", None), "fastlab_observation_cache_batch_size", 8192)
+            else getattr(getattr(cfg, "runtime", None), "observation_cache_batch_size", 8192)
         ),
         1,
     )

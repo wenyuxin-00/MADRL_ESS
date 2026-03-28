@@ -17,6 +17,7 @@ from scripts.utils.grid_notebook_workflow import (
     resolve_evaluation_mode,
     resolve_forecast_backend,
 )
+from scripts.utils.experiment_notebook_utils import summarize_cfg
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -42,6 +43,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
         test_start_date=20190101,
         test_end_date=20190130,
         agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[12, 4],
         load_scale=[1.2, 0.8],
         pv_scale=0.5,
         battery_controls={
@@ -67,6 +69,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     assert cfg.forecast.type == "lstm"
     assert cfg.data.test_start_date == "2019-01-01"
     assert cfg.data.test_end_date == "2019-01-30"
+    assert cfg.grid.agent_bus_ids == [12, 4]
     assert np.allclose(cfg.data.load_scale, [1.2, 0.8])
     assert np.allclose(cfg.data.pv_scale, [0.5, 0.5])
     assert cfg.env.battery_mode == "from_pv"
@@ -78,8 +81,185 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     assert summary["evaluation_mode"] == FORECAST_EVAL_MODE
     assert summary["forecast_backend"] == "lstm"
     assert summary["agent_profiles"] == ["SFH12", "SFH14"]
+    assert summary["agent_bus_ids"] == [12, 4]
     assert summary["battery"]["mode"] == "from_pv"
     assert np.isclose(summary["battery"]["from_pv_power_ratio"], 0.75)
+
+
+def test_apply_notebook_experiment_settings_supports_fixed_battery_vectors(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    summary = apply_notebook_experiment_settings(
+        cfg,
+        prediction_mode="perfect",
+        test_start_date=20190101,
+        test_end_date=20190130,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[10, 6],
+        load_scale=1.0,
+        pv_scale=1.0,
+        battery_controls={
+            "mode": "fixed",
+            "battery_capacity": [10.0, 12.0],
+            "max_charge_rate": 0.5,
+        },
+        future_horizon=1,
+        train_year=2019,
+        test_year=2019,
+    )
+
+    assert cfg.env.battery_mode == "fixed"
+    assert cfg.env.battery_capacity == [10.0, 12.0]
+    assert np.isclose(cfg.env.max_charge_rate, 0.5)
+    assert summary["battery"]["battery_capacity"] == [10.0, 12.0]
+    assert summary["battery"]["p_max_kw"] == [5.0, 6.0]
+
+
+def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed_summary")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    apply_notebook_experiment_settings(
+        cfg,
+        prediction_mode="perfect",
+        test_start_date=20190101,
+        test_end_date=20190130,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[10, 6],
+        load_scale=1.0,
+        pv_scale=1.0,
+        battery_controls={
+            "mode": "fixed",
+            "battery_capacity": [10.0, 12.0],
+            "max_charge_rate": 0.5,
+        },
+        future_horizon=1,
+        train_year=2019,
+        test_year=2019,
+    )
+
+    summary = summarize_cfg(cfg)
+
+    assert summary["battery"]["mode"] == "fixed"
+    assert summary["battery"]["battery_capacity"] == [10.0, 12.0]
+    assert summary["battery"]["max_charge_rate"] == 0.5
+    assert summary["battery"]["p_max_kw"] == [5.0, 6.0]
+
+
+def test_apply_notebook_experiment_settings_broadcasts_scalar_fixed_battery_capacity(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed_broadcast")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    summary = apply_notebook_experiment_settings(
+        cfg,
+        prediction_mode="perfect",
+        test_start_date=20190101,
+        test_end_date=20190130,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[10, 6],
+        load_scale=1.0,
+        pv_scale=1.0,
+        battery_controls={
+            "mode": "fixed",
+            "battery_capacity": 8.0,
+            "max_charge_rate": 0.5,
+        },
+        future_horizon=1,
+        train_year=2019,
+        test_year=2019,
+    )
+
+    assert cfg.env.battery_capacity == [8.0, 8.0]
+    assert summary["battery"]["battery_capacity"] == [8.0, 8.0]
+    assert summary["battery"]["p_max_kw"] == [4.0, 4.0]
+
+
+def test_apply_notebook_experiment_settings_rejects_too_few_agent_bus_ids(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_bus_error")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    with pytest.raises(ValueError, match="only provides 2 buses"):
+        apply_notebook_experiment_settings(
+            cfg,
+            prediction_mode="perfect",
+            test_start_date=20190101,
+            test_end_date=20190130,
+            agent_profiles=["SFH12", "SFH14", "SFH16"],
+            agent_bus_ids=[10, 6],
+            load_scale=1.0,
+            pv_scale=1.0,
+            future_horizon=1,
+        )
+
+
+def test_apply_notebook_experiment_settings_rejects_fixed_battery_vector_length_mismatch(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed_capacity_error")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    with pytest.raises(ValueError, match="battery_capacity should provide 2 value\\(s\\)"):
+        apply_notebook_experiment_settings(
+            cfg,
+            prediction_mode="perfect",
+            test_start_date=20190101,
+            test_end_date=20190130,
+            agent_profiles=["SFH12", "SFH14"],
+            agent_bus_ids=[10, 6],
+            load_scale=1.0,
+            pv_scale=1.0,
+            battery_controls={
+                "mode": "fixed",
+                "battery_capacity": [10.0, 12.0, 8.0],
+                "max_charge_rate": 0.5,
+            },
+            future_horizon=1,
+        )
+
+
+def test_apply_notebook_experiment_settings_rejects_fixed_battery_nonpositive_c_rate(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed_c_rate_error")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    with pytest.raises(ValueError, match="max_charge_rate must be positive"):
+        apply_notebook_experiment_settings(
+            cfg,
+            prediction_mode="perfect",
+            test_start_date=20190101,
+            test_end_date=20190130,
+            agent_profiles=["SFH12", "SFH14"],
+            agent_bus_ids=[10, 6],
+            load_scale=1.0,
+            pv_scale=1.0,
+            battery_controls={
+                "mode": "fixed",
+                "battery_capacity": [10.0, 12.0],
+                "max_charge_rate": 0.0,
+            },
+            future_horizon=1,
+        )
+
+
+def test_apply_notebook_experiment_settings_rejects_fixed_battery_vector_c_rate(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_fixed_c_rate_vector_error")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    with pytest.raises(ValueError, match="positive scalar C-rate"):
+        apply_notebook_experiment_settings(
+            cfg,
+            prediction_mode="perfect",
+            test_start_date=20190101,
+            test_end_date=20190130,
+            agent_profiles=["SFH12", "SFH14"],
+            agent_bus_ids=[10, 6],
+            load_scale=1.0,
+            pv_scale=1.0,
+            battery_controls={
+                "mode": "fixed",
+                "battery_capacity": [10.0, 12.0],
+                "max_charge_rate": [0.5, 0.5],
+            },
+            future_horizon=1,
+        )
 
 
 def test_normalize_date_input_accepts_compact_dates():

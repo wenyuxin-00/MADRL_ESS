@@ -187,5 +187,5 @@ class BaseAgent(ABC):
         """Sample from a replay buffer and execute one update step."""
 
     @abstractmethod
-    def train_on_batch(self, batch: dict, agent_n: list) -> None:
+    def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
         """Update the agent parameters from one sampled batch."""

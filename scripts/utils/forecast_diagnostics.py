@@ -87,6 +87,58 @@ class Step1WindowPayload:
     blend_weight: float
 
 
+def apply_heatpump_jump_relief(
+    payload: Step1WindowPayload,
+    *,
+    enabled: bool,
+    threshold_kw: float = 0.8,
+    min_weight: float = 0.3,
+) -> dict[str, object]:
+    """Raise the effective heatpump blend weight only on large positive raw-vs-baseline jumps."""
+
+    threshold_kw = float(threshold_kw)
+    min_weight = float(min_weight)
+    if threshold_kw < 0.0:
+        raise ValueError(f"threshold_kw must be non-negative, got {threshold_kw}.")
+    if not 0.0 <= min_weight <= 1.0:
+        raise ValueError(f"min_weight must be between 0 and 1, got {min_weight}.")
+
+    base_weight = float(payload.blend_weight)
+    if not 0.0 <= base_weight <= 1.0:
+        raise ValueError(f"payload.blend_weight must be between 0 and 1, got {base_weight}.")
+
+    baseline = np.asarray(payload.baseline, dtype=np.float32)
+    raw = np.asarray(payload.raw, dtype=np.float32)
+    raw_gap = raw - baseline
+    effective_weights = np.full(raw.shape, np.float32(base_weight), dtype=np.float32)
+
+    trigger_mask = np.zeros(raw.shape, dtype=bool)
+    if bool(enabled):
+        trigger_mask = (raw_gap > np.float32(threshold_kw)) & (raw > baseline)
+        effective_weights[trigger_mask] = np.float32(max(base_weight, min_weight))
+
+    adjusted_blended = (baseline + effective_weights * raw_gap).astype(np.float32)
+    adjusted_payload = Step1WindowPayload(
+        profile=str(payload.profile),
+        timestamps=pd.DatetimeIndex(payload.timestamps),
+        target=np.asarray(payload.target, dtype=np.float32).copy(),
+        baseline=baseline.copy(),
+        raw=raw.copy(),
+        blended=adjusted_blended,
+        blend_weight=base_weight,
+    )
+    return {
+        "payload": adjusted_payload,
+        "base_weight": base_weight,
+        "effective_weights": effective_weights,
+        "trigger_mask": trigger_mask,
+        "threshold_kw": threshold_kw,
+        "min_weight": min_weight,
+        "triggered_count": int(np.sum(trigger_mask)),
+        "triggered_timestamps": pd.DatetimeIndex(payload.timestamps[trigger_mask]),
+    }
+
+
 @dataclass(frozen=True)
 class RolloutWindowPayload:
     """Recursive multi-step rollout payload for one profile on one split."""
@@ -640,6 +692,112 @@ def _payload_metric_rows(split_name: str, payload: Step1WindowPayload) -> list[d
     ]
 
 
+def _load_artifact_bundle_entries(
+    artifact_bundle: Sequence[tuple[str, str, str]],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for model_path, meta_path, scaler_path in artifact_bundle:
+        meta, scaler = load_lstm_forecaster_artifacts(
+            model_path=model_path,
+            meta_path=meta_path,
+            scaler_path=scaler_path,
+        )
+        entries.append(
+            {
+                "model_path": str(model_path),
+                "meta_path": str(meta_path),
+                "scaler_path": str(scaler_path),
+                "meta": meta,
+                "scaler": scaler,
+                "profile": str(meta.get("agent_profile") or meta.get("value_column") or ""),
+                "component": meta.get("component"),
+            }
+        )
+    return entries
+
+
+def _load_model_from_artifact_entry(
+    entry: dict[str, object],
+    *,
+    runtime_state: TorchRuntimeState,
+) -> LSTMForecastModel:
+    meta = dict(entry["meta"])
+    model = _build_model_from_meta(meta)
+    state_dict = torch.load(str(entry["model_path"]), map_location=runtime_state.device)
+    model.load_state_dict(state_dict)
+    return model.to(runtime_state.device)
+
+
+def _infer_segment_year(segment_frames: Sequence[pd.DataFrame]) -> int:
+    for frame in segment_frames:
+        if "timestamp" in frame.columns and not frame.empty:
+            return int(pd.Timestamp(frame["timestamp"].iloc[0]).year)
+    raise ValueError("Could not infer a calendar year from the provided segment frames.")
+
+
+def _load_component_segment_frames(
+    cfg,
+    *,
+    segment_frames: Sequence[pd.DataFrame],
+    component: str,
+    profiles: Sequence[str],
+) -> list[pd.DataFrame]:
+    csv_path = Path(cfg.data.data_dir) / "processed" / "prosumer" / f"{component}.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing processed component CSV: '{csv_path}'.")
+    value_columns = [str(profile) for profile in profiles]
+    component_frame = pd.read_csv(csv_path, usecols=["timestamp", *value_columns])
+    component_frame["timestamp"] = pd.to_datetime(component_frame["timestamp"], utc=True)
+    requested_timestamps = pd.DatetimeIndex(
+        pd.to_datetime(
+            [
+                timestamp
+                for segment_frame in segment_frames
+                for timestamp in segment_frame["timestamp"].tolist()
+            ],
+            utc=True,
+        )
+    )
+    component_frame = component_frame.loc[component_frame["timestamp"].isin(requested_timestamps)].reset_index(drop=True)
+    aligned_frames: list[pd.DataFrame] = []
+    for segment_frame in segment_frames:
+        aligned = segment_frame.loc[:, ["timestamp"]].merge(
+            component_frame.loc[:, ["timestamp", *value_columns]],
+            on="timestamp",
+            how="left",
+        )
+        if aligned[value_columns].isna().any().any():
+            raise ValueError(f"Component frame '{component}' did not align with the requested segment timestamps.")
+        aligned_frames.append(aligned.reset_index(drop=True))
+    return aligned_frames
+
+
+def _combine_component_payloads(
+    *,
+    profile: str,
+    component_payloads: dict[str, Step1WindowPayload],
+) -> Step1WindowPayload:
+    if not component_payloads:
+        raise ValueError(f"Component payloads are required to recombine profile='{profile}'.")
+    ordered_payloads = [component_payloads[key] for key in sorted(component_payloads)]
+    reference = ordered_payloads[0]
+    for payload in ordered_payloads[1:]:
+        if payload.target.shape != reference.target.shape:
+            raise ValueError(f"Component payload shapes do not align for profile='{profile}'.")
+        if not np.array_equal(payload.timestamps, reference.timestamps):
+            raise ValueError(f"Component timestamps do not align for profile='{profile}'.")
+    preferred_payload = component_payloads.get("heatpump", reference)
+    return Step1WindowPayload(
+        profile=str(profile),
+        timestamps=reference.timestamps,
+        target=np.sum([payload.target for payload in ordered_payloads], axis=0, dtype=np.float32).astype(np.float32),
+        baseline=np.sum([payload.baseline for payload in ordered_payloads], axis=0, dtype=np.float32).astype(np.float32),
+        raw=np.sum([payload.raw for payload in ordered_payloads], axis=0, dtype=np.float32).astype(np.float32),
+        blended=np.sum([payload.blended for payload in ordered_payloads], axis=0, dtype=np.float32).astype(np.float32),
+        blend_weight=float(preferred_payload.blend_weight),
+    )
+
+
 def _evaluate_saved_bundle_on_segments(
     *,
     runtime_state: TorchRuntimeState,
@@ -648,25 +806,68 @@ def _evaluate_saved_bundle_on_segments(
     artifact_bundle: Sequence[tuple[str, str, str]],
     split_name: str,
     batch_size: int = 4096,
+    cfg=None,
 ) -> tuple[pd.DataFrame, dict[str, Step1WindowPayload]]:
     rows: list[dict[str, object]] = []
     payloads: dict[str, Step1WindowPayload] = {}
+    artifact_entries = _load_artifact_bundle_entries(artifact_bundle)
+    has_component_split = any(entry.get("component") is not None for entry in artifact_entries)
+
+    if has_component_split:
+        if cfg is None:
+            raise ValueError("cfg is required to evaluate component-split artifact bundles.")
+        profiles = [str(profile) for profile in cfg.data.agent_profiles]
+        component_segment_frames = {
+            str(component): _load_component_segment_frames(
+                cfg,
+                segment_frames=segment_frames,
+                component=str(component),
+                profiles=profiles,
+            )
+            for component in sorted({str(entry["component"]) for entry in artifact_entries if entry.get("component")})
+        }
+        component_payloads_by_profile: dict[str, dict[str, Step1WindowPayload]] = {}
+        for entry in artifact_entries:
+            component = str(entry.get("component") or "")
+            profile = str(entry.get("profile") or entry["meta"].get("agent_profile") or "")
+            if component not in component_segment_frames:
+                raise ValueError(f"Unsupported component '{component}' in saved artifact bundle.")
+            if not profile:
+                raise ValueError("Component-split artifact metadata is missing agent_profile.")
+            payload = _compute_step1_payload(
+                profile=profile,
+                segment_frames=component_segment_frames[component],
+                value_column=profile,
+                model=_load_model_from_artifact_entry(entry, runtime_state=runtime_state),
+                scaler=entry["scaler"],
+                seq_len=int(entry["meta"]["seq_len"]),
+                pred_len=int(entry["meta"]["pred_len"]),
+                time_feature_mode=str(entry["meta"].get("time_feature_mode", "none")),
+                input_size=int(entry["meta"].get("input_size", 1)),
+                blend_weight=float(
+                    entry["meta"].get("blend_weight", 1.0) if entry["meta"].get("blend_weight") is not None else 1.0
+                ),
+                runtime_state=runtime_state,
+                batch_size=batch_size,
+            )
+            component_payloads_by_profile.setdefault(profile, {})[component] = payload
+            rows.extend(dict(row, component=component) for row in _payload_metric_rows(split_name, payload))
+
+        for profile, component_payloads in component_payloads_by_profile.items():
+            combined_payload = _combine_component_payloads(profile=profile, component_payloads=component_payloads)
+            payloads[profile] = combined_payload
+            rows.extend(dict(row, component="total") for row in _payload_metric_rows(split_name, combined_payload))
+        return pd.DataFrame(rows), payloads
+
     if len(value_columns) != len(artifact_bundle):
         raise ValueError(
             f"Expected artifact bundle size={len(value_columns)} for the current value columns, got {len(artifact_bundle)}."
         )
 
-    for value_column, bundle in zip(value_columns, artifact_bundle):
-        model_path, meta_path, scaler_path = bundle
-        meta, scaler = load_lstm_forecaster_artifacts(
-            model_path=model_path,
-            meta_path=meta_path,
-            scaler_path=scaler_path,
-        )
-        model = _build_model_from_meta(meta)
-        state_dict = torch.load(model_path, map_location=runtime_state.device)
-        model.load_state_dict(state_dict)
-        model = model.to(runtime_state.device)
+    for value_column, entry in zip(value_columns, artifact_entries):
+        model = _load_model_from_artifact_entry(entry, runtime_state=runtime_state)
+        meta = dict(entry["meta"])
+        scaler = entry["scaler"]
         profile = _profile_from_column(value_column, fallback=meta.get("agent_profile"))
         payload = _compute_step1_payload(
             profile=profile,
@@ -788,6 +989,7 @@ def collect_load_step1_diagnostics(
         value_columns=value_columns,
         artifact_bundle=artifact_bundle,
         split_name="val2019",
+        cfg=cfg,
     )
     test_rows, test_payloads = _evaluate_saved_bundle_on_segments(
         runtime_state=runtime,
@@ -795,6 +997,7 @@ def collect_load_step1_diagnostics(
         value_columns=value_columns,
         artifact_bundle=artifact_bundle,
         split_name="test2020",
+        cfg=cfg,
     )
 
     return {
@@ -1966,6 +2169,7 @@ __all__ = [
     "DEFAULT_BIAS_THRESHOLD_KW",
     "DEFAULT_BLOCKED_MONTH_GROUPS",
     "DEFAULT_CONTROL_DEGRADATION_PCT",
+    "apply_heatpump_jump_relief",
     "build_component_drift_report",
     "build_profile_monthly_error_report",
     "collect_load_step1_diagnostics",

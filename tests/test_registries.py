@@ -42,7 +42,8 @@ def test_default_compose_config_targets_grid_training_mainline():
     cfg = compose_experiment_config()
 
     assert isinstance(cfg, ExperimentConfig)
-    assert cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16"]
+    assert cfg.env.num_agents == 5
+    assert cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]
     assert cfg.data.train_year == 2019
     assert cfg.data.test_year == 2020
     assert cfg.reward.w_action_pen == 6.0
@@ -50,6 +51,6 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.reward.w_voltage_pen == 10.0
     assert cfg.reward.w_trafo_pen == 10.0
     assert cfg.grid.sb_code == "1-LV-rural1--0-sw"
-    assert cfg.grid.agent_bus_ids == [10, 6, 12]
+    assert cfg.grid.agent_bus_ids == [10, 6, 12, 4, 2]
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["price", "load", "pv"]
+    assert cfg.obs.sequence_features == ["price", "load", "pv"]

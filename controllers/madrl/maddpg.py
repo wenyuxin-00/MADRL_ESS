@@ -46,7 +46,7 @@ class MADDPG(BaseAgent):
         batch = to_torch_batch(replay_buffer.sample(), self.device)
         self.train_on_batch(batch, agent_n)
 
-    def train_on_batch(self, batch: dict, agent_n: list) -> None:
+    def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
         obs = batch["obs"]
         action = batch["action"]
         reward = batch["reward"]
@@ -54,7 +54,9 @@ class MADDPG(BaseAgent):
         done = batch["done"]
 
         with torch.no_grad():
-            next_action = torch.stack([agent._actor_target_call(next_obs) for agent in agent_n], dim=1)
+            next_action = None if shared_ctx is None else shared_ctx.get("target_actor_actions_clean")
+            if next_action is None:
+                next_action = torch.stack([agent._actor_target_call(next_obs) for agent in agent_n], dim=1)
             target_q = reward[:, self.agent_id] + self.gamma * (1 - done[:, self.agent_id]) * self._critic_target_call(
                 next_obs,
                 next_action,

@@ -1,4 +1,4 @@
-"""Run cold-cache vs warm-cache benchmarks for the fast-lab-backed MADRL mainline."""
+"""Run cold-cache vs warm-cache benchmarks for the cached MADRL mainline."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def _slug_timestamp() -> str:
 
 
 def _default_output_dir() -> Path:
-    return (project_root() / "artifacts" / "benchmarks" / "fastlab_ab" / _slug_timestamp()).resolve()
+    return (project_root() / "artifacts" / "benchmarks" / "mainline_ab" / _slug_timestamp()).resolve()
 
 
 def _build_candidate_controls(
@@ -87,6 +87,7 @@ def _build_candidate_controls(
         {
             "train_episodes": int(episode_budget),
             "max_train_steps": None,
+            "progress_write_interval_seconds": 5.0,
         },
     )
     experiment_name_base = str(checkpoint_controls.get("experiment_name", "grid_mainline"))
@@ -105,10 +106,7 @@ def _build_candidate_controls(
     candidate_experiment = merge_control_overrides(
         experiment_controls,
         {
-            "observation_cache_mode": "precomputed_exact",
             "refresh_observation_cache": refresh,
-            "train_info_mode": "minimal",
-            "fast_grid_core": True,
             "observation_cache_root": str(cache_root),
         },
     )
@@ -234,14 +232,17 @@ def _compose_cfg_for_rollout(
     )
     _apply_model_controls(cfg, experiment_controls.get("model_controls"))
     _apply_runtime_controls(cfg, experiment_controls.get("runtime_controls"))
+    agent_profiles = list(data_controls.get("agent_profiles", cfg.data.agent_profiles))
+    n_requested_agents = len(agent_profiles)
     apply_notebook_experiment_settings(
         cfg,
         prediction_mode=str(data_controls.get("prediction_mode", "perfect")),
         test_start_date=data_controls.get("test_start_date"),
         test_end_date=data_controls.get("test_end_date"),
-        agent_profiles=list(data_controls.get("agent_profiles", cfg.data.agent_profiles)),
-        load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * cfg.env.num_agents),
-        pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * cfg.env.num_agents),
+        agent_profiles=agent_profiles,
+        agent_bus_ids=data_controls.get("agent_bus_ids"),
+        load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * n_requested_agents),
+        pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * n_requested_agents),
         battery_controls=battery_controls,
         future_horizon=int(data_controls.get("future_horizon", cfg.env.future_horizon)),
         train_year=data_controls.get("train_year"),
@@ -254,7 +255,7 @@ def _compose_cfg_for_rollout(
         seed=int(experiment_controls.get("seed", 0)),
         require_cuda=experiment_controls.get("require_cuda"),
     )
-    ensure_forecast_ready(cfg)
+    cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
     cfg.runtime.device_info = describe_device(runtime_state)
     return cfg
 
@@ -322,6 +323,10 @@ def _build_benchmark_row(
         "steps_per_sec": float(perf_summary.get("steps_per_sec", float("nan"))),
         "avg_env_ms_per_iter": float(perf_summary.get("avg_env_ms_per_iter", float("nan"))),
         "avg_update_ms_per_call": float(perf_summary.get("avg_update_ms_per_call", float("nan"))),
+        "sample_time_s": float(perf_summary.get("sample_time_s", 0.0)),
+        "history_time_s": float(perf_summary.get("history_time_s", 0.0)),
+        "progress_io_time_s": float(perf_summary.get("progress_io_time_s", 0.0)),
+        "agent_update_time_s": float(perf_summary.get("agent_update_time_s", 0.0)),
         "cache_build_time_s": float(perf_summary.get("cache_build_time_s", 0.0)),
         "cache_hit": bool(perf_summary.get("cache_hit", False)),
         "episodes_completed": int(training_result["episodes_completed"]),
@@ -330,7 +335,7 @@ def _build_benchmark_row(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark cold-cache vs warm-cache performance for the fast-lab-backed MADRL mainline.")
+    parser = argparse.ArgumentParser(description="Benchmark cold-cache vs warm-cache performance for the cached MADRL mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
     parser.add_argument("--battery-controls")
@@ -384,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             refresh_cache = candidate_name.endswith("_cold")
             print(
-                f"[fastlab_ab] running {candidate_name} ep{episode_budget} via {module_name} "
+                f"[mainline_ab] running {candidate_name} ep{episode_budget} via {module_name} "
                 f"(refresh_cache={refresh_cache})"
             )
             train_run = _run_training_case(
@@ -461,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     summary_path = _write_json(output_dir / "benchmark_summary.json", summary_payload)
     print(json.dumps(summary_payload, indent=2, default=_json_default))
-    print(f"[fastlab_ab] summary written to {summary_path}")
+    print(f"[mainline_ab] summary written to {summary_path}")
     return 0
 
 

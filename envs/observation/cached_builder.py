@@ -18,7 +18,7 @@ from envs.observation.features import (
 from envs.observation.normalization import ObservationNormalizer
 
 
-class CachedObservationBuilderFastLab(ObservationBuilder):
+class CachedObservationBuilder(ObservationBuilder):
     """Build structured observations from a per-episode cache plus live state."""
 
     def __init__(
@@ -91,7 +91,7 @@ class CachedObservationBuilderFastLab(ObservationBuilder):
             return reshape_agent_scalar_feature(env.get_signal_step("pv"))
         if feature_name == "soc":
             return reshape_agent_scalar_feature(env.soc)
-        raise ValueError(f"Unsupported fast-lab local feature '{feature_name}'.")
+        raise ValueError(f"Unsupported cached local feature '{feature_name}'.")
 
     def _sequence_feature(self, env, feature_name: str) -> np.ndarray:
         return env.get_cached_sequence_feature(feature_name)

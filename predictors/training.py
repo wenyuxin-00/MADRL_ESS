@@ -36,10 +36,12 @@ from predictors.lstm_forecaster import (
     PHYSICAL_NORMALIZATION_PV_PEAK,
     POSTPROCESS_MODE_BASELINE_BLEND,
     POSTPROCESS_MODE_NONE,
+    POSTPROCESS_MODE_PHYSICAL_CLIP,
     save_lstm_forecaster_artifacts,
 )
 from predictors.lstm_model import LSTMForecastModel
 from predictors.time_features import (
+    TIME_FEATURE_MODE_HOUR_WEEK_YEAR,
     TIME_FEATURE_MODE_NONE,
     coerce_timestamp_index,
     encode_forecast_time_features,
@@ -61,6 +63,13 @@ SIGNAL_TRAINING_OVERRIDE_FIELDS = {
     "val_ratio": "lstm_val_ratio",
 }
 PHYSICAL_SCALE_EPS = np.float32(1e-6)
+HEATPUMP_BLOCKED_MONTH_GROUPS = (
+    ("Jan-Mar", (1, 2, 3)),
+    ("Apr-Jun", (4, 5, 6)),
+    ("Jul-Sep", (7, 8, 9)),
+    ("Oct-Dec", (10, 11, 12)),
+)
+HEATPUMP_BLOCKED_BIAS_GUARD_KW = 0.15
 
 
 def _normalize_load_model_mode(mode: str | None) -> str:
@@ -77,6 +86,16 @@ def _normalize_load_hybrid_mode(mode: str | None) -> str:
     if normalized != POSTPROCESS_MODE_BASELINE_BLEND:
         raise ValueError(
             f"Unsupported forecast.load_hybrid_mode '{mode}'. Only '{POSTPROCESS_MODE_BASELINE_BLEND}' is implemented."
+        )
+    return normalized
+
+
+def _normalize_pv_postprocess_mode(mode: str | None) -> str:
+    normalized = str(mode or POSTPROCESS_MODE_PHYSICAL_CLIP).strip().lower()
+    if normalized not in {POSTPROCESS_MODE_NONE, POSTPROCESS_MODE_PHYSICAL_CLIP}:
+        raise ValueError(
+            f"Unsupported forecast.pv_postprocess_mode '{mode}'. "
+            f"Only '{POSTPROCESS_MODE_NONE}' and '{POSTPROCESS_MODE_PHYSICAL_CLIP}' are implemented."
         )
     return normalized
 
@@ -128,6 +147,10 @@ def resolve_signal_time_feature_mode(cfg, signal_name: str) -> str:
     normalized = _normalize_signal_name(signal_name)
     if normalized == "load":
         return normalize_time_feature_mode(getattr(cfg.forecast, "load_time_feature_mode", TIME_FEATURE_MODE_NONE))
+    if normalized == "pv":
+        return normalize_time_feature_mode(
+            getattr(cfg.forecast, "pv_time_feature_mode", TIME_FEATURE_MODE_HOUR_WEEK_YEAR)
+        )
     return TIME_FEATURE_MODE_NONE
 
 
@@ -135,6 +158,10 @@ def resolve_signal_postprocess_mode(cfg, signal_name: str) -> str:
     normalized = _normalize_signal_name(signal_name)
     if normalized == "load":
         return _normalize_load_hybrid_mode(getattr(cfg.forecast, "load_hybrid_mode", POSTPROCESS_MODE_BASELINE_BLEND))
+    if normalized == "pv":
+        return _normalize_pv_postprocess_mode(
+            getattr(cfg.forecast, "pv_postprocess_mode", POSTPROCESS_MODE_PHYSICAL_CLIP)
+        )
     return POSTPROCESS_MODE_NONE
 
 
@@ -416,6 +443,20 @@ def forecast_artifact_root(cfg) -> Path:
     return Path(root)
 
 
+def _expected_signal_optimized_metric(
+    signal_name: str,
+    *,
+    postprocess_mode: str,
+    component: str | None = None,
+) -> str | None:
+    normalized_signal = _normalize_signal_name(signal_name)
+    if normalized_signal != "load" or str(postprocess_mode) != POSTPROCESS_MODE_BASELINE_BLEND:
+        return None
+    if str(component or "").strip().lower() == "heatpump":
+        return "blocked_bias_guard_step1"
+    return "mae_step1"
+
+
 def expected_lstm_artifact_meta(
     cfg,
     signal_name: str,
@@ -423,6 +464,7 @@ def expected_lstm_artifact_meta(
     *,
     agent_index: int | None = None,
     agent_profile: str | None = None,
+    component: str | None = None,
 ) -> dict[str, object]:
     """Build the expected artifact metadata for one signal."""
     local_cfg, settings = resolve_signal_training_settings(cfg, signal_name, overrides=overrides)
@@ -443,14 +485,22 @@ def expected_lstm_artifact_meta(
         "source_signature": build_lstm_source_signature(local_cfg, signal_name),
         "agent_index": None if agent_index is None else int(agent_index),
         "agent_profile": None if agent_profile is None else str(agent_profile),
+        "component": None if component is None else str(component),
         **(
             {
                 "postprocess_mode": str(settings["postprocess_mode"]),
                 "baseline_mode": str(settings["baseline_mode"]),
                 "blend_weight": None,
-                "optimized_metric": "mae_step1",
+                "optimized_metric": _expected_signal_optimized_metric(
+                    signal_name,
+                    postprocess_mode=str(settings["postprocess_mode"]),
+                    component=component,
+                ),
             }
-            if _normalize_signal_name(signal_name) == "load"
+            if (
+                resolve_signal_artifact_format(signal_name, settings) == LSTM_LOAD_HYBRID_ARTIFACT_FORMAT
+                or str(settings["postprocess_mode"]) != POSTPROCESS_MODE_NONE
+            )
             else {}
         ),
     }
@@ -500,6 +550,7 @@ def validate_lstm_artifact(
     overrides: dict[str, object] | None = None,
     agent_index: int | None = None,
     agent_profile: str | None = None,
+    component: str | None = None,
 ) -> dict[str, object]:
     """校验单个 artifact 是否存在且与当前配置一致。"""
     normalized_signal = _normalize_signal_name(signal_name)
@@ -509,6 +560,7 @@ def validate_lstm_artifact(
         overrides=overrides,
         agent_index=agent_index,
         agent_profile=agent_profile,
+        component=component,
     )
     resolved_paths = {name: Path(path) for name, path in paths.items()}
     required_files = {
@@ -566,6 +618,15 @@ def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[st
     year = int(cfg.data.train_year if split == "train" else cfg.data.test_year)
     start_date = cfg.data.train_start_date if split == "train" else cfg.data.test_start_date
     end_date = cfg.data.train_end_date if split == "train" else cfg.data.test_end_date
+    n_agents = int(cfg.env.num_agents)
+    agent_profiles = [str(profile) for profile in cfg.data.agent_profiles]
+    if len(agent_profiles) != n_agents:
+        raise ValueError(
+            "Forecast prosumer config mismatch: "
+            f"cfg.env.num_agents={n_agents} but cfg.data.agent_profiles has {len(agent_profiles)} entry(ies). "
+            "Keep forecast notebook/config values in sync, for example: "
+            "cfg.env.num_agents = len(cfg.data.agent_profiles)."
+        )
     exclude_start_date = None
     exclude_end_date = None
     if (
@@ -581,8 +642,8 @@ def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[st
     return {
         "data_dir": data_dir,
         "episode_length": 1,
-        "n_agents": int(cfg.env.num_agents),
-        "agent_profiles": list(cfg.data.agent_profiles),
+        "n_agents": n_agents,
+        "agent_profiles": agent_profiles,
         "year": year,
         "start_date": start_date,
         "end_date": end_date,
@@ -593,7 +654,7 @@ def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[st
         "pv_capacity_kw": list(cfg.data.pv_capacity_kw),
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
-        "node_ids": list(range(int(cfg.env.num_agents))),
+        "node_ids": list(range(n_agents)),
     }
 
 
@@ -876,6 +937,57 @@ def build_supervised_windows_from_time_feature_frames(
 
     if not x_parts:
         raise ValueError("No valid supervised windows could be built from the provided time-feature segments.")
+    return np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0)
+
+
+def build_supervised_windows_from_time_feature_segments(
+    segment_frames: list[pd.DataFrame],
+    *,
+    value_columns: Sequence[str],
+    seq_len: int,
+    pred_len: int,
+    scaler: object | None,
+    physical_scale_by_column: Sequence[float] | np.ndarray | float | None = None,
+    time_feature_mode: str = TIME_FEATURE_MODE_NONE,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build shared-model windows for one or more value columns with aligned time features."""
+
+    total_window = int(seq_len) + int(pred_len)
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+
+    for segment_frame in segment_frames:
+        values = _reshape_signal_values(
+            segment_frame.loc[:, list(value_columns)].to_numpy(dtype=np.float32)
+        )
+        if values.shape[0] < total_window:
+            continue
+
+        normalized_values = _apply_physical_normalization(values, physical_scale_by_column)
+        timestamps = coerce_timestamp_index(segment_frame["timestamp"].tolist())
+        time_features = encode_forecast_time_features(timestamps, time_feature_mode).astype(np.float32)
+        time_windows = np.lib.stride_tricks.sliding_window_view(
+            time_features,
+            window_shape=total_window,
+            axis=0,
+        )
+        time_windows = np.moveaxis(time_windows, -1, 1).astype(np.float32)
+
+        for column_idx in range(normalized_values.shape[1]):
+            series = normalized_values[:, column_idx].astype(np.float32)
+            if scaler is not None:
+                series = scaler.transform(series.reshape(-1, 1)).reshape(-1).astype(np.float32)
+
+            value_windows = np.lib.stride_tricks.sliding_window_view(series, total_window).astype(np.float32)
+            value_history = value_windows[:, :seq_len].reshape(-1, seq_len, 1).astype(np.float32)
+            if time_windows.shape[2] > 0:
+                x_parts.append(np.concatenate([value_history, time_windows[:, :seq_len, :]], axis=2))
+            else:
+                x_parts.append(value_history)
+            y_parts.append(value_windows[:, seq_len:].astype(np.float32))
+
+    if not x_parts:
+        raise ValueError("No valid supervised windows could be built from the provided multi-column time-feature segments.")
     return np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0)
 
 
@@ -1352,6 +1464,34 @@ def _predict_supervised_windows(
     return np.concatenate(predictions, axis=0).astype(np.float32)
 
 
+def _build_validation_window_timestamps(
+    segment_frames: Sequence[pd.DataFrame],
+    *,
+    seq_len: int,
+    pred_len: int,
+) -> pd.DatetimeIndex:
+    timestamps: list[pd.DatetimeIndex] = []
+    total_window = int(seq_len) + int(pred_len)
+    for segment_frame in segment_frames:
+        frame = segment_frame.reset_index(drop=True)
+        n_windows = len(frame) - total_window + 1
+        if n_windows <= 0:
+            continue
+        window_timestamps = pd.DatetimeIndex(
+            pd.to_datetime(
+                frame["timestamp"].iloc[int(seq_len) : int(seq_len) + int(n_windows)].tolist(),
+                utc=True,
+            )
+        )
+        timestamps.append(window_timestamps)
+    if not timestamps:
+        return pd.DatetimeIndex([])
+    combined = timestamps[0]
+    for chunk in timestamps[1:]:
+        combined = combined.append(chunk)
+    return combined
+
+
 def _select_load_blend_weight_from_validation(
     *,
     model,
@@ -1362,6 +1502,9 @@ def _select_load_blend_weight_from_validation(
     runtime_state: TorchRuntimeState,
     batch_size: int,
     candidate_weights: Sequence[float],
+    component: str | None = None,
+    agent_profile: str | None = None,
+    window_timestamps: pd.DatetimeIndex | None = None,
 ) -> dict[str, object]:
     raw_predictions = _predict_supervised_windows(
         model,
@@ -1389,23 +1532,131 @@ def _select_load_blend_weight_from_validation(
     raw_mae = float(np.mean(np.abs(raw_step1 - target_step1)))
     best_weight = float(candidate_weights[0])
     best_mae = float("inf")
+    optimized_metric = "mae_step1"
+    bias_guard_satisfied: bool | None = None
 
-    for candidate_weight in candidate_weights:
-        weight = np.float32(candidate_weight)
-        blended_step1 = baseline_step1 + weight * (raw_step1 - baseline_step1)
-        mae = float(np.mean(np.abs(blended_step1 - target_step1)))
-        if mae < best_mae:
-            best_mae = mae
-            best_weight = float(candidate_weight)
+    if (
+        str(component or "").strip().lower() == "heatpump"
+        and window_timestamps is not None
+        and len(window_timestamps) == len(target_step1)
+    ):
+        selection = _select_heatpump_blocked_blend_weight(
+            target_step1=target_step1,
+            baseline_step1=baseline_step1,
+            raw_step1=raw_step1,
+            window_timestamps=pd.DatetimeIndex(window_timestamps),
+            candidate_weights=tuple(float(weight) for weight in candidate_weights),
+        )
+        best_weight = float(selection["selected_weight"])
+        optimized_metric = "blocked_bias_guard_step1"
+        bias_guard_satisfied = bool(selection["bias_guard_satisfied"])
+    else:
+        for candidate_weight in candidate_weights:
+            weight = np.float32(candidate_weight)
+            blended_step1 = baseline_step1 + weight * (raw_step1 - baseline_step1)
+            mae = float(np.mean(np.abs(blended_step1 - target_step1)))
+            if mae < best_mae:
+                best_mae = mae
+                best_weight = float(candidate_weight)
+
+    blended_step1 = baseline_step1 + np.float32(best_weight) * (raw_step1 - baseline_step1)
+    best_mae = float(np.mean(np.abs(blended_step1 - target_step1)))
 
     return {
         "postprocess_mode": POSTPROCESS_MODE_BASELINE_BLEND,
         "baseline_mode": BASELINE_MODE_LAST_VALUE,
         "blend_weight": best_weight,
-        "optimized_metric": "mae_step1",
+        "optimized_metric": optimized_metric,
         "baseline_mae_step1": baseline_mae,
         "raw_mae_step1": raw_mae,
         "blended_mae_step1": best_mae,
+        "bias_guard_satisfied": bias_guard_satisfied,
+    }
+
+
+def _select_heatpump_blocked_blend_weight(
+    *,
+    target_step1: np.ndarray,
+    baseline_step1: np.ndarray,
+    raw_step1: np.ndarray,
+    window_timestamps: pd.DatetimeIndex,
+    candidate_weights: Sequence[float],
+    bias_threshold_kw: float = HEATPUMP_BLOCKED_BIAS_GUARD_KW,
+) -> dict[str, object]:
+    """Rank heatpump blend weights conservatively over blocked validation."""
+
+    if len(window_timestamps) != len(target_step1):
+        raise ValueError(
+            "window_timestamps must align with target_step1 for heatpump blocked blend selection, "
+            f"got len(window_timestamps)={len(window_timestamps)} vs len(target_step1)={len(target_step1)}."
+        )
+
+    base_frame = pd.DataFrame(
+        {
+            "timestamp": pd.DatetimeIndex(window_timestamps),
+            "target": np.asarray(target_step1, dtype=np.float32),
+            "baseline": np.asarray(baseline_step1, dtype=np.float32),
+            "raw": np.asarray(raw_step1, dtype=np.float32),
+        }
+    )
+    base_frame["month"] = base_frame["timestamp"].dt.month
+
+    candidate_rows: list[dict[str, object]] = []
+    for candidate_weight in candidate_weights:
+        block_rmses: list[float] = []
+        block_maes: list[float] = []
+        block_abs_biases: list[float] = []
+        max_abs_biases: list[float] = []
+        passes_bias_guard = True
+        for _, months in HEATPUMP_BLOCKED_MONTH_GROUPS:
+            block = base_frame.loc[base_frame["month"].isin(months)]
+            if block.empty:
+                continue
+            blended = block["baseline"].to_numpy(dtype=np.float32) + np.float32(candidate_weight) * (
+                block["raw"].to_numpy(dtype=np.float32) - block["baseline"].to_numpy(dtype=np.float32)
+            )
+            target = block["target"].to_numpy(dtype=np.float32)
+            metrics = compute_forecast_metrics(target, blended)
+            abs_bias = abs(float(np.mean(blended - target)))
+            passes_bias_guard = passes_bias_guard and abs_bias <= float(bias_threshold_kw)
+            block_rmses.append(float(metrics["rmse"]))
+            block_maes.append(float(metrics["mae"]))
+            block_abs_biases.append(abs_bias)
+            max_abs_biases.append(abs_bias)
+        if not block_rmses:
+            continue
+        candidate_rows.append(
+            {
+                "candidate_weight": float(candidate_weight),
+                "avg_block_rmse": float(np.mean(block_rmses)),
+                "avg_block_mae": float(np.mean(block_maes)),
+                "avg_abs_block_bias": float(np.mean(block_abs_biases)),
+                "max_abs_block_bias": float(np.max(max_abs_biases)),
+                "passes_bias_guard": bool(passes_bias_guard),
+            }
+        )
+
+    candidate_frame = pd.DataFrame(candidate_rows)
+    if candidate_frame.empty:
+        raise ValueError("No blocked-validation candidates were produced for heatpump blend selection.")
+
+    viable = candidate_frame.loc[candidate_frame["passes_bias_guard"]].copy()
+    if viable.empty:
+        ranked = candidate_frame.sort_values(
+            ["max_abs_block_bias", "avg_abs_block_bias", "avg_block_mae", "candidate_weight"]
+        ).reset_index(drop=True)
+        satisfied = False
+    else:
+        ranked = viable.sort_values(
+            ["avg_block_mae", "avg_abs_block_bias", "candidate_weight"]
+        ).reset_index(drop=True)
+        satisfied = True
+
+    selected = ranked.iloc[0]
+    return {
+        "selected_weight": float(selected["candidate_weight"]),
+        "bias_guard_satisfied": bool(satisfied),
+        "candidate_metrics": candidate_frame,
     }
 
 
@@ -1927,6 +2178,7 @@ def _collect_lstm_artifact_inventory(
                 overrides=signal_overrides or None,
                 agent_index=spec["agent_index"],
                 agent_profile=spec["agent_profile"],
+                component=spec.get("component"),
             )
             if validation["compatible"]:
                 compatible_artifacts.append(_artifact_tuple_from_paths(spec["paths"]))
@@ -2109,6 +2361,7 @@ def _train_single_signal_lstm(
     test_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="test")
     x_val: np.ndarray | None = None
     y_val: np.ndarray | None = None
+    val_window_timestamps: pd.DatetimeIndex | None = None
 
     if int(settings["input_size"]) > 1:
         _, train_segment_frames, value_columns = _load_signal_segment_frames_from_source(
@@ -2131,23 +2384,28 @@ def _train_single_signal_lstm(
             physical_scale_by_column=train_physical_scale,
             scaler_type=str(settings.get("scaler_type", "standard")),
         )
-        x_train, y_train = build_supervised_windows_from_time_feature_frames(
+        x_train, y_train = build_supervised_windows_from_time_feature_segments(
             split["train_segments"],
-            value_column=source.value_columns[0],
+            value_columns=value_columns,
             seq_len=seq_len,
             pred_len=pred_len,
             scaler=scaler,
             physical_scale_by_column=train_physical_scale,
             time_feature_mode=str(settings["time_feature_mode"]),
         )
-        x_val, y_val = build_supervised_windows_from_time_feature_frames(
+        x_val, y_val = build_supervised_windows_from_time_feature_segments(
             split["val_segments"],
-            value_column=source.value_columns[0],
+            value_columns=value_columns,
             seq_len=seq_len,
             pred_len=pred_len,
             scaler=scaler,
             physical_scale_by_column=train_physical_scale,
             time_feature_mode=str(settings["time_feature_mode"]),
+        )
+        val_window_timestamps = _build_validation_window_timestamps(
+            split["val_segments"],
+            seq_len=seq_len,
+            pred_len=pred_len,
         )
         train_loader = make_tensor_loader(
             x_train,
@@ -2264,6 +2522,9 @@ def _train_single_signal_lstm(
             runtime_state=runtime_state,
             batch_size=int(local_cfg.forecast.lstm_batch_size),
             candidate_weights=settings["blend_candidates"],
+            component=component,
+            agent_profile=agent_profile,
+            window_timestamps=val_window_timestamps,
         )
 
     artifact_paths = _managed_lstm_artifact_paths(
@@ -2307,6 +2568,7 @@ def _train_single_signal_lstm(
         overrides=overrides,
         agent_index=agent_index,
         agent_profile=agent_profile,
+        component=component,
     )
     if not refreshed_validation["compatible"]:
         raise RuntimeError(
@@ -2489,61 +2751,119 @@ def train_signal_lstm(
             },
         }
 
-    _, train_segments, value_columns = _load_signal_segments_from_source(
-        source,
-        signal_name,
-        split="train",
-        drop_warmup=True,
-    )
     physical_normalization_mode = resolve_signal_physical_normalization_mode(signal_name)
     train_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="train")
     test_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split="test")
 
     seq_len = int(local_cfg.forecast.history_window)
     pred_len = int(local_cfg.env.future_horizon)
-    split = temporal_split_segments(
-        train_segments,
-        train_ratio=float(local_cfg.forecast.lstm_train_ratio),
-        val_ratio=float(local_cfg.forecast.lstm_val_ratio),
-        seq_len=seq_len,
-        pred_len=pred_len,
-    )
-    train_values_only = split["train_segments"]
-    val_context = split["val_segments"]
-    train_stats = summarize_signal_values(train_values_only)
+    if int(settings["input_size"]) > 1:
+        _, train_segment_frames, value_columns = _load_signal_segment_frames_from_source(
+            source,
+            signal_name,
+            split="train",
+            drop_warmup=True,
+        )
+        split = temporal_split_segment_frames(
+            train_segment_frames,
+            train_ratio=float(local_cfg.forecast.lstm_train_ratio),
+            val_ratio=float(local_cfg.forecast.lstm_val_ratio),
+            seq_len=seq_len,
+            pred_len=pred_len,
+        )
+        train_values_only = _extract_segment_value_arrays(split["train_segments"], value_columns)
+        train_stats = summarize_signal_values(train_values_only)
+        scaler = fit_signal_scaler(
+            train_values_only,
+            physical_scale_by_column=train_physical_scale,
+            scaler_type=str(settings.get("scaler_type", "standard")),
+        )
+        x_train, y_train = build_supervised_windows_from_time_feature_segments(
+            split["train_segments"],
+            value_columns=value_columns,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            time_feature_mode=str(settings["time_feature_mode"]),
+        )
+        x_val, y_val = build_supervised_windows_from_time_feature_segments(
+            split["val_segments"],
+            value_columns=value_columns,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            time_feature_mode=str(settings["time_feature_mode"]),
+        )
+        train_loader = make_tensor_loader(
+            x_train,
+            y_train,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=True,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        val_loader = make_tensor_loader(
+            x_val,
+            y_val,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=False,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        train_segment_count = len(split["train_segments"])
+        val_segment_count = len(split["val_segments"])
+    else:
+        _, train_segments, value_columns = _load_signal_segments_from_source(
+            source,
+            signal_name,
+            split="train",
+            drop_warmup=True,
+        )
+        split = temporal_split_segments(
+            train_segments,
+            train_ratio=float(local_cfg.forecast.lstm_train_ratio),
+            val_ratio=float(local_cfg.forecast.lstm_val_ratio),
+            seq_len=seq_len,
+            pred_len=pred_len,
+        )
+        train_values_only = split["train_segments"]
+        train_stats = summarize_signal_values(train_values_only)
+        scaler = fit_signal_scaler(
+            train_values_only,
+            physical_scale_by_column=train_physical_scale,
+            scaler_type=str(settings.get("scaler_type", "standard")),
+        )
+        train_loader = make_matrix_loader(
+            train_values_only,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=True,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        val_loader = make_matrix_loader(
+            split["val_segments"],
+            seq_len=seq_len,
+            pred_len=pred_len,
+            scaler=scaler,
+            physical_scale_by_column=train_physical_scale,
+            batch_size=int(local_cfg.forecast.lstm_batch_size),
+            shuffle=False,
+            device=runtime_state.device,
+            pin_memory=runtime_state.pin_memory,
+        )
+        train_segment_count = len(train_values_only)
+        val_segment_count = len(split["val_segments"])
 
     print(
-        f"[forecast] {signal_name}: train_segments={len(train_values_only)}, "
-        f"val_segments={len(val_context)}, columns={list(value_columns)}, "
+        f"[forecast] {signal_name}: train_segments={train_segment_count}, "
+        f"val_segments={val_segment_count}, columns={list(value_columns)}, "
         f"train_stats={train_stats}, settings={settings}"
-    )
-
-    scaler = fit_signal_scaler(
-        train_values_only,
-        physical_scale_by_column=train_physical_scale,
-        scaler_type=str(settings.get("scaler_type", "standard")),
-    )
-    train_loader = make_matrix_loader(
-        train_values_only,
-        seq_len=seq_len,
-        pred_len=pred_len,
-        scaler=scaler,
-        physical_scale_by_column=train_physical_scale,
-        batch_size=int(local_cfg.forecast.lstm_batch_size),
-        shuffle=True,
-        device=runtime_state.device,
-        pin_memory=runtime_state.pin_memory,
-    )
-    val_loader = make_matrix_loader(
-        val_context,
-        seq_len=seq_len,
-        pred_len=pred_len,
-        scaler=scaler,
-        physical_scale_by_column=train_physical_scale,
-        batch_size=int(local_cfg.forecast.lstm_batch_size),
-        shuffle=False,
-        device=runtime_state.device,
-        pin_memory=runtime_state.pin_memory,
     )
 
     model = LSTMForecastModel(
@@ -2583,6 +2903,10 @@ def train_signal_lstm(
         input_size=int(settings["input_size"]),
         time_feature_mode=str(settings["time_feature_mode"]),
         model_mode=str(settings["model_mode"]),
+        postprocess_mode=str(settings["postprocess_mode"]),
+        baseline_mode=str(settings["baseline_mode"]),
+        blend_weight=None,
+        optimized_metric=None,
     )
 
     refreshed_validation = validate_lstm_artifact(local_cfg, signal_name, artifact_paths, overrides=overrides)

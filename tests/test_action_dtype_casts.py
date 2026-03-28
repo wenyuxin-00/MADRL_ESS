@@ -23,7 +23,7 @@ class _DummyActionAgent(BaseAgent):
     def train(self, replay_buffer, agent_n: list) -> None:
         raise NotImplementedError
 
-    def train_on_batch(self, batch: dict, agent_n: list) -> None:
+    def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
         raise NotImplementedError
 
 

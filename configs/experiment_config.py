@@ -16,11 +16,11 @@ def _default_device() -> torch.device:
 class EnvConfig:
     """Environment settings for the default GridEnv workflow."""
 
-    num_agents: int = 3
+    num_agents: int = 5
     episode_limit: int = 96 * 2
     future_horizon: int = 24
     battery_mode: str = "from_pv"
-    battery_capacity: float = 5.0
+    battery_capacity: float | list[float] = 5.0
     max_charge_rate: float = 2.5
     efficiency: float = 0.95
     init_soc: float = 0.5
@@ -98,9 +98,14 @@ class ForecastConfig:
     history_window: int = 96*3
     load_model_mode: str = "per_agent"
     load_time_feature_mode: str = "hour_week_year"
+    pv_time_feature_mode: str = "hour_week_year"
     load_hybrid_mode: str = "baseline_blend"
+    pv_postprocess_mode: str = "physical_clip"
     load_baseline_mode: str = "last_value"
     load_blend_candidates: tuple[float, ...] = field(default_factory=lambda: tuple(i / 10.0 for i in range(11)))
+    heatpump_jump_relief_enabled: bool = False
+    heatpump_jump_relief_threshold_kw: float = 0.8
+    heatpump_jump_relief_min_weight: float = 0.3
     lstm_hidden_size: int = 64
     lstm_num_layers: int = 1
     lstm_dropout: float = 0.0
@@ -134,7 +139,7 @@ class DataConfig:
     """Processed prosumer dataset selection."""
 
     data_dir: str | Path | None = None
-    agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16"])
+    agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"])
     train_year: int = 2019
     test_year: int = 2020
     train_start_date: str | None = None
@@ -168,6 +173,7 @@ class TrainConfig:
     use_noise_decay: bool = True
     show_progress: bool = True
     progress_postfix_interval: int = 10
+    progress_write_interval_seconds: float = 5.0
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
         if self.max_train_steps is not None:
@@ -206,6 +212,11 @@ class RuntimeConfig:
     observation_layout: dict[str, dict[str, object]] | None = None
     observation_normalization_state: dict[str, object] | None = None
     action_dim: int = 1
+    progress_state_path: str | None = None
+    observation_cache_root: str | None = None
+    observation_cache_batch_size: int = 8192
+    refresh_observation_cache: bool = False
+    forecast_ready: dict[str, object] | None = None
 
 
 @dataclass
@@ -214,7 +225,7 @@ class GridConfig:
 
     sb_code: str = "1-LV-rural1--0-sw"
     pf_solver: str = "nr"
-    agent_bus_ids: list[int] = field(default_factory=lambda: [10, 6, 12])
+    agent_bus_ids: list[int] = field(default_factory=lambda: [10, 6, 12, 4, 2])
     v_min_pu: float = 0.95
     v_max_pu: float = 1.05
     line_max_loading_pct: float = 100.0

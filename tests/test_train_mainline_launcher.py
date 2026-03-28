@@ -87,6 +87,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "test_start_date": 20200101,
         "test_end_date": 20200103,
         "agent_profiles": ["SFH12", "SFH14"],
+        "agent_bus_ids": [6, 10],
         "load_scale": [1.0, 1.0],
         "pv_scale": [1.0, 1.0],
         "future_horizon": 1,
@@ -94,11 +95,9 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "test_year": 2020,
     }
     battery_controls = {
-        "mode": "from_pv",
-        "from_pv_power_ratio": 0.5,
-        "from_pv_duration_hours": 2.5,
-        "battery_capacity": 5.0,
-        "max_charge_rate": 2.5,
+        "mode": "fixed",
+        "battery_capacity": [5.0, 6.0],
+        "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
         "soc_min": 0.05,
@@ -182,7 +181,10 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert result["algorithm"] == "MATD3"
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
-    assert result["battery_controls"]["mode"] == "from_pv"
+    assert result["battery_controls"]["mode"] == "fixed"
+    assert result["summary"]["applied_controls"]["battery"]["battery_capacity"] == [5.0, 6.0]
+    assert result["summary"]["applied_controls"]["battery"]["p_max_kw"] == [2.5, 3.0]
+    assert result["summary"]["applied_controls"]["agent_bus_ids"] == [6, 10]
     assert result["vec_env"] == "SubprocVecEnv"
     assert result["device"] == "cpu"
     assert result["started_at"]
@@ -202,5 +204,9 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]
+    assert "sample_time_s" in result["perf_summary"]
+    assert "history_time_s" in result["perf_summary"]
+    assert "progress_io_time_s" in result["perf_summary"]
+    assert "agent_update_time_s" in result["perf_summary"]
     assert "cache_build_time_s" in result["perf_summary"]
     assert "cache_hit" in result["perf_summary"]

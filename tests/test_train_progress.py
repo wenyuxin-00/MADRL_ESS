@@ -1,8 +1,7 @@
 import json
 
 import scripts.train as train_module
-from scripts.builder_fastlab import build_train_runner_fastlab
-from scripts.utils.madrl_observation_cache_lab import build_or_load_observation_cache
+from scripts.builder import build_train_runner
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -33,24 +32,18 @@ def test_train_runner_batches_progress_updates(monkeypatch, tmp_path):
     cfg.train.max_train_steps = 5
     cfg.train.num_envs = 1
     cfg.train.progress_postfix_interval = 2
+    cfg.train.progress_write_interval_seconds = 60.0
     cfg.train.show_progress = True
     cfg.train.use_noise_decay = False
+    cfg.runtime.observation_cache_root = str(case_dir / "cache")
+    cfg.runtime.refresh_observation_cache = True
     progress_path = case_dir / "progress.json"
     cfg.runtime.progress_state_path = str(progress_path)
-    cache_result = build_or_load_observation_cache(
-        cfg,
-        split="train",
-        refresh=True,
-        root=case_dir / "cache",
-    )
-    cfg.runtime.fastlab_observation_cache_dir = str(cache_result.cache_dir)
-    cfg.runtime.fastlab_train_info_mode = "minimal"
-    cfg.runtime.fastlab_fast_grid_core = True
 
     DummyTqdm.instances.clear()
     monkeypatch.setattr(train_module, "tqdm", DummyTqdm)
 
-    runner = build_train_runner_fastlab(cfg, seed=0, env_name="ProgressTest", number=1)
+    runner = build_train_runner(cfg, seed=0, env_name="ProgressTest", number=1)
     try:
         runner.run()
     finally:
@@ -58,7 +51,7 @@ def test_train_runner_batches_progress_updates(monkeypatch, tmp_path):
 
     progress = DummyTqdm.instances[-1]
     assert progress.update_calls == [2, 2, 1]
-    assert progress.postfix_calls == 3
+    assert progress.postfix_calls == 4
     assert "eta" in progress.last_postfix
 
     payload = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -70,3 +63,8 @@ def test_train_runner_batches_progress_updates(monkeypatch, tmp_path):
     assert payload["elapsed_seconds"] >= 0.0
     assert payload["remaining_seconds"] == 0.0
     assert payload["estimated_end_time"] == payload["updated_at"]
+    assert len(runner.history) == 0
+    assert "sample_time_s" in runner.perf_summary
+    assert "history_time_s" in runner.perf_summary
+    assert "progress_io_time_s" in runner.perf_summary
+    assert "agent_update_time_s" in runner.perf_summary

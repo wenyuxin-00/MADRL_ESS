@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from controllers.mpc import solve_single_agent_gurobi_mpc_action
+from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
 from predictors.training import ensure_lstm_artifacts
 
@@ -72,18 +73,31 @@ def resolve_battery_controls(cfg, battery_controls: Mapping[str, object] | None 
         "from_pv_duration_hours": float(
             controls.get("from_pv_duration_hours", getattr(cfg.env, "from_pv_duration_hours", 2.5))
         ),
-        "battery_capacity": float(controls.get("battery_capacity", cfg.env.battery_capacity)),
-        "max_charge_rate": float(controls.get("max_charge_rate", cfg.env.max_charge_rate)),
         "efficiency": float(controls.get("efficiency", cfg.env.efficiency)),
         "init_soc": float(controls.get("init_soc", cfg.env.init_soc)),
         "soc_min": float(controls.get("soc_min", cfg.env.soc_min)),
         "soc_max": float(controls.get("soc_max", cfg.env.soc_max)),
         "soc_target": float(controls.get("soc_target", cfg.env.soc_target)),
     }
-    if resolved["battery_capacity"] <= 0.0:
-        raise ValueError(f"battery_capacity must be positive, got {resolved['battery_capacity']}.")
-    if resolved["max_charge_rate"] <= 0.0:
-        raise ValueError(f"max_charge_rate must be positive, got {resolved['max_charge_rate']}.")
+
+    battery_capacity_value = controls.get("battery_capacity", cfg.env.battery_capacity)
+    max_charge_rate_value = controls.get("max_charge_rate", cfg.env.max_charge_rate)
+    if resolved["mode"] == "fixed":
+        capacity_kwh, c_rate, p_max_kw = resolve_fixed_battery_spec(
+            battery_capacity_value,
+            max_charge_rate_value,
+            n_agents=int(cfg.env.num_agents),
+        )
+        resolved["battery_capacity"] = list(capacity_kwh)
+        resolved["max_charge_rate"] = float(c_rate)
+        resolved["p_max_kw"] = list(p_max_kw)
+    else:
+        resolved["battery_capacity"] = float(battery_capacity_value)
+        resolved["max_charge_rate"] = float(max_charge_rate_value)
+        if resolved["battery_capacity"] <= 0.0:
+            raise ValueError(f"battery_capacity must be positive, got {resolved['battery_capacity']}.")
+        if resolved["max_charge_rate"] <= 0.0:
+            raise ValueError(f"max_charge_rate must be positive, got {resolved['max_charge_rate']}.")
     if resolved["efficiency"] <= 0.0 or resolved["efficiency"] > 1.0:
         raise ValueError(f"efficiency must be in (0, 1], got {resolved['efficiency']}.")
     if resolved["from_pv_power_ratio"] <= 0.0:
@@ -132,6 +146,7 @@ def apply_notebook_experiment_settings(
     test_start_date: str | int | None,
     test_end_date: str | int | None,
     agent_profiles: list[str],
+    agent_bus_ids: list[int] | None = None,
     load_scale: float | list[float],
     pv_scale: float | list[float],
     future_horizon: int,
@@ -147,12 +162,13 @@ def apply_notebook_experiment_settings(
     cfg.env.num_agents = int(len(agent_profiles))
     cfg.env.future_horizon = int(future_horizon)
 
-    if len(cfg.grid.agent_bus_ids) < cfg.env.num_agents:
+    resolved_agent_bus_ids = list(cfg.grid.agent_bus_ids if agent_bus_ids is None else agent_bus_ids)
+    if len(resolved_agent_bus_ids) < cfg.env.num_agents:
         raise ValueError(
-            f"grid.agent_bus_ids only provides {len(cfg.grid.agent_bus_ids)} buses, "
+            f"grid.agent_bus_ids only provides {len(resolved_agent_bus_ids)} buses, "
             f"but {cfg.env.num_agents} agents were requested."
         )
-    cfg.grid.agent_bus_ids = list(cfg.grid.agent_bus_ids[: cfg.env.num_agents])
+    cfg.grid.agent_bus_ids = [int(bus_id) for bus_id in resolved_agent_bus_ids[: cfg.env.num_agents]]
 
     if train_year is not None:
         cfg.data.train_year = int(train_year)
@@ -167,7 +183,10 @@ def apply_notebook_experiment_settings(
     cfg.env.battery_mode = resolved_battery_controls["mode"]
     cfg.env.from_pv_power_ratio = resolved_battery_controls["from_pv_power_ratio"]
     cfg.env.from_pv_duration_hours = resolved_battery_controls["from_pv_duration_hours"]
-    cfg.env.battery_capacity = resolved_battery_controls["battery_capacity"]
+    if resolved_battery_controls["mode"] == "fixed":
+        cfg.env.battery_capacity = list(resolved_battery_controls["battery_capacity"])
+    else:
+        cfg.env.battery_capacity = float(resolved_battery_controls["battery_capacity"])
     cfg.env.max_charge_rate = resolved_battery_controls["max_charge_rate"]
     cfg.env.efficiency = resolved_battery_controls["efficiency"]
     cfg.env.init_soc = resolved_battery_controls["init_soc"]
@@ -197,6 +216,7 @@ def apply_notebook_experiment_settings(
         "battery": dict(resolved_battery_controls),
         "train_year": int(cfg.data.train_year),
         "test_year": int(cfg.data.test_year),
+        "agent_bus_ids": list(cfg.grid.agent_bus_ids),
     }
 
 
@@ -320,6 +340,7 @@ def collect_controller_rollout(
 
     from scripts.builder import build_env
 
+    cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
     env = build_env(cfg, mode="test")
     step_rows: list[dict[str, object]] = []
     agent_rows: list[dict[str, object]] = []

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from data.loaders.constants import PROSUMER_PROFILE_ALLOWLIST, TZ_LOCAL
 from data.loaders.prosumer_export import export_prosumer_dataset
@@ -59,6 +60,8 @@ def _write_price_csv(path: Path, local_index: pd.DatetimeIndex) -> None:
 
 
 def test_export_prosumer_dataset_cleans_and_exports_expected_outputs(tmp_path):
+    pytest.importorskip("tables")
+
     raw_dir = Path(tmp_path) / "raw"
     output_dir = Path(tmp_path) / "processed" / "prosumer"
     raw_dir.mkdir(parents=True, exist_ok=True)

@@ -16,23 +16,14 @@ except ModuleNotFoundError as exc:
         "instead of falling back to legacy Gym."
     ) from exc
 
+from scripts.utils.madrl_observation_cache_lab import ObservationCacheStore
+from envs.grid.deployments import resolve_fixed_battery_spec
+
 
 class GridEnv(gym.Env):
     """Multi-agent storage environment with power-flow constraints."""
 
     metadata = {"render_modes": []}
-    _COMPACT_INFO_KEYS = (
-        "vm_pu",
-        "line_loading_pct",
-        "trafo_loading_pct",
-        "load",
-        "pv",
-        "p_lower",
-        "p_upper",
-        "bus_v_excess",
-        "line_excess",
-        "trafo_excess",
-    )
 
     def __init__(
         self,
@@ -44,6 +35,7 @@ class GridEnv(gym.Env):
         obs_builder: Any | None = None,
         grid_core: Any | None = None,
         data_path: str | None = None,
+        observation_cache_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -53,8 +45,6 @@ class GridEnv(gym.Env):
         self.n = int(env_cfg.num_agents)
         self.episode_length = int(env_cfg.episode_limit)
         self.future_horizon = int(env_cfg.future_horizon)
-        self.c_bat = float(env_cfg.battery_capacity)
-        self.p_max = float(env_cfg.max_charge_rate)
         self.eff = float(env_cfg.efficiency)
         self.gamma = float(cfg.algo.gamma)
         self.init_soc = float(env_cfg.init_soc)
@@ -62,6 +52,21 @@ class GridEnv(gym.Env):
         self.battery_mode = str(getattr(env_cfg, "battery_mode", "from_pv")).strip().lower()
         self.from_pv_power_ratio = float(getattr(env_cfg, "from_pv_power_ratio", 0.5))
         self.from_pv_duration_hours = float(getattr(env_cfg, "from_pv_duration_hours", 2.5))
+        self._fixed_capacity_kwh: np.ndarray | None = None
+        self._fixed_p_max_kw: np.ndarray | None = None
+        if self.battery_mode == "fixed":
+            fixed_capacity_kwh, _, fixed_p_max_kw = resolve_fixed_battery_spec(
+                env_cfg.battery_capacity,
+                env_cfg.max_charge_rate,
+                n_agents=self.n,
+            )
+            self._fixed_capacity_kwh = np.asarray(fixed_capacity_kwh, dtype=np.float32)
+            self._fixed_p_max_kw = np.asarray(fixed_p_max_kw, dtype=np.float32)
+            self.c_bat = float(np.max(self._fixed_capacity_kwh))
+            self.p_max = float(np.max(self._fixed_p_max_kw))
+        else:
+            self.c_bat = float(env_cfg.battery_capacity)
+            self.p_max = float(env_cfg.max_charge_rate)
         if self.battery_mode not in {"fixed", "from_pv"}:
             raise ValueError(
                 f"battery_mode must be one of ['fixed', 'from_pv'], got '{self.battery_mode}'."
@@ -89,7 +94,6 @@ class GridEnv(gym.Env):
         self.init_soc = float(np.clip(self.init_soc, self.soc_min, self.soc_max))
 
         self._grid_cfg = cfg.grid
-        self._train_compact_info = bool(getattr(self._grid_cfg, "train_compact_info", True))
 
         from envs.rewards import NormalReward
 
@@ -141,12 +145,29 @@ class GridEnv(gym.Env):
         self.signals: dict[str, np.ndarray] = {}
         self.episode_meta: dict[str, Any] = {}
         self._last_episode_idx: int | None = None
+        self._observation_cache_dir = (
+            None if observation_cache_dir is None else Path(observation_cache_dir).resolve()
+        )
+        self._observation_cache = (
+            None
+            if self._observation_cache_dir is None
+            else ObservationCacheStore(self._observation_cache_dir)
+        )
+        self._episode_cache: dict[str, np.ndarray] = {}
         self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
 
-        self.agent_c_bat = np.full((self.n,), self.c_bat, dtype=np.float32)
-        self.agent_p_max = np.full((self.n,), self.p_max, dtype=np.float32)
+        self.agent_c_bat = (
+            self._fixed_capacity_kwh.copy()
+            if self._fixed_capacity_kwh is not None
+            else np.full((self.n,), self.c_bat, dtype=np.float32)
+        )
+        self.agent_p_max = (
+            self._fixed_p_max_kw.copy()
+            if self._fixed_p_max_kw is not None
+            else np.full((self.n,), self.p_max, dtype=np.float32)
+        )
         self.agent_e_min = (self.soc_min * self.agent_c_bat).astype(np.float32)
         self.agent_e_max = (self.soc_max * self.agent_c_bat).astype(np.float32)
         self.e_min = self.agent_e_min.copy()
@@ -193,8 +214,10 @@ class GridEnv(gym.Env):
 
     def _apply_episode_storage_config(self) -> None:
         if self.battery_mode == "fixed":
-            self.agent_c_bat = np.full((self.n,), self.c_bat, dtype=np.float32)
-            self.agent_p_max = np.full((self.n,), self.p_max, dtype=np.float32)
+            if self._fixed_capacity_kwh is None or self._fixed_p_max_kw is None:
+                raise RuntimeError("Fixed battery mode requires precomputed capacity and power vectors.")
+            self.agent_c_bat = self._fixed_capacity_kwh.copy()
+            self.agent_p_max = self._fixed_p_max_kw.copy()
         else:
             pv_peak_kw = self._require_meta_vector("pv_peak_kw")
             self.agent_p_max = (pv_peak_kw * np.float32(self.from_pv_power_ratio)).astype(np.float32)
@@ -259,7 +282,25 @@ class GridEnv(gym.Env):
         signal = self.get_signal(signal_name)
         return signal[: self.cur_step + 1].copy()
 
+    def has_cached_observations(self) -> bool:
+        return self._observation_cache is not None
+
+    def get_cached_local_feature(self, feature_name: str) -> np.ndarray:
+        if feature_name != "calendar_time":
+            raise KeyError(f"Unknown cached local feature '{feature_name}'.")
+        if "calendar_time" not in self._episode_cache:
+            raise KeyError("Observation cache does not contain 'calendar_time'.")
+        return np.asarray(self._episode_cache["calendar_time"][self.cur_step], dtype=np.float32)
+
+    def get_cached_sequence_feature(self, feature_name: str) -> np.ndarray:
+        cache_key = f"{feature_name}_seq"
+        if cache_key not in self._episode_cache:
+            raise KeyError(f"Observation cache does not contain '{cache_key}'.")
+        return np.asarray(self._episode_cache[cache_key][self.cur_step], dtype=np.float32)
+
     def _future_mean_price(self, t: int) -> float:
+        if "mu_t" in self._episode_cache:
+            return float(np.asarray(self._episode_cache["mu_t"], dtype=np.float32)[int(t)])
         start = t + 1
         end = min(t + 1 + self.future_horizon, self.episode_length)
         if start >= self.episode_length:
@@ -268,6 +309,11 @@ class GridEnv(gym.Env):
         if seg.size == 0:
             return float(self.ep_price[min(t, self.episode_length - 1)])
         return float(np.mean(seg))
+
+    def _future_mean_price_next(self, t: int) -> float:
+        if "mu_next" in self._episode_cache:
+            return float(np.asarray(self._episode_cache["mu_next"], dtype=np.float32)[int(t)])
+        return self._future_mean_price(min(t + 1, self.episode_length - 1))
 
     def _build_reset_info(self, episode_idx: int) -> dict[str, Any]:
         return {
@@ -303,6 +349,9 @@ class GridEnv(gym.Env):
             )
 
         self._load_episode(int(episode_idx))
+        self._episode_cache = (
+            {} if self._observation_cache is None else self._observation_cache.episode(int(episode_idx))
+        )
         self._last_episode_idx = int(episode_idx)
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
@@ -365,7 +414,7 @@ class GridEnv(gym.Env):
             "base_net_load": base_net_load,
             "net_load": grid_power,
             "mu_t": self._future_mean_price(t),
-            "mu_next": self._future_mean_price(min(t + 1, self.episode_length - 1)),
+            "mu_next": self._future_mean_price_next(t),
         }
 
     def _run_power_flow(
@@ -452,6 +501,12 @@ class GridEnv(gym.Env):
         reward: np.ndarray,
         done: bool,
     ) -> dict[str, Any]:
+        if self.mode == "train":
+            info: dict[str, Any] = {"episode_done": bool(done)}
+            for key, value in components.items():
+                info[str(key)] = np.asarray(value, dtype=np.float32)
+            return info
+
         n_v_viol, n_line_viol, n_trafo_viol = self._build_violation_counts(step_state)
         info: dict[str, Any] = {
             "episode_done": done,
@@ -503,9 +558,6 @@ class GridEnv(gym.Env):
             "line_excess": step_state["line_excess"],
             "trafo_excess": step_state["trafo_excess"],
         }
-        if self.mode == "train" and self._train_compact_info:
-            for key in self._COMPACT_INFO_KEYS:
-                info.pop(key, None)
         return info
 
     def step(

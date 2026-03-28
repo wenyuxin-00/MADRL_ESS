@@ -5,8 +5,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 
-from scripts.builder_fastlab import build_train_runner_fastlab
-from scripts.utils.madrl_observation_cache_lab import build_or_load_observation_cache
+from scripts.builder import build_train_runner
 from scripts.utils.torch_runtime import STRICT_REPRO_RUNTIME_MODE
 from tests.support.helpers import make_smoke_config
 
@@ -31,27 +30,22 @@ def _make_train_equivalence_cfg(tmp_path):
 
 
 def _run_cached_mainline_runner(cfg, *, seed: int, tmp_path, refresh_cache: bool):
-    cache_result = build_or_load_observation_cache(
-        cfg,
-        split="train",
-        forecast_ready=None,
-        refresh=refresh_cache,
-        root=tmp_path / "cache",
-    )
-    cfg.runtime.fastlab_observation_cache_dir = str(cache_result.cache_dir)
-    cfg.runtime.fastlab_train_info_mode = "minimal"
-    cfg.runtime.fastlab_fast_grid_core = True
+    cfg.runtime.observation_cache_root = str(tmp_path / "cache")
+    cfg.runtime.refresh_observation_cache = bool(refresh_cache)
 
-    runner = build_train_runner_fastlab(cfg, seed=seed, env_name="GridTrainMainlineCachedExact", number=1)
+    runner = build_train_runner(cfg, seed=seed, env_name="GridTrainMainlineCachedExact", number=1)
     try:
         episodes = runner.run()
+        train_cache_meta = dict(getattr(runner, "cache_metadata", {}).get("train", {}))
         return {
             "episodes": episodes,
             "total_steps": runner.total_steps,
             "episode_rewards": list(runner.episode_rewards),
             "reward_summary": runner.build_reward_summary(),
-            "cache_hit": cache_result.cache_hit,
-            "cache_dir": str(cache_result.cache_dir),
+            "cache_hit": bool(train_cache_meta.get("cache_hit", False)),
+            "cache_dir": str(train_cache_meta.get("cache_dir", "")),
+            "history_length": len(runner.history),
+            "perf_summary": dict(runner.perf_summary),
         }
     finally:
         runner.close()
@@ -79,6 +73,8 @@ def test_cached_mainline_train_runner_is_deterministic_with_reused_cache(tmp_pat
     assert first_result["cache_dir"] == second_result["cache_dir"]
     assert first_result["episodes"] == second_result["episodes"]
     assert first_result["total_steps"] == second_result["total_steps"]
+    assert first_result["history_length"] == 0
+    assert second_result["history_length"] == 0
     assert np.allclose(first_result["episode_rewards"], second_result["episode_rewards"], atol=1e-6)
 
     first_summary = first_result["reward_summary"]

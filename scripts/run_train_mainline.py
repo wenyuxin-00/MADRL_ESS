@@ -21,14 +21,13 @@ warnings.filterwarnings(
 import torch
 
 from configs import compose_experiment_config, print_experiment_summary
-from scripts.builder_fastlab import build_train_runner_fastlab
+from scripts.builder import build_train_runner
 from scripts.checkpoints import (
     build_training_run_paths,
     resolve_checkpoint_to_load,
     slugify_checkpoint_token,
 )
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings, ensure_forecast_ready
-from scripts.utils.madrl_observation_cache_lab import build_or_load_observation_cache
 from scripts.utils.project_paths import get_checkpoint_root, get_tensorboard_run_dir, project_root
 from scripts.utils.torch_runtime import configure_torch_runtime, describe_device
 
@@ -75,6 +74,7 @@ def _apply_train_controls(cfg, train_controls: dict[str, Any]) -> None:
         "use_noise_decay",
         "show_progress",
         "progress_postfix_interval",
+        "progress_write_interval_seconds",
     )
     for field_name in field_names:
         if field_name in train_controls:
@@ -113,10 +113,7 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
 
 
 def _public_vec_env_name(env: Any) -> str:
-    name = type(env).__name__
-    if name == 'SubprocVecEnvFastLab':
-        return 'SubprocVecEnv'
-    return name
+    return type(env).__name__
 
 
 def _resolve_save_dir(
@@ -282,14 +279,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     _apply_model_controls(cfg, experiment_controls.get("model_controls"))
     _apply_runtime_controls(cfg, experiment_controls.get("runtime_controls"))
+    agent_profiles = list(data_controls.get("agent_profiles", cfg.data.agent_profiles))
+    n_requested_agents = len(agent_profiles)
     applied_controls = apply_notebook_experiment_settings(
         cfg,
         prediction_mode=str(data_controls.get("prediction_mode", "perfect")),
         test_start_date=data_controls.get("test_start_date"),
         test_end_date=data_controls.get("test_end_date"),
-        agent_profiles=list(data_controls.get("agent_profiles", cfg.data.agent_profiles)),
-        load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * cfg.env.num_agents),
-        pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * cfg.env.num_agents),
+        agent_profiles=agent_profiles,
+        agent_bus_ids=data_controls.get("agent_bus_ids"),
+        load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * n_requested_agents),
+        pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * n_requested_agents),
         battery_controls=battery_controls,
         future_horizon=int(data_controls.get("future_horizon", cfg.env.future_horizon)),
         train_year=data_controls.get("train_year"),
@@ -298,6 +298,9 @@ def main(argv: list[str] | None = None) -> int:
     _apply_train_controls(cfg, train_controls)
     cfg.train.noise_decay_steps = cfg.train.train_episodes * cfg.env.episode_limit
     cfg.runtime.progress_state_path = str(progress_json)
+    cfg.runtime.observation_cache_root = experiment_controls.get("observation_cache_root")
+    cfg.runtime.observation_cache_batch_size = int(experiment_controls.get("observation_cache_batch_size", 8192))
+    cfg.runtime.refresh_observation_cache = bool(experiment_controls.get("refresh_observation_cache", False))
 
     runtime_state = configure_torch_runtime(
         cfg,
@@ -306,29 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         require_cuda=experiment_controls.get("require_cuda"),
     )
     forecast_ready = ensure_forecast_ready(cfg)
-    observation_cache_mode = str(experiment_controls.get("observation_cache_mode", "precomputed_exact"))
-    refresh_observation_cache = bool(experiment_controls.get("refresh_observation_cache", False))
-    train_info_mode = str(experiment_controls.get("train_info_mode", "minimal"))
-    fast_grid_core = bool(experiment_controls.get("fast_grid_core", True))
-    observation_cache_root = experiment_controls.get("observation_cache_root")
-    observation_cache_batch_size = int(experiment_controls.get("observation_cache_batch_size", 8192))
-    if observation_cache_mode != "precomputed_exact":
-        raise ValueError(
-            f"Unsupported observation_cache_mode '{observation_cache_mode}', expected 'precomputed_exact'."
-        )
-
-    cache_result = build_or_load_observation_cache(
-        cfg,
-        split="train",
-        forecast_ready=forecast_ready,
-        refresh=refresh_observation_cache,
-        root=observation_cache_root,
-        batch_size=observation_cache_batch_size,
-    )
-    cfg.runtime.fastlab_observation_cache_dir = str(cache_result.cache_dir)
-    cfg.runtime.fastlab_train_info_mode = train_info_mode
-    cfg.runtime.fastlab_fast_grid_core = fast_grid_core
-    cfg.runtime.fastlab_observation_cache_batch_size = observation_cache_batch_size
+    cfg.runtime.forecast_ready = forecast_ready
 
     summary = print_experiment_summary(cfg)
     summary["applied_controls"] = applied_controls
@@ -340,13 +321,13 @@ def main(argv: list[str] | None = None) -> int:
     summary["log_path"] = str(log_path)
     summary["run_label"] = str(save_dir.name)
     summary["training_backend"] = "mainline"
-    summary["observation_cache_mode"] = observation_cache_mode
-    summary["train_info_mode"] = train_info_mode
-    summary["fast_grid_core"] = fast_grid_core
-    summary["observation_cache_dir"] = str(cache_result.cache_dir)
-    summary["observation_cache_batch_size"] = int(observation_cache_batch_size)
+    summary["observation_cache_root"] = cfg.runtime.observation_cache_root
+    summary["observation_cache_batch_size"] = int(cfg.runtime.observation_cache_batch_size)
+    summary["refresh_observation_cache"] = bool(cfg.runtime.refresh_observation_cache)
 
-    runner = build_train_runner_fastlab(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
+    runner = build_train_runner(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
+    train_cache_meta = dict(getattr(runner, "cache_metadata", {}).get("train", {}))
+    summary["observation_cache_dir"] = train_cache_meta.get("cache_dir")
     episodes_completed = 0
     try:
         episodes_completed = runner.run()
@@ -377,11 +358,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         result_payload["perf_summary"].update(
             {
-                "cache_build_time_s": float(cache_result.cache_build_time_s),
-                "cache_hit": bool(cache_result.cache_hit),
-                "train_info_mode": train_info_mode,
-                "observation_cache_mode": observation_cache_mode,
-                "observation_cache_batch_size": int(observation_cache_batch_size),
+                "cache_build_time_s": float(train_cache_meta.get("cache_build_time_s", 0.0)),
+                "cache_hit": bool(train_cache_meta.get("cache_hit", False)),
+                "observation_cache_batch_size": int(
+                    getattr(cfg.runtime, "observation_cache_batch_size", 8192)
+                ),
             }
         )
         _write_json(result_json, result_payload)

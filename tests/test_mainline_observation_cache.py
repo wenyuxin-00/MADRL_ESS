@@ -5,15 +5,13 @@ from copy import deepcopy
 import numpy as np
 
 from data.loaders.registry import build_dataset
-from envs.fastlab.grid_env_fastlab import GridEnvFastLab
-from envs.fastlab.observation_builder_fastlab import CachedObservationBuilderFastLab
 from envs.grid.core.grid_types import GridStepResult
 from envs.grid_env import GridEnv
+from envs.observation.cached_builder import CachedObservationBuilder
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.normalization import build_observation_normalizer
 from envs.rewards import NormalReward
 from predictors.registry import build_forecaster
-from scripts.recorders.episode_recorder import append_step_record, init_episode_record
 from scripts.utils.madrl_observation_cache_lab import ObservationCacheStore, build_or_load_observation_cache
 from tests.support.helpers import make_smoke_config
 
@@ -64,8 +62,12 @@ def _assert_nested_close(lhs, rhs) -> None:
         if isinstance(left_value, dict):
             _assert_nested_close(left_value, right_value)
             continue
-        left_array = np.asarray(left_value, dtype=np.float32)
-        right_array = np.asarray(right_value, dtype=np.float32)
+        try:
+            left_array = np.asarray(left_value, dtype=np.float32)
+            right_array = np.asarray(right_value, dtype=np.float32)
+        except (TypeError, ValueError):
+            assert left_value == right_value
+            continue
         assert left_array.shape == right_array.shape
         assert np.allclose(left_array, right_array)
 
@@ -185,15 +187,15 @@ def test_lstm_forecaster_predict_episode_matrix_matches_stepwise_predict(tmp_pat
         assert np.allclose(actual, expected)
 
 
-def test_mainline_cached_env_matches_base_env_and_minimal_info_history(tmp_path) -> None:
+def test_mainline_cached_env_matches_base_env_on_test_split(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
-    cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
+    cache_result = build_or_load_observation_cache(cfg, split="test", refresh=True)
 
     normalizer = build_observation_normalizer(cfg)
     base_env = GridEnv(
         cfg,
-        mode="train",
-        dataset=build_dataset(cfg, mode="train"),
+        mode="test",
+        dataset=build_dataset(cfg, mode="test"),
         reward_fn=NormalReward(cfg),
         forecaster=build_forecaster(cfg),
         obs_builder=DefaultObservationBuilder(
@@ -205,12 +207,12 @@ def test_mainline_cached_env_matches_base_env_and_minimal_info_history(tmp_path)
         ),
         grid_core=_FakeGridCore(cfg.env.num_agents),
     )
-    fast_env = GridEnvFastLab(
+    cached_env = GridEnv(
         deepcopy(cfg),
-        mode="train",
-        dataset=build_dataset(cfg, mode="train"),
+        mode="test",
+        dataset=build_dataset(cfg, mode="test"),
         reward_fn=NormalReward(cfg),
-        obs_builder=CachedObservationBuilderFastLab(
+        obs_builder=CachedObservationBuilder(
             local_features=cfg.obs.local_features,
             sequence_features=cfg.obs.sequence_features,
             future_horizon=cfg.env.future_horizon,
@@ -219,41 +221,57 @@ def test_mainline_cached_env_matches_base_env_and_minimal_info_history(tmp_path)
         ),
         grid_core=_FakeGridCore(cfg.env.num_agents),
         observation_cache_dir=cache_result.cache_dir,
-        train_info_mode="minimal",
     )
-
-    reward_metas = list(base_env.reward_fn.component_meta)
-    base_history = init_episode_record(cfg.env.num_agents, cfg.env.init_soc, reward_metas)
-    fast_history = init_episode_record(cfg.env.num_agents, cfg.env.init_soc, reward_metas)
 
     try:
         base_obs, _ = base_env.reset(episode_idx=0)
-        fast_obs, _ = fast_env.reset(episode_idx=0)
-        _assert_nested_close(base_obs, fast_obs)
+        cached_obs, _ = cached_env.reset(episode_idx=0)
+        _assert_nested_close(base_obs, cached_obs)
 
         actions = [np.asarray([0.1], dtype=np.float32) for _ in range(cfg.env.num_agents)]
         for _ in range(2):
             next_base_obs, base_reward, base_term, base_trunc, base_info = base_env.step(actions)
-            next_fast_obs, fast_reward, fast_term, fast_trunc, fast_info = fast_env.step(actions)
-            _assert_nested_close(next_base_obs, next_fast_obs)
-            assert np.allclose(np.asarray(base_reward, dtype=np.float32), np.asarray(fast_reward, dtype=np.float32))
-            assert base_term == fast_term
-            assert base_trunc == fast_trunc
-
-            append_step_record(
-                base_history,
-                base_info,
-                step_total=float(np.sum(np.asarray(base_reward, dtype=np.float32))),
-                reward_metas=reward_metas,
+            next_cached_obs, cached_reward, cached_term, cached_trunc, cached_info = cached_env.step(actions)
+            _assert_nested_close(next_base_obs, next_cached_obs)
+            assert np.allclose(
+                np.asarray(base_reward, dtype=np.float32),
+                np.asarray(cached_reward, dtype=np.float32),
             )
-            append_step_record(
-                fast_history,
-                fast_info,
-                step_total=float(np.sum(np.asarray(fast_reward, dtype=np.float32))),
-                reward_metas=reward_metas,
-            )
-
-        _assert_nested_close(base_history, fast_history)
+            assert base_term == cached_term
+            assert base_trunc == cached_trunc
+            _assert_nested_close(base_info, cached_info)
     finally:
         base_env.close()
-        fast_env.close()
+        cached_env.close()
+
+
+def test_mainline_train_env_returns_only_episode_done_and_components(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path, algorithm="MATD3")
+    cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
+
+    normalizer = build_observation_normalizer(cfg)
+    train_env = GridEnv(
+        deepcopy(cfg),
+        mode="train",
+        dataset=build_dataset(cfg, mode="train"),
+        reward_fn=NormalReward(cfg),
+        obs_builder=CachedObservationBuilder(
+            local_features=cfg.obs.local_features,
+            sequence_features=cfg.obs.sequence_features,
+            future_horizon=cfg.env.future_horizon,
+            adjacency_type=cfg.obs.adjacency_type,
+            normalizer=normalizer,
+        ),
+        grid_core=_FakeGridCore(cfg.env.num_agents),
+        observation_cache_dir=cache_result.cache_dir,
+    )
+
+    reward_metas = list(train_env.reward_fn.component_meta)
+
+    try:
+        train_env.reset(episode_idx=0)
+        _, _, _, _, info = train_env.step([np.asarray([0.1], dtype=np.float32) for _ in range(cfg.env.num_agents)])
+    finally:
+        train_env.close()
+
+    assert set(info) == {"episode_done", *[str(meta.key) for meta in reward_metas]}

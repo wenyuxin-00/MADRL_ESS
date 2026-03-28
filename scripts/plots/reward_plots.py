@@ -20,47 +20,6 @@ def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
     return pd.Series(data).rolling(window=window, min_periods=1).mean().to_numpy()
 
 
-def _build_reward_summary_from_history(history, episode_rewards, reward_fn) -> dict[str, Any] | None:
-    if history is None or len(history) == 0:
-        print("No history to plot.")
-        return None
-    if episode_rewards is None or reward_fn is None:
-        raise ValueError("episode_rewards and reward_fn are required when reward_summary is not provided.")
-
-    metas = list(reward_fn.component_meta)
-    components: dict[str, dict[str, Any]] = {}
-    for meta in metas:
-        components[str(meta.key)] = {
-            "label": str(getattr(meta, "label", meta.key)),
-            "color": str(getattr(meta, "color", "#111827")),
-            "sign": int(getattr(meta, "sign", 0)),
-            "values": [
-                float(np.sum(np.asarray(ep[f"{meta.key}_sum"], dtype=np.float32)))
-                for ep in history
-            ],
-        }
-
-    aggregates: dict[str, list[float]] = {}
-    grid_safety_keys = [
-        str(meta.key)
-        for meta in metas
-        if str(meta.key).startswith("r_safe_") and int(getattr(meta, "sign", 0)) == -1
-    ]
-    if grid_safety_keys and all(key in components for key in grid_safety_keys):
-        num_episodes = len(episode_rewards)
-        aggregates["grid_safety_penalty"] = [
-            float(sum(components[key]["values"][episode_idx] for key in grid_safety_keys))
-            for episode_idx in range(num_episodes)
-        ]
-
-    return {
-        "episodes": list(range(1, len(episode_rewards) + 1)),
-        "episode_total_reward": [float(value) for value in episode_rewards],
-        "components": components,
-        "aggregates": aggregates,
-    }
-
-
 def _load_reward_summary(reward_summary) -> dict[str, Any]:
     if isinstance(reward_summary, (str, Path)):
         return json.loads(Path(reward_summary).read_text(encoding="utf-8"))
@@ -70,19 +29,13 @@ def _load_reward_summary(reward_summary) -> dict[str, Any]:
 
 
 def plot_reward_decomposition(
-    history=None,
-    episode_rewards=None,
-    reward_fn=None,
+    *,
     title: str = "Training Reward Decomposition",
     window: int = 20,
-    reward_summary=None,
+    reward_summary,
 ):
     """Plot total reward and reward components over episodes."""
-    resolved_summary = (
-        _load_reward_summary(reward_summary)
-        if reward_summary is not None
-        else _build_reward_summary_from_history(history, episode_rewards, reward_fn)
-    )
+    resolved_summary = _load_reward_summary(reward_summary)
     if not resolved_summary:
         return None
 

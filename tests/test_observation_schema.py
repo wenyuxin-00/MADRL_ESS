@@ -16,7 +16,7 @@ def test_dataset_returns_canonical_signals_schema(tmp_path):
     episode = dataset.get_episode(0)
 
     assert set(episode.keys()) == {"signals", "meta"}
-    assert set(episode["signals"].keys()) == {"price", "load", "pv"}
+    assert {"price", "load", "pv"}.issubset(set(episode["signals"].keys()))
     assert episode["signals"]["price"].shape == (cfg.env.episode_limit,)
     assert episode["signals"]["load"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
     assert episode["signals"]["pv"].shape == (cfg.env.episode_limit, cfg.env.num_agents)

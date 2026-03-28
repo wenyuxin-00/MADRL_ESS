@@ -43,8 +43,16 @@ def test_dataset_registry_builds_prosumer_dataset(tmp_path):
 
     assert isinstance(dataset, ProsumerDataset)
     assert get_dataset_cls("prosumer") is ProsumerDataset
-    assert set(episode["signals"].keys()) == {"price", "load", "pv"}
+    assert set(episode["signals"].keys()) == {
+        "price",
+        "load",
+        "pv",
+        "load_household",
+        "load_heatpump",
+    }
     assert episode["signals"]["load"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
+    assert episode["signals"]["load_household"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
+    assert episode["signals"]["load_heatpump"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
     assert episode["signals"]["pv"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
     assert np.allclose(episode["meta"]["node_ids"], np.array([10, 6, 12], dtype=np.int32))
     assert episode["meta"]["agent_profiles"] == ["SFH12", "SFH14", "SFH16"]

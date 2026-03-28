@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.benchmarks.run_fastlab_ab import main as benchmark_main
+from scripts.benchmarks.run_mainline_ab import main as benchmark_main
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
-def test_run_fastlab_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
+def test_run_mainline_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
     data_dir = tmp_path / "data"
     write_prosumer_processed_dataset(
         data_dir,
@@ -30,6 +30,7 @@ def test_run_fastlab_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
         "test_start_date": 20200101,
         "test_end_date": 20200103,
         "agent_profiles": ["SFH12", "SFH14"],
+        "agent_bus_ids": [6, 10],
         "load_scale": [1.0, 1.0],
         "pv_scale": [1.0, 1.0],
         "future_horizon": 1,
@@ -119,3 +120,5 @@ def test_run_fastlab_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
         assert Path(row["reward_summary_path"]).exists()
         assert Path(row["rollout_summary_path"]).exists()
         assert row["episodes_completed"] == 1
+        rollout_summary = json.loads(Path(row["rollout_summary_path"]).read_text(encoding="utf-8"))
+        assert rollout_summary["meta"]["agent_bus_ids"] == [6, 10]

@@ -306,8 +306,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
         assert len(truncated) == cfg.env.num_agents
-        assert info["load"].shape == (cfg.env.num_agents,)
-        assert info["pv"].shape == (cfg.env.num_agents,)
+        assert set(info) == {"episode_done", *[str(meta.key) for meta in env.reward_fn.component_meta]}
     finally:
         env.close()
 
@@ -331,7 +330,13 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
         assert len(truncated) == cfg.env.num_agents
-        assert sorted(info["available_signals"]) == ["load", "price", "pv"]
+        assert sorted(info["available_signals"]) == [
+            "load",
+            "load_heatpump",
+            "load_household",
+            "price",
+            "pv",
+        ]
     finally:
         fallback_env.close()
 
