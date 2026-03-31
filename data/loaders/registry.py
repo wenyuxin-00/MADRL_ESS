@@ -42,9 +42,15 @@ def _resolve_split_dates(cfg, mode: str) -> tuple[int, str | None, str | None, s
 def build_dataset(cfg, mode: str = "train"):
     data_dir = Path(cfg.data.data_dir or (Path(__file__).resolve().parents[2] / "data"))
     selected_year, start_date, end_date, exclude_start_date, exclude_end_date = _resolve_split_dates(cfg, mode)
+    history_warmup_steps = (
+        int(getattr(cfg.forecast, "history_window", 0))
+        if str(getattr(cfg.forecast, "type", "")).strip().lower() == "lstm"
+        else 0
+    )
     return ProsumerDataset(
         data_dir=data_dir,
         episode_length=cfg.env.episode_limit,
+        history_warmup_steps=history_warmup_steps,
         n_agents=cfg.env.num_agents,
         agent_profiles=list(cfg.data.agent_profiles),
         year=selected_year,

@@ -1,6 +1,9 @@
+import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
+
+matplotlib.use("Agg")
 
 from scripts.utils.grid_notebook_workflow import (
     FORECAST_EVAL_MODE,
@@ -13,10 +16,12 @@ from scripts.utils.grid_notebook_workflow import (
     collect_mpc_rollout,
     collect_controller_rollout,
     normalize_date_input,
+    plot_power_balance_bars,
     plot_rollout_comparison_dashboard,
     resolve_evaluation_mode,
     resolve_forecast_backend,
 )
+from scripts.utils.forecast_shared_preset import get_managed_lstm_forecast_controls
 from scripts.utils.experiment_notebook_utils import summarize_cfg
 from tests.support.helpers import make_case_dir, make_smoke_config
 
@@ -47,11 +52,8 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
         load_scale=[1.2, 0.8],
         pv_scale=0.5,
         battery_controls={
-            "mode": "from_pv",
-            "from_pv_power_ratio": 0.75,
-            "from_pv_duration_hours": 3.0,
             "battery_capacity": 6.0,
-            "max_charge_rate": 2.0,
+            "max_charge_rate": 0.5,
             "efficiency": 0.9,
             "init_soc": 0.4,
             "soc_min": 0.1,
@@ -72,18 +74,16 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     assert cfg.grid.agent_bus_ids == [12, 4]
     assert np.allclose(cfg.data.load_scale, [1.2, 0.8])
     assert np.allclose(cfg.data.pv_scale, [0.5, 0.5])
-    assert cfg.env.battery_mode == "from_pv"
-    assert np.isclose(cfg.env.from_pv_power_ratio, 0.75)
-    assert np.isclose(cfg.env.from_pv_duration_hours, 3.0)
-    assert np.isclose(cfg.env.battery_capacity, 6.0)
-    assert np.isclose(cfg.env.max_charge_rate, 2.0)
+    assert cfg.env.battery_capacity == [6.0, 6.0]
+    assert np.isclose(cfg.env.max_charge_rate, 0.5)
     assert summary["prediction_mode"] == "normal"
     assert summary["evaluation_mode"] == FORECAST_EVAL_MODE
     assert summary["forecast_backend"] == "lstm"
     assert summary["agent_profiles"] == ["SFH12", "SFH14"]
     assert summary["agent_bus_ids"] == [12, 4]
-    assert summary["battery"]["mode"] == "from_pv"
-    assert np.isclose(summary["battery"]["from_pv_power_ratio"], 0.75)
+    assert summary["battery"]["mode"] == "fixed"
+    assert summary["battery"]["battery_capacity"] == [6.0, 6.0]
+    assert summary["battery"]["p_max_kw"] == [3.0, 3.0]
 
 
 def test_apply_notebook_experiment_settings_supports_fixed_battery_vectors(tmp_path):
@@ -100,7 +100,6 @@ def test_apply_notebook_experiment_settings_supports_fixed_battery_vectors(tmp_p
         load_scale=1.0,
         pv_scale=1.0,
         battery_controls={
-            "mode": "fixed",
             "battery_capacity": [10.0, 12.0],
             "max_charge_rate": 0.5,
         },
@@ -109,11 +108,48 @@ def test_apply_notebook_experiment_settings_supports_fixed_battery_vectors(tmp_p
         test_year=2019,
     )
 
-    assert cfg.env.battery_mode == "fixed"
     assert cfg.env.battery_capacity == [10.0, 12.0]
     assert np.isclose(cfg.env.max_charge_rate, 0.5)
     assert summary["battery"]["battery_capacity"] == [10.0, 12.0]
     assert summary["battery"]["p_max_kw"] == [5.0, 6.0]
+
+
+def test_apply_notebook_experiment_settings_applies_forecast_controls(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_forecast_controls")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    forecast_controls = get_managed_lstm_forecast_controls(
+        artifact_root=case_dir / "artifacts" / "forecast" / "lstm",
+        auto_train_missing=False,
+    )
+
+    summary = apply_notebook_experiment_settings(
+        cfg,
+        prediction_mode="normal",
+        test_start_date=20190101,
+        test_end_date=20190130,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[10, 6],
+        load_scale=1.0,
+        pv_scale=1.0,
+        battery_controls={
+            "battery_capacity": [25.0, 25.0],
+            "max_charge_rate": 0.4,
+        },
+        forecast_controls=forecast_controls,
+        future_horizon=int(forecast_controls["future_horizon"]),
+        train_year=2019,
+        test_year=2019,
+    )
+
+    assert cfg.forecast.type == "lstm"
+    assert cfg.forecast.lstm_artifact_root == str((case_dir / "artifacts" / "forecast" / "lstm").resolve())
+    assert cfg.forecast.history_window == int(forecast_controls["history_window"])
+    assert cfg.forecast.auto_train_missing is False
+    assert cfg.forecast.load_component_split is True
+    assert cfg.forecast.load_scaler_type == "robust"
+    assert cfg.forecast.signal_training_overrides == forecast_controls["signal_training_overrides"]
+    assert summary["forecast"]["artifact_root"] == cfg.forecast.lstm_artifact_root
+    assert summary["forecast"]["auto_train_missing"] is False
 
 
 def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
@@ -130,7 +166,6 @@ def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
         load_scale=1.0,
         pv_scale=1.0,
         battery_controls={
-            "mode": "fixed",
             "battery_capacity": [10.0, 12.0],
             "max_charge_rate": 0.5,
         },
@@ -161,7 +196,6 @@ def test_apply_notebook_experiment_settings_broadcasts_scalar_fixed_battery_capa
         load_scale=1.0,
         pv_scale=1.0,
         battery_controls={
-            "mode": "fixed",
             "battery_capacity": 8.0,
             "max_charge_rate": 0.5,
         },
@@ -208,7 +242,6 @@ def test_apply_notebook_experiment_settings_rejects_fixed_battery_vector_length_
             load_scale=1.0,
             pv_scale=1.0,
             battery_controls={
-                "mode": "fixed",
                 "battery_capacity": [10.0, 12.0, 8.0],
                 "max_charge_rate": 0.5,
             },
@@ -231,7 +264,6 @@ def test_apply_notebook_experiment_settings_rejects_fixed_battery_nonpositive_c_
             load_scale=1.0,
             pv_scale=1.0,
             battery_controls={
-                "mode": "fixed",
                 "battery_capacity": [10.0, 12.0],
                 "max_charge_rate": 0.0,
             },
@@ -254,7 +286,6 @@ def test_apply_notebook_experiment_settings_rejects_fixed_battery_vector_c_rate(
             load_scale=1.0,
             pv_scale=1.0,
             battery_controls={
-                "mode": "fixed",
                 "battery_capacity": [10.0, 12.0],
                 "max_charge_rate": [0.5, 0.5],
             },
@@ -275,14 +306,81 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
     rollout = collect_controller_rollout(
         cfg,
         label="ZeroPolicy",
-        action_fn=lambda env, obs: [np.zeros(1, dtype=np.float32) for _ in range(env.n)],
+        action_fn=lambda env, obs: [np.array([0.0, 1.0], dtype=np.float32) for _ in range(env.n)],
     )
 
     assert not rollout.grid_df.empty
     assert {"bus_id", "vm_pu", "is_agent_bus"}.issubset(rollout.grid_df.columns)
+    assert {
+        "base_net_load_total",
+        "base_net_load_effective_total",
+        "net_load_total",
+        "pv_raw_total",
+        "pv_effective_total",
+        "pv_curtail_total",
+        "grid_import_total",
+        "grid_export_total",
+    }.issubset(rollout.step_df.columns)
+    assert {
+        "base_net_load",
+        "base_net_load_effective",
+        "net_load",
+        "pv_raw",
+        "pv_effective",
+        "pv_curtail",
+        "pv_utilization",
+        "grid_import_kw",
+        "grid_export_kw",
+        "battery_action_req",
+        "battery_action_exec",
+        "pv_action_req",
+        "pv_action_exec",
+        "controller_action_gap",
+    }.issubset(rollout.agent_df.columns)
     assert rollout.meta["agent_bus_ids"] == cfg.grid.agent_bus_ids
     assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
     assert rollout.meta["v_max_pu"] == cfg.grid.v_max_pu
+
+    aggregated = (
+        rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["base_net_load", "net_load"]]
+        .sum()
+        .rename(
+            columns={
+                "base_net_load": "base_net_load_total_from_agents",
+                "net_load": "net_load_total_from_agents",
+            }
+        )
+    )
+    step_totals = rollout.step_df.loc[
+        :, ["episode_idx", "step", "base_net_load_total", "net_load_total"]
+    ].copy()
+    merged = step_totals.merge(aggregated, on=["episode_idx", "step"], how="inner")
+    assert not merged.empty
+    assert np.allclose(
+        merged["base_net_load_total"],
+        merged["base_net_load_total_from_agents"],
+    )
+    assert np.allclose(
+        merged["net_load_total"],
+        merged["net_load_total_from_agents"],
+    )
+
+    pv_merged = (
+        rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["pv_raw", "pv_effective", "pv_curtail"]]
+        .sum()
+        .rename(
+            columns={
+                "pv_raw": "pv_raw_total_from_agents",
+                "pv_effective": "pv_effective_total_from_agents",
+                "pv_curtail": "pv_curtail_total_from_agents",
+            }
+        )
+    )
+    merged = rollout.step_df.merge(pv_merged, on=["episode_idx", "step"], how="inner")
+    assert not merged.empty
+    assert np.allclose(merged["pv_raw_total"], merged["pv_raw_total_from_agents"])
+    assert np.allclose(merged["pv_effective_total"], merged["pv_effective_total_from_agents"])
+    assert np.allclose(merged["pv_curtail_total"], merged["pv_curtail_total_from_agents"])
 
 
 def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_path, monkeypatch):
@@ -314,7 +412,7 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             agent_p_max = np.array([2.0, 2.0], dtype=np.float32)
             _grid_core = _DummyGridCore()
 
-        actions = action_fn(
+        action_result = action_fn(
             _DummyEnv(),
             {
                 "price_seq": np.array([0.2, 0.2], dtype=np.float32),
@@ -322,6 +420,7 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
                 "pv_seq": np.zeros((2, 2), dtype=np.float32),
             },
         )
+        actions = action_result[0] if isinstance(action_result, tuple) else action_result
         assert len(actions) == 2
         for action in actions:
             value = float(np.asarray(action, dtype=np.float32)[0])
@@ -453,3 +552,26 @@ def test_plot_rollout_comparison_dashboard_accepts_three_rollouts():
 
     figure = plot_rollout_comparison_dashboard(metrics_df)
     assert len(figure.axes) == 6
+
+
+def test_plot_power_balance_bars_accepts_rollout_with_balance_columns():
+    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "load_total": [2.4, 2.5, 2.6],
+                "battery_charge_total": [0.3, 0.1, 0.0],
+                "pv_effective_total": [1.2, 1.0, 0.8],
+                "grid_import_total": [0.9, 1.2, 1.4],
+                "battery_discharge_total": [0.0, 0.2, 0.4],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "DRL (forecast_eval)"},
+    )
+
+    figure = plot_power_balance_bars(rollout)
+    assert len(figure.axes) == 1

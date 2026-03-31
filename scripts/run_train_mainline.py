@@ -21,6 +21,7 @@ warnings.filterwarnings(
 import torch
 
 from configs import compose_experiment_config, print_experiment_summary
+from controllers.madrl.safety_projector import is_safe_poc_algorithm
 from scripts.builder import build_train_runner
 from scripts.checkpoints import (
     build_training_run_paths,
@@ -110,6 +111,46 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
     for field_name in str_fields:
         if field_name in controls:
             setattr(cfg.runtime, field_name, str(controls[field_name]))
+
+
+def _apply_safety_controls(cfg, safety_controls: dict[str, Any] | None) -> None:
+    controls = dict(safety_controls or {})
+    numeric_fields = (
+        "projection_iters",
+        "voltage_margin_pu",
+        "line_margin_pct",
+        "trafo_margin_pct",
+        "linearization_delta_kw",
+    )
+    bool_fields = ("record_diagnostics",)
+    str_fields = ("projector_mode",)
+
+    for field_name in numeric_fields:
+        if field_name in controls:
+            value = controls[field_name]
+            casted = int(value) if field_name == "projection_iters" else float(value)
+            setattr(cfg.safety, field_name, casted)
+    for field_name in bool_fields:
+        if field_name in controls:
+            setattr(cfg.safety, field_name, bool(controls[field_name]))
+    for field_name in str_fields:
+        if field_name in controls:
+            setattr(cfg.safety, field_name, str(controls[field_name]))
+
+    cfg.safety.enabled = bool(is_safe_poc_algorithm(cfg) and controls.get("enabled", True))
+
+
+def _serialize_safety_cfg(cfg) -> dict[str, Any]:
+    return {
+        "enabled": bool(getattr(cfg.safety, "enabled", False)),
+        "projector_mode": str(getattr(cfg.safety, "projector_mode", "joint_linearized")),
+        "projection_iters": int(getattr(cfg.safety, "projection_iters", 6)),
+        "voltage_margin_pu": float(getattr(cfg.safety, "voltage_margin_pu", 0.005)),
+        "line_margin_pct": float(getattr(cfg.safety, "line_margin_pct", 5.0)),
+        "trafo_margin_pct": float(getattr(cfg.safety, "trafo_margin_pct", 5.0)),
+        "linearization_delta_kw": float(getattr(cfg.safety, "linearization_delta_kw", 0.25)),
+        "record_diagnostics": bool(getattr(cfg.safety, "record_diagnostics", True)),
+    }
 
 
 def _public_vec_env_name(env: Any) -> str:
@@ -205,12 +246,14 @@ def _build_result_payload(
         "elapsed_seconds": run_metadata.get("elapsed_seconds"),
         "estimated_end_time": run_metadata.get("estimated_end_time"),
         "summary": summary,
+        "safety_summary": runner.build_safety_summary(),
         "device_info": describe_device(runtime_state),
         "experiment_controls": dict(experiment_controls),
         "data_controls": dict(data_controls),
         "battery_controls": dict(battery_controls),
         "train_controls": dict(train_controls),
         "checkpoint_controls": dict(checkpoint_controls),
+        "safety_controls": _serialize_safety_cfg(cfg),
         "forecast_ready": forecast_ready,
         "pid": int(os.getpid()),
     }
@@ -279,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _apply_model_controls(cfg, experiment_controls.get("model_controls"))
     _apply_runtime_controls(cfg, experiment_controls.get("runtime_controls"))
+    _apply_safety_controls(cfg, experiment_controls.get("safety_controls"))
     agent_profiles = list(data_controls.get("agent_profiles", cfg.data.agent_profiles))
     n_requested_agents = len(agent_profiles)
     applied_controls = apply_notebook_experiment_settings(
@@ -291,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         load_scale=data_controls.get("load_scale", cfg.data.load_scale or [1.0] * n_requested_agents),
         pv_scale=data_controls.get("pv_scale", cfg.data.pv_scale or [1.0] * n_requested_agents),
         battery_controls=battery_controls,
+        forecast_controls=experiment_controls.get("forecast_controls"),
         future_horizon=int(data_controls.get("future_horizon", cfg.env.future_horizon)),
         train_year=data_controls.get("train_year"),
         test_year=data_controls.get("test_year"),
@@ -324,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     summary["observation_cache_root"] = cfg.runtime.observation_cache_root
     summary["observation_cache_batch_size"] = int(cfg.runtime.observation_cache_batch_size)
     summary["refresh_observation_cache"] = bool(cfg.runtime.refresh_observation_cache)
+    summary["safety"] = _serialize_safety_cfg(cfg)
 
     runner = build_train_runner(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
     train_cache_meta = dict(getattr(runner, "cache_metadata", {}).get("train", {}))

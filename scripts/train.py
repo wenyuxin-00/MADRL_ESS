@@ -14,7 +14,14 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
+from controllers.action_feasibility import (
+    action_info_to_numpy,
+    compute_action_gap_metrics_torch,
+    enforce_local_action_feasibility_torch,
+    merge_action_info_into_step_info,
+)
 from controllers.madrl.registry import get_agent_cls
+from controllers.madrl.safety_projector import SAFE_POC_ALGO_NAME
 from scripts.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
 from scripts.utils.nested import to_torch_nested
 from scripts.utils.project_paths import get_tensorboard_run_dir
@@ -116,6 +123,8 @@ class TrainRunner:
 
         agent_cls = get_agent_cls(self.cfg.algo.name)
         self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
+        self.safety_projector = getattr(self.agent_n[0], "safety_projector", None) if self.agent_n else None
+        self.apply_action_penalty = not self._safe_projection_enabled()
 
         self.replay_buffer = ReplayBuffer(self.cfg)
         log_dir = get_tensorboard_run_dir(
@@ -142,29 +151,202 @@ class TrainRunner:
         self.run_metadata: dict[str, Any] = {}
         self.reward_component_meta: list[Any] = []
         self.episode_reward_components: dict[str, list[float]] = {}
+        self._safety_projection_batches = 0
+        self._safety_projection_samples = 0
+        self._safety_diagnostic_samples = 0
+        self._safety_projection_calls_by_stage = {
+            "rollout": 0,
+            "target": 0,
+            "actor": 0,
+        }
+        self._safety_projection_samples_by_stage = {
+            "rollout": 0,
+            "target": 0,
+            "actor": 0,
+        }
+        self._safety_projection_time_s_by_stage = {
+            "rollout": 0.0,
+            "target": 0.0,
+            "actor": 0.0,
+        }
+        self._safety_projected_fraction_weighted = 0.0
+        self._safety_mean_abs_delta_weighted = 0.0
+        self._safety_mean_abs_delta_kw_weighted = 0.0
+        self._safety_pre_violation_weighted = 0.0
+        self._safety_post_violation_weighted = 0.0
+        self._safety_max_abs_delta = 0.0
+        self._safety_env_fallback_steps = 0
+        self._safety_env_observations = 0
+        self._safety_env_action_pen_total = 0.0
         self._closed = False
+
+    def _safe_projection_enabled(self) -> bool:
+        algo_cfg = getattr(self.cfg, "algo", None)
+        algo_name = getattr(algo_cfg, "name", "")
+        return str(algo_name) == SAFE_POC_ALGO_NAME and getattr(self, "safety_projector", None) is not None
+
+    def _record_projection_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        batch_size = max(int(diagnostics.get("batch_size", 0)), 1)
+        self._safety_diagnostic_samples += batch_size
+        self._safety_projected_fraction_weighted += float(diagnostics.get("projected_fraction", 0.0)) * batch_size
+        self._safety_mean_abs_delta_weighted += float(diagnostics.get("mean_abs_delta", 0.0)) * batch_size
+        self._safety_mean_abs_delta_kw_weighted += float(diagnostics.get("mean_abs_delta_kw", 0.0)) * batch_size
+        self._safety_pre_violation_weighted += float(diagnostics.get("pre_violation", 0.0)) * batch_size
+        self._safety_post_violation_weighted += float(diagnostics.get("post_violation", 0.0)) * batch_size
+        self._safety_max_abs_delta = max(
+            self._safety_max_abs_delta,
+            float(diagnostics.get("max_abs_delta", 0.0)),
+        )
+
+    def _record_projection_event(
+        self,
+        *,
+        stage: str,
+        batch_size: int,
+        elapsed_s: float,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_stage = str(stage)
+        if normalized_stage not in self._safety_projection_calls_by_stage:
+            normalized_stage = "rollout"
+        safe_batch_size = max(int(batch_size), 1)
+        self._safety_projection_batches += 1
+        self._safety_projection_samples += safe_batch_size
+        self._safety_projection_calls_by_stage[normalized_stage] += 1
+        self._safety_projection_samples_by_stage[normalized_stage] += safe_batch_size
+        self._safety_projection_time_s_by_stage[normalized_stage] += float(elapsed_s)
+        if diagnostics is not None:
+            self._record_projection_diagnostics(diagnostics)
+
+    def _record_env_fallback(self, info: dict[str, Any]) -> None:
+        del info
+        return
+
+    def build_safety_summary(self) -> dict[str, Any]:
+        if not self._safe_projection_enabled():
+            return {
+                "enabled": False,
+                "algorithm": str(self.cfg.algo.name),
+            }
+
+        diagnostic_denominator = max(self._safety_diagnostic_samples, 1)
+        env_denominator = max(self._safety_env_observations, 1)
+        projection_time_total = float(sum(self._safety_projection_time_s_by_stage.values()))
+        return {
+            "enabled": True,
+            "algorithm": str(self.cfg.algo.name),
+            "projector_mode": str(getattr(self.cfg.safety, "projector_mode", "joint_linearized")),
+            "projection_batches": int(self._safety_projection_batches),
+            "projection_samples": int(self._safety_projection_samples),
+            "projection_diagnostic_samples": int(self._safety_diagnostic_samples),
+            "projected_fraction": float(self._safety_projected_fraction_weighted / diagnostic_denominator),
+            "mean_abs_action_delta": float(self._safety_mean_abs_delta_weighted / diagnostic_denominator),
+            "max_abs_action_delta": float(self._safety_max_abs_delta),
+            "mean_abs_action_delta_kw": float(self._safety_mean_abs_delta_kw_weighted / diagnostic_denominator),
+            "mean_pre_projection_violation": float(self._safety_pre_violation_weighted / diagnostic_denominator),
+            "mean_post_projection_violation": float(self._safety_post_violation_weighted / diagnostic_denominator),
+            "projection_time_s": projection_time_total,
+            "rollout_projection_calls": int(self._safety_projection_calls_by_stage["rollout"]),
+            "target_projection_calls": int(self._safety_projection_calls_by_stage["target"]),
+            "actor_projection_calls": int(self._safety_projection_calls_by_stage["actor"]),
+            "rollout_projection_samples": int(self._safety_projection_samples_by_stage["rollout"]),
+            "target_projection_samples": int(self._safety_projection_samples_by_stage["target"]),
+            "actor_projection_samples": int(self._safety_projection_samples_by_stage["actor"]),
+            "rollout_projection_time_s": float(self._safety_projection_time_s_by_stage["rollout"]),
+            "target_projection_time_s": float(self._safety_projection_time_s_by_stage["target"]),
+            "actor_projection_time_s": float(self._safety_projection_time_s_by_stage["actor"]),
+            "env_fallback_action_pen_steps": int(self._safety_env_fallback_steps),
+            "env_fallback_action_pen_rate": float(self._safety_env_fallback_steps / env_denominator),
+            "env_fallback_action_pen_mean": float(self._safety_env_action_pen_total / env_denominator),
+        }
 
     def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
         return [action_batch[:, agent_id].copy() for agent_id in range(self.cfg.env.num_agents)]
 
-    def select_action_batch(self, obs_np: dict) -> np.ndarray:
+    def _select_action_batch_with_info(
+        self,
+        obs_np: dict,
+    ) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
         obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
         with torch.inference_mode():
-            action_t = torch.stack(
+            raw_action_t = torch.stack(
                 [agent.act_from_torch_obs(obs_t, noise_std=self.noise_std) for agent in self.agent_n],
                 dim=1,
             )
-        return action_t.to(dtype=torch.float32).cpu().numpy()
+            action_info = None
+            if self._safe_projection_enabled():
+                projection_started = time.perf_counter()
+                action_t, diagnostics = self.safety_projector.project_actions_from_safety_local(
+                    obs_t["safety_local"],
+                    raw_action_t,
+                    return_diagnostics=True,
+                )
+                self._record_projection_event(
+                    stage="rollout",
+                    batch_size=int(raw_action_t.shape[0]),
+                    elapsed_s=time.perf_counter() - projection_started,
+                    diagnostics=diagnostics,
+                )
+                action_info = compute_action_gap_metrics_torch(obs_t["safety_local"], raw_action_t, action_t)
+            elif "safety_local" in obs_t:
+                action_t, action_info = enforce_local_action_feasibility_torch(
+                    obs_t["safety_local"],
+                    raw_action_t,
+                    efficiency=float(self.cfg.env.efficiency),
+                    dt_hours=float(self.cfg.env.dt),
+                    soc_min=float(self.cfg.env.soc_min),
+                    soc_max=float(self.cfg.env.soc_max),
+                )
+            else:
+                action_t = raw_action_t
+        return (
+            action_t.to(dtype=torch.float32).cpu().numpy(),
+            action_info_to_numpy(action_info),
+        )
+
+    def select_action_batch(self, obs_np: dict) -> np.ndarray:
+        action_batch, _ = self._select_action_batch_with_info(obs_np)
+        return action_batch
+
+    def _apply_controller_action_postprocessing(
+        self,
+        reward: np.ndarray,
+        info_list: list[dict[str, Any]],
+        action_info: dict[str, np.ndarray] | None,
+    ) -> tuple[np.ndarray, list[dict[str, Any]]]:
+        reward_array = np.asarray(reward, dtype=np.float32)
+        if reward_array.ndim == 2:
+            reward_array = reward_array[..., None]
+
+        processed_info_list: list[dict[str, Any]] = []
+        for env_idx, info in enumerate(info_list):
+            env_action_info = None
+            if action_info is not None:
+                env_action_info = {
+                    key: np.asarray(value[env_idx], dtype=np.float32)
+                    for key, value in action_info.items()
+                }
+            merged_info, action_penalty = merge_action_info_into_step_info(
+                info,
+                env_action_info,
+                action_pen_weight=float(self.cfg.reward.w_action_pen),
+                apply_action_penalty=self.apply_action_penalty,
+            )
+            reward_array[env_idx, :, 0] -= np.asarray(action_penalty, dtype=np.float32)
+            merged_info["reward"] = np.asarray(reward_array[env_idx, :, 0], dtype=np.float32)
+            processed_info_list.append(merged_info)
+        return reward_array.astype(np.float32), processed_info_list
 
     def rollout_once(self, obs_np: dict | None = None) -> dict:
         if obs_np is None:
             obs_np, reset_info = self.env.reset()
         else:
             reset_info = None
-        action_batch = self.select_action_batch(obs_np)
+        action_batch, action_info = self._select_action_batch_with_info(obs_np)
         next_obs, reward, terminated, truncated, info_list = self.env.step(
             self.format_env_actions(action_batch)
         )
+        reward, info_list = self._apply_controller_action_postprocessing(reward, info_list, action_info)
         done = np.logical_or(terminated, truncated).astype(np.float32)
         return {
             "obs": obs_np,
@@ -185,11 +367,34 @@ class TrainRunner:
                 [agent._actor_target_call(next_obs) for agent in self.agent_n],
                 dim=1,
             )
-        return {
+        shared_ctx = {
             "target_actor_actions_clean": target_actor_actions_clean,
             "batch_size": int(batch["action"].shape[0]),
             "device": batch["action"].device,
         }
+        if self._safe_projection_enabled():
+            shared_ctx["safety_projector"] = self.safety_projector
+            shared_ctx["projection_event_recorder"] = self._record_projection_event
+            with torch.no_grad():
+                noise = (torch.randn_like(target_actor_actions_clean) * float(self.cfg.algo.policy_noise)).clamp(
+                    -float(self.cfg.algo.noise_clip),
+                    float(self.cfg.algo.noise_clip),
+                )
+                target_actor_actions = (target_actor_actions_clean + noise).clamp(
+                    -float(self.cfg.model.max_action),
+                    float(self.cfg.model.max_action),
+                )
+                projection_started = time.perf_counter()
+                shared_ctx["projected_target_actions"] = self.safety_projector.project_actions_from_safety_local(
+                    next_obs["safety_local"],
+                    target_actor_actions,
+                )
+                self._record_projection_event(
+                    stage="target",
+                    batch_size=int(target_actor_actions.shape[0]),
+                    elapsed_s=time.perf_counter() - projection_started,
+                )
+        return shared_ctx
 
     def save_model(self, model_dir: str, episode: int) -> None:
         algo_dir = os.path.join(model_dir, self.cfg.algo.name)
@@ -387,13 +592,14 @@ class TrainRunner:
             obs, _ = self.env.reset()
             while interaction_step < target_interactions:
                 action_start = time.perf_counter()
-                action_batch = self.select_action_batch(obs)
+                action_batch, action_info = self._select_action_batch_with_info(obs)
                 action_time_total += time.perf_counter() - action_start
 
                 env_step_start = time.perf_counter()
                 next_obs, reward, terminated, truncated, info_list = self.env.step(
                     self.format_env_actions(action_batch)
                 )
+                reward, info_list = self._apply_controller_action_postprocessing(reward, info_list, action_info)
                 done = np.logical_or(terminated, truncated).astype(np.float32)
                 env_step_time_total += time.perf_counter() - env_step_start
 
@@ -528,6 +734,13 @@ class TrainRunner:
             "avg_action_ms_per_iter": 1000.0 * action_time_total / max(interaction_step, 1),
             "avg_env_ms_per_iter": 1000.0 * env_step_time_total / max(interaction_step, 1),
             "avg_update_ms_per_call": 1000.0 * update_time_total / max(update_calls, 1),
+            "projection_time_s": float(sum(self._safety_projection_time_s_by_stage.values())),
+            "rollout_projection_time_s": float(self._safety_projection_time_s_by_stage["rollout"]),
+            "target_projection_time_s": float(self._safety_projection_time_s_by_stage["target"]),
+            "actor_projection_time_s": float(self._safety_projection_time_s_by_stage["actor"]),
+            "rollout_projection_calls": int(self._safety_projection_calls_by_stage["rollout"]),
+            "target_projection_calls": int(self._safety_projection_calls_by_stage["target"]),
+            "actor_projection_calls": int(self._safety_projection_calls_by_stage["actor"]),
         }
         self.perf_summary.update(self.agent_performance)
         self.episodes_completed = episodes_completed

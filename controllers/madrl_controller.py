@@ -1,75 +1,99 @@
-"""多智能体深度强化学习（MADRL）控制器。
-
-封装 MADRL 算法（MADDPG / MATD3）的高层控制器接口，
-负责多智能体联合动作选择与训练调度。
-
-主要类:
-    MADRLController -- MADRL 控制器
-"""
+"""High-level multi-agent controller wrapper for MADRL policies."""
 
 from __future__ import annotations
 
 import numpy as np
+import torch
 
+from controllers.action_feasibility import (
+    action_info_to_numpy,
+    compute_action_gap_metrics_torch,
+    enforce_local_action_feasibility_torch,
+)
 from controllers.base import BaseController
+from scripts.utils.nested import add_batch_dim, to_torch_nested
 
 
 class MADRLController(BaseController):
-    """多智能体深度强化学习（MADRL）高层控制器包装。
+    """Coordinate one action per agent for evaluation or deployment."""
 
-    将训练好的多个 MADRL 智能体（如 MADDPG / MATD3）封装为统一的
-    控制器接口，负责在评估或部署阶段协调所有智能体的联合动作选择。
-
-    采用分布式执行（DE）模式：每个智能体仅基于自身的局部观测
-    独立输出动作，不依赖其他智能体的信息。
-
-    属性:
-        agent_n: 训练好的智能体列表，每个智能体实现 ``choose_action`` 方法。
-        noise_std: 非确定性模式下的探索噪声标准差。
-    """
-
-    def __init__(self, agent_n: list, noise_std: float = 0.0) -> None:
-        """初始化 MADRL 控制器。
-
-        参数:
-            agent_n: 训练好的智能体列表（BaseAgent 子类实例）。
-            noise_std: 探索噪声标准差，确定性模式下不使用。
-        """
+    def __init__(self, agent_n: list, noise_std: float = 0.0, projector=None) -> None:
         self.agent_n = list(agent_n)
         self.noise_std = float(noise_std)
+        default_projector = getattr(self.agent_n[0], "safety_projector", None) if self.agent_n else None
+        self.projector = projector if projector is not None else default_projector
+        self.device = getattr(self.agent_n[0], "device", torch.device("cpu")) if self.agent_n else torch.device("cpu")
+        self.apply_action_penalty = self.projector is None
+        self.last_action_info: dict[str, np.ndarray] | None = None
 
     def reset(self) -> None:
-        """当前前馈策略无内部状态，无需重置。"""
+        """Feed-forward policies do not keep episode state."""
+        self.last_action_info = None
 
     @staticmethod
     def _format_action(action: object) -> np.ndarray:
-        """将智能体输出的动作统一转换为一维 numpy 数组。
-
-        参数:
-            action: 智能体返回的动作，可能是标量、数组或张量。
-
-        返回:
-            np.ndarray: 形状为 ``(action_dim,)`` 的 float32 数组。
-        """
         action_array = np.asarray(action, dtype=np.float32)
         if action_array.ndim == 0:
-            # 标量动作需要扩展为一维数组以满足环境接口要求
             return action_array.reshape(1)
         return action_array
 
+    def _postprocess_joint_actions(
+        self,
+        obs: dict,
+        actions: list[np.ndarray],
+    ) -> tuple[list[np.ndarray], dict[str, np.ndarray] | None]:
+        if not actions:
+            return actions, None
+
+        has_batch_dim = np.asarray(obs["local"]).ndim == 3
+        obs_batch = obs if has_batch_dim else add_batch_dim(obs)
+        if has_batch_dim:
+            action_batch = np.stack(actions, axis=1).astype(np.float32)
+        else:
+            action_batch = np.stack(actions, axis=0).astype(np.float32)[None, ...]
+
+        obs_t = to_torch_nested(obs_batch, self.device)
+        action_t = torch.as_tensor(action_batch, device=self.device, dtype=torch.float32)
+        if "safety_local" not in obs_t:
+            if has_batch_dim:
+                return [action_batch[:, agent_id].copy() for agent_id in range(action_batch.shape[1])], None
+            return [action_batch[0, agent_id].copy() for agent_id in range(action_batch.shape[1])], None
+
+        with torch.inference_mode():
+            if self.projector is not None:
+                executed_t = self.projector.project_actions_from_safety_local(
+                    obs_t["safety_local"],
+                    action_t,
+                )
+            else:
+                executed_t, _ = enforce_local_action_feasibility_torch(
+                    obs_t["safety_local"],
+                    action_t,
+                    efficiency=float(getattr(self.agent_n[0].cfg.env, "efficiency", 1.0)),
+                    dt_hours=float(getattr(self.agent_n[0].cfg.env, "dt", 1.0)),
+                    soc_min=float(getattr(self.agent_n[0].cfg.env, "soc_min", 0.0)),
+                    soc_max=float(getattr(self.agent_n[0].cfg.env, "soc_max", 1.0)),
+                )
+            action_info = compute_action_gap_metrics_torch(obs_t["safety_local"], action_t, executed_t)
+        executed_np = executed_t.to(dtype=torch.float32).cpu().numpy()
+        action_info_np = action_info_to_numpy(action_info)
+
+        if has_batch_dim:
+            return [executed_np[:, agent_id].copy() for agent_id in range(executed_np.shape[1])], action_info_np
+        single_env_info = None
+        if action_info_np is not None:
+            single_env_info = {
+                key: np.asarray(value[0], dtype=np.float32)
+                for key, value in action_info_np.items()
+            }
+        return [executed_np[0, agent_id].copy() for agent_id in range(executed_np.shape[1])], single_env_info
+
     def act(self, obs: dict, deterministic: bool = True) -> list[np.ndarray]:
-        """运行所有智能体，返回环境可执行的动作列表。
-
-        参数:
-            obs: 环境观测字典，将被传递给每个智能体的 ``choose_action``。
-            deterministic: 若为 True，使用零噪声（确定性策略）。
-
-        返回:
-            list[np.ndarray]: 每个智能体一个动作数组。
-        """
-        # 确定性模式下强制将噪声设为 0
         noise_std = 0.0 if deterministic else self.noise_std
-        return [
+        raw_actions = [
             self._format_action(agent.choose_action(obs, noise_std=noise_std))
             for agent in self.agent_n
         ]
+        actions, action_info = self._postprocess_joint_actions(obs, raw_actions)
+        self.last_action_info = action_info
+        return actions

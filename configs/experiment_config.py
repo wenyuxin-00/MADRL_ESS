@@ -19,17 +19,14 @@ class EnvConfig:
     num_agents: int = 5
     episode_limit: int = 96 * 2
     future_horizon: int = 24
-    battery_mode: str = "from_pv"
-    battery_capacity: float | list[float] = 5.0
-    max_charge_rate: float = 2.5
+    battery_capacity: float | list[float] = field(default_factory=lambda: [25.0] * 5)
+    max_charge_rate: float = 0.4
     efficiency: float = 0.95
     init_soc: float = 0.5
     dt: float = 0.25
     soc_min: float = 0.05
     soc_max: float = 0.95
     soc_target: float = 0.5
-    from_pv_power_ratio: float = 0.5
-    from_pv_duration_hours: float = 2.5
 
 
 @dataclass
@@ -39,6 +36,7 @@ class RewardConfig:
     w_action_pen: float = 6.0
     lambda_throughput: float = 0.001
     w_voltage_pen: float = 10.0
+    w_line_pen: float = 10.0
     w_trafo_pen: float = 10.0
 
 
@@ -116,6 +114,7 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
+    signal_training_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
     load_component_split: bool = False
     load_scaler_type: str = "standard"
 
@@ -233,6 +232,20 @@ class GridConfig:
 
 
 @dataclass
+class SafetyConfig:
+    """Optional safety-layer controls for isolated safe-policy experiments."""
+
+    enabled: bool = False
+    projector_mode: str = "joint_linearized"
+    projection_iters: int = 6
+    voltage_margin_pu: float = 0.005
+    line_margin_pct: float = 5.0
+    trafo_margin_pct: float = 5.0
+    linearization_delta_kw: float = 0.25
+    record_diagnostics: bool = True
+
+
+@dataclass
 class ExperimentConfig:
     """Top-level experiment configuration."""
 
@@ -246,3 +259,4 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     grid: GridConfig = field(default_factory=GridConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)

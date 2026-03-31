@@ -27,6 +27,7 @@ from predictors.training import (
     _managed_lstm_artifact_paths,
     _select_heatpump_blocked_blend_weight,
     _select_load_blend_weight_from_validation,
+    build_lstm_source_signature,
     build_supervised_windows_from_matrix,
     compare_lstm_artifact_meta,
     expected_lstm_artifact_meta,
@@ -511,6 +512,37 @@ def test_artifact_meta_ignores_scale_changes_but_rejects_source_signature_change
     assert "postprocess_mode" in old_comparison["mismatches"]
     assert "baseline_mode" in old_comparison["mismatches"]
     assert "blend_weight" in old_comparison["mismatches"]
+
+
+def test_lstm_source_signature_ignores_downstream_test_window(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path)
+    base_signature = build_lstm_source_signature(cfg, "load")
+
+    sliced_cfg = copy.deepcopy(cfg)
+    sliced_cfg.data.test_start_date = "2020-08-01"
+    sliced_cfg.data.test_end_date = "2020-08-05"
+    sliced_signature = build_lstm_source_signature(sliced_cfg, "load")
+
+    assert sliced_signature == base_signature
+    assert sliced_signature["test_date_range"] == {"start_date": None, "end_date": None}
+
+
+def test_lstm_source_signature_keeps_same_year_exclusion(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path)
+    cfg.data.train_year = 2020
+    cfg.data.test_year = 2020
+    cfg.data.train_start_date = None
+    cfg.data.train_end_date = None
+    cfg.data.test_start_date = "2020-08-01"
+    cfg.data.test_end_date = "2020-08-05"
+
+    signature = build_lstm_source_signature(cfg, "pv")
+
+    assert signature["test_date_range"] == {"start_date": None, "end_date": None}
+    assert signature["train_excluded_date_range"] == {
+        "start_date": "2020-08-01",
+        "end_date": "2020-08-05",
+    }
 
 
 def test_blend_weight_search_can_fallback_to_conservative_baseline() -> None:

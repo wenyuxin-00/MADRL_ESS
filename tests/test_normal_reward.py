@@ -12,6 +12,7 @@ def _make_cfg():
         w_action_pen = 5.0
         lambda_throughput = 0.01
         w_voltage_pen = 10.0
+        w_line_pen = 3.0
         w_trafo_pen = 7.0
 
     class _Env:
@@ -66,7 +67,14 @@ def _make_env_state(
 def test_component_meta_has_expected_keys() -> None:
     rf = NormalReward(_make_cfg())
     meta_keys = [meta.key for meta in rf.component_meta]
-    assert meta_keys == ["r_cost", "r_throughput", "r_action_pen", "r_safe_v", "r_safe_trafo"]
+    assert meta_keys == [
+        "r_cost",
+        "r_throughput",
+        "r_action_pen",
+        "r_safe_v",
+        "r_safe_line",
+        "r_safe_trafo",
+    ]
 
 
 def test_cost_only_behavior_without_violations() -> None:
@@ -78,6 +86,7 @@ def test_cost_only_behavior_without_violations() -> None:
     expected_cost = -env_state["e_bat"] * env_state["dt"] * env_state["price_t"]
     np.testing.assert_allclose(components["r_cost"], expected_cost, rtol=1e-5)
     np.testing.assert_allclose(components["r_safe_v"], 0.0, atol=1e-7)
+    np.testing.assert_allclose(components["r_safe_line"], 0.0, atol=1e-7)
     np.testing.assert_allclose(components["r_safe_trafo"], 0.0, atol=1e-7)
     np.testing.assert_allclose(
         total,
@@ -105,8 +114,7 @@ def test_storage_action_limit_penalty_uses_request_execution_gap() -> None:
 
     _, components = rf.compute(env_state)
 
-    expected = 5.0 * np.abs(env_state["e_bat_req"] - env_state["e_bat"]) / env_state["p_max"]
-    np.testing.assert_allclose(components["r_action_pen"], expected, rtol=1e-5)
+    np.testing.assert_allclose(components["r_action_pen"], 0.0, atol=1e-7)
 
 
 def test_voltage_penalty_splits_by_local_violation_proportion() -> None:
@@ -147,17 +155,27 @@ def test_transformer_penalty_is_shared() -> None:
     np.testing.assert_allclose(components["r_safe_trafo"], expected, rtol=1e-5)
 
 
-def test_line_violations_do_not_affect_reward() -> None:
+def test_line_penalty_is_shared() -> None:
     rf = NormalReward(_make_cfg())
-    with_line = _make_env_state(psi_line_raw=0.5)
-    without_line = _make_env_state(psi_line_raw=0.0)
+    env_state = _make_env_state(psi_line_raw=0.5)
 
-    total_with_line, components_with_line = rf.compute(with_line)
-    total_without_line, components_without_line = rf.compute(without_line)
+    _, components = rf.compute(env_state)
 
-    np.testing.assert_allclose(components_with_line["r_safe_v"], components_without_line["r_safe_v"])
-    np.testing.assert_allclose(
-        components_with_line["r_safe_trafo"],
-        components_without_line["r_safe_trafo"],
+    expected = np.full(3, 3.0 * 0.5, dtype=np.float32)
+    np.testing.assert_allclose(components["r_safe_line"], expected, rtol=1e-5)
+
+
+def test_pv_curtailment_gap_increases_action_penalty() -> None:
+    rf = NormalReward(_make_cfg())
+    env_state = _make_env_state(
+        e_bat_req=np.zeros(3, dtype=np.float32),
+        e_bat=np.zeros(3, dtype=np.float32),
+        p_max=np.ones(3, dtype=np.float32),
     )
-    np.testing.assert_allclose(total_with_line, total_without_line)
+    env_state["pv_raw"] = np.array([3.0, 2.0, 0.0], dtype=np.float32)
+    env_state["pv_effective_req"] = np.array([3.0, 2.0, 0.0], dtype=np.float32)
+    env_state["pv_effective"] = np.array([2.0, 1.0, 0.0], dtype=np.float32)
+
+    _, components = rf.compute(env_state)
+
+    np.testing.assert_allclose(components["r_action_pen"], 0.0, atol=1e-7)

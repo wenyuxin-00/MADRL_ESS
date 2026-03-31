@@ -6,6 +6,8 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import torch
+
 from configs import print_experiment_summary
 from controllers import MADRLController
 from controllers.madrl.registry import get_agent_cls
@@ -143,6 +145,22 @@ def evaluate_runner(runner, cfg, n_episodes: int = 1, deterministic: bool = True
         eval_env.close()
 
 
+def _infer_checkpoint_action_dim(checkpoint_info: dict) -> int | None:
+    algo_dir = Path(checkpoint_info["algo_dir"])
+    saved_episode_tag = checkpoint_info["saved_episode_tag"]
+    actor_path = algo_dir / f"actor_agent_0_ep_{saved_episode_tag}.pth"
+    if not actor_path.exists():
+        return None
+    state_dict = torch.load(actor_path, map_location="cpu")
+    bias = state_dict.get("head.fc.bias")
+    if isinstance(bias, torch.Tensor) and bias.ndim == 1:
+        return int(bias.shape[0])
+    weight = state_dict.get("head.fc.weight")
+    if isinstance(weight, torch.Tensor) and weight.ndim >= 2:
+        return int(weight.shape[0])
+    return None
+
+
 def load_madrl_controller(
     cfg,
     model_root=None,
@@ -179,12 +197,16 @@ def load_madrl_controller(
     try:
         load_cfg.runtime.observation_schema = dict(env.observation_schema)
         load_cfg.runtime.observation_layout = dict(env.observation_layout)
-        load_cfg.runtime.action_dim = int(env.action_space[0].shape[0])
 
         checkpoint_info = resolve_checkpoint_to_load(
             resolved_model_root,
             load_cfg.algo.name,
             episode_tag=episode_tag,
+        )
+        env_action_dim = int(env.action_space[0].shape[0])
+        checkpoint_action_dim = _infer_checkpoint_action_dim(checkpoint_info)
+        load_cfg.runtime.action_dim = int(
+            checkpoint_action_dim if checkpoint_action_dim is not None else env_action_dim
         )
         agent_cls = get_agent_cls(load_cfg.algo.name)
         agents = [agent_cls(load_cfg, agent_id=i) for i in range(load_cfg.env.num_agents)]

@@ -34,7 +34,8 @@
       "Bash(\"D:/SOFTWARE/miniconda/envs/madrl_ess/python.exe\" -X utf8 -c \":*)",
       "Bash(find /d/GithubProject/MADRL_ESS/data -type f -name *.csv)",
       "Bash(find d:GithubProjectMADRL_ESS -name *config*.yaml -o -name *config*.json)",
-      "Bash(python -m pytest tests/test_lstm_load_per_agent.py tests/test_forecast_scaling.py -x -q)"
+      "Bash(python -m pytest tests/test_lstm_load_per_agent.py tests/test_forecast_scaling.py -x -q)",
+      "Bash(python3:*)"
     ]
   }
 }

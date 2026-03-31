@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from controllers.madrl.maddpg import MADDPG
 from controllers.madrl.matd3 import MATD3
+from controllers.madrl.matd3_safe_poc import MATD3SafePOC
 
 if TYPE_CHECKING:
     from controllers.madrl.base_agent import BaseAgent
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "MADDPG": MADDPG,
     "MATD3": MATD3,
+    "MATD3_SAFE_POC": MATD3SafePOC,
 }
 
 

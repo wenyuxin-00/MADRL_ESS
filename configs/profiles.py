@@ -183,44 +183,22 @@ def _derive_training_budget(cfg: ExperimentConfig) -> dict[str, int | str | None
 
 def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
     budget = _derive_training_budget(cfg)
-    battery_mode = str(cfg.env.battery_mode)
-    if isinstance(cfg.env.battery_capacity, (list, tuple)) and battery_mode != "fixed":
-        # Vector battery capacities are only valid for fixed-mode batteries.
-        # Treat them as fixed here so notebook summaries stay robust even if
-        # the in-memory cfg was created before a kernel/module refresh.
-        battery_mode = "fixed"
-    if battery_mode == "fixed":
-        battery_capacity, max_charge_rate, p_max_kw = resolve_fixed_battery_spec(
-            cfg.env.battery_capacity,
-            cfg.env.max_charge_rate,
-            n_agents=int(cfg.env.num_agents),
-        )
-        battery_summary: dict[str, object] = {
-            "mode": battery_mode,
-            "from_pv_power_ratio": float(cfg.env.from_pv_power_ratio),
-            "from_pv_duration_hours": float(cfg.env.from_pv_duration_hours),
-            "battery_capacity": list(battery_capacity),
-            "max_charge_rate": float(max_charge_rate),
-            "p_max_kw": list(p_max_kw),
-            "efficiency": float(cfg.env.efficiency),
-            "init_soc": float(cfg.env.init_soc),
-            "soc_min": float(cfg.env.soc_min),
-            "soc_max": float(cfg.env.soc_max),
-            "soc_target": float(cfg.env.soc_target),
-        }
-    else:
-        battery_summary = {
-            "mode": battery_mode,
-            "from_pv_power_ratio": float(cfg.env.from_pv_power_ratio),
-            "from_pv_duration_hours": float(cfg.env.from_pv_duration_hours),
-            "battery_capacity": float(cfg.env.battery_capacity),
-            "max_charge_rate": float(cfg.env.max_charge_rate),
-            "efficiency": float(cfg.env.efficiency),
-            "init_soc": float(cfg.env.init_soc),
-            "soc_min": float(cfg.env.soc_min),
-            "soc_max": float(cfg.env.soc_max),
-            "soc_target": float(cfg.env.soc_target),
-        }
+    battery_capacity, max_charge_rate, p_max_kw = resolve_fixed_battery_spec(
+        cfg.env.battery_capacity,
+        cfg.env.max_charge_rate,
+        n_agents=int(cfg.env.num_agents),
+    )
+    battery_summary: dict[str, object] = {
+        "mode": "fixed",
+        "battery_capacity": list(battery_capacity),
+        "max_charge_rate": float(max_charge_rate),
+        "p_max_kw": list(p_max_kw),
+        "efficiency": float(cfg.env.efficiency),
+        "init_soc": float(cfg.env.init_soc),
+        "soc_min": float(cfg.env.soc_min),
+        "soc_max": float(cfg.env.soc_max),
+        "soc_target": float(cfg.env.soc_target),
+    }
 
     summary: dict[str, object] = {
         "algo": cfg.algo.name,

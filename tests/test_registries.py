@@ -1,3 +1,4 @@
+from controllers.madrl.registry import get_agent_cls
 from configs.experiment_config import ExperimentConfig
 from data.loaders.prosumer import ProsumerDataset
 from data.loaders.registry import build_dataset, get_dataset_cls
@@ -49,8 +50,11 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.reward.w_action_pen == 6.0
     assert cfg.reward.lambda_throughput == 0.001
     assert cfg.reward.w_voltage_pen == 10.0
+    assert cfg.reward.w_line_pen == 10.0
     assert cfg.reward.w_trafo_pen == 10.0
     assert cfg.grid.sb_code == "1-LV-rural1--0-sw"
     assert cfg.grid.agent_bus_ids == [10, 6, 12, 4, 2]
     assert cfg.obs.local_features == ["calendar_time", "soc"]
     assert cfg.obs.sequence_features == ["price", "load", "pv"]
+    assert cfg.safety.enabled is False
+    assert get_agent_cls("MATD3_SAFE_POC").__name__ == "MATD3SafePOC"

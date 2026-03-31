@@ -220,7 +220,12 @@ def build_lstm_source_signature(cfg, signal_name: str) -> dict[str, object]:
         "train_year": int(cfg.data.train_year),
         "test_year": int(cfg.data.test_year),
         "train_date_range": _normalize_date_range(cfg.data.train_start_date, cfg.data.train_end_date),
-        "test_date_range": _normalize_date_range(cfg.data.test_start_date, cfg.data.test_end_date),
+        # The managed LSTM artifact identity should track the source data used to train the
+        # forecaster, not the downstream evaluation slice chosen by a notebook or experiment.
+        # When train/test years differ, narrowing cfg.data.test_start_date/end_date only changes
+        # which episode window we evaluate on later; it does not change the trained artifact.
+        # Same-year train/test exclusion is already encoded in train_excluded_date_range below.
+        "test_date_range": {"start_date": None, "end_date": None},
         "train_excluded_date_range": train_exclusion,
         "load_components": [str(component) for component in cfg.data.load_components],
         "pv_reference": str(cfg.data.pv_reference),
@@ -2160,6 +2165,9 @@ def _collect_lstm_artifact_inventory(
     overrides_by_signal: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """扫描所有 signal 的 artifact，并区分可用、缺失与不兼容。"""
+    resolved_overrides_by_signal = dict(
+        getattr(cfg.forecast, "signal_training_overrides", {}) if overrides_by_signal is None else overrides_by_signal
+    )
     artifacts: dict[str, object] = {}
     missing_artifacts: dict[str, list[dict[str, object]]] = {}
     invalid_artifacts: dict[str, list[dict[str, object]]] = {}
@@ -2168,7 +2176,7 @@ def _collect_lstm_artifact_inventory(
         compatible_artifacts: list[tuple[str, str, str]] = []
         signal_missing: list[dict[str, object]] = []
         signal_invalid: list[dict[str, object]] = []
-        signal_overrides = dict((overrides_by_signal or {}).get(signal_name) or {})
+        signal_overrides = dict(resolved_overrides_by_signal.get(signal_name) or {})
 
         for spec in _signal_artifact_specs(cfg, signal_name):
             validation = validate_lstm_artifact(
@@ -2985,15 +2993,28 @@ def collect_available_lstm_artifacts(
     overrides_by_signal: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """只返回与当前配置兼容的 artifact。"""
-    return dict(_collect_lstm_artifact_inventory(cfg, overrides_by_signal=overrides_by_signal)["artifacts"])
+    resolved_overrides_by_signal = (
+        getattr(cfg.forecast, "signal_training_overrides", {}) if overrides_by_signal is None else overrides_by_signal
+    )
+    return dict(
+        _collect_lstm_artifact_inventory(cfg, overrides_by_signal=resolved_overrides_by_signal)["artifacts"]
+    )
 
 
-def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> dict[str, object]:
+def ensure_lstm_artifacts(
+    cfg,
+    *,
+    device: str | torch.device | None = None,
+    overrides_by_signal: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     """Ensure the managed LSTM artifacts required by the current config exist."""
     artifact_root = forecast_artifact_root(cfg)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    resolved_overrides_by_signal = (
+        getattr(cfg.forecast, "signal_training_overrides", {}) if overrides_by_signal is None else overrides_by_signal
+    )
 
-    inventory_before = _collect_lstm_artifact_inventory(cfg)
+    inventory_before = _collect_lstm_artifact_inventory(cfg, overrides_by_signal=resolved_overrides_by_signal)
     if not bool(cfg.forecast.auto_train_missing) and (
         inventory_before["missing_signals"] or inventory_before["invalid_artifacts"]
     ):
@@ -3021,14 +3042,19 @@ def ensure_lstm_artifacts(cfg, *, device: str | torch.device | None = None) -> d
             continue
 
         print(f"[forecast] retraining signal={signal_name}")
-        trained_result = train_signal_lstm(cfg, signal_name, device=device)
+        trained_result = train_signal_lstm(
+            cfg,
+            signal_name,
+            device=device,
+            overrides=dict(resolved_overrides_by_signal.get(signal_name) or {}) or None,
+        )
         trained_results.append(trained_result)
         if invalid_validations:
             retrained_signals.append(signal_name)
         else:
             trained_signals.append(signal_name)
 
-    inventory_after = _collect_lstm_artifact_inventory(cfg)
+    inventory_after = _collect_lstm_artifact_inventory(cfg, overrides_by_signal=resolved_overrides_by_signal)
     if not bool(cfg.forecast.auto_train_missing) and (
         inventory_after["missing_signals"] or inventory_after["invalid_artifacts"]
     ):

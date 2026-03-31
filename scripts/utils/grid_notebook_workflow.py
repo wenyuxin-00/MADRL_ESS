@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from controllers.action_feasibility import (
+    build_safety_local_numpy,
+    compute_action_gap_metrics_numpy,
+    merge_action_info_into_step_info,
+)
 from controllers.mpc import solve_single_agent_gurobi_mpc_action
 from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
@@ -19,7 +25,6 @@ PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
 ORACLE_EVAL_MODE = "oracle_eval"
 FORECAST_EVAL_MODE = "forecast_eval"
-VALID_BATTERY_MODES = {"fixed", "from_pv"}
 
 
 def normalize_prediction_mode(prediction_mode: str) -> str:
@@ -54,61 +59,26 @@ def normalize_agent_scale(scale: float | list[float] | tuple[float, ...], *, n_a
     return values.astype(np.float32).tolist()
 
 
-def normalize_battery_mode(battery_mode: str) -> str:
-    normalized = str(battery_mode).strip().lower()
-    if normalized not in VALID_BATTERY_MODES:
-        raise ValueError(
-            f"battery mode must be one of {sorted(VALID_BATTERY_MODES)}, got '{battery_mode}'."
-        )
-    return normalized
-
-
 def resolve_battery_controls(cfg, battery_controls: Mapping[str, object] | None = None) -> dict[str, object]:
     controls = dict(battery_controls or {})
+    capacity_kwh, c_rate, p_max_kw = resolve_fixed_battery_spec(
+        controls.get("battery_capacity", cfg.env.battery_capacity),
+        controls.get("max_charge_rate", cfg.env.max_charge_rate),
+        n_agents=int(cfg.env.num_agents),
+    )
     resolved = {
-        "mode": normalize_battery_mode(controls.get("mode", getattr(cfg.env, "battery_mode", "from_pv"))),
-        "from_pv_power_ratio": float(
-            controls.get("from_pv_power_ratio", getattr(cfg.env, "from_pv_power_ratio", 0.5))
-        ),
-        "from_pv_duration_hours": float(
-            controls.get("from_pv_duration_hours", getattr(cfg.env, "from_pv_duration_hours", 2.5))
-        ),
+        "mode": "fixed",
+        "battery_capacity": list(capacity_kwh),
+        "max_charge_rate": float(c_rate),
+        "p_max_kw": list(p_max_kw),
         "efficiency": float(controls.get("efficiency", cfg.env.efficiency)),
         "init_soc": float(controls.get("init_soc", cfg.env.init_soc)),
         "soc_min": float(controls.get("soc_min", cfg.env.soc_min)),
         "soc_max": float(controls.get("soc_max", cfg.env.soc_max)),
         "soc_target": float(controls.get("soc_target", cfg.env.soc_target)),
     }
-
-    battery_capacity_value = controls.get("battery_capacity", cfg.env.battery_capacity)
-    max_charge_rate_value = controls.get("max_charge_rate", cfg.env.max_charge_rate)
-    if resolved["mode"] == "fixed":
-        capacity_kwh, c_rate, p_max_kw = resolve_fixed_battery_spec(
-            battery_capacity_value,
-            max_charge_rate_value,
-            n_agents=int(cfg.env.num_agents),
-        )
-        resolved["battery_capacity"] = list(capacity_kwh)
-        resolved["max_charge_rate"] = float(c_rate)
-        resolved["p_max_kw"] = list(p_max_kw)
-    else:
-        resolved["battery_capacity"] = float(battery_capacity_value)
-        resolved["max_charge_rate"] = float(max_charge_rate_value)
-        if resolved["battery_capacity"] <= 0.0:
-            raise ValueError(f"battery_capacity must be positive, got {resolved['battery_capacity']}.")
-        if resolved["max_charge_rate"] <= 0.0:
-            raise ValueError(f"max_charge_rate must be positive, got {resolved['max_charge_rate']}.")
     if resolved["efficiency"] <= 0.0 or resolved["efficiency"] > 1.0:
         raise ValueError(f"efficiency must be in (0, 1], got {resolved['efficiency']}.")
-    if resolved["from_pv_power_ratio"] <= 0.0:
-        raise ValueError(
-            f"from_pv_power_ratio must be positive, got {resolved['from_pv_power_ratio']}."
-        )
-    if resolved["from_pv_duration_hours"] <= 0.0:
-        raise ValueError(
-            "from_pv_duration_hours must be positive, "
-            f"got {resolved['from_pv_duration_hours']}."
-        )
     if not 0.0 <= resolved["soc_min"] <= resolved["soc_max"] <= 1.0:
         raise ValueError(
             f"Invalid SoC range: soc_min={resolved['soc_min']}, soc_max={resolved['soc_max']}."
@@ -117,6 +87,58 @@ def resolve_battery_controls(cfg, battery_controls: Mapping[str, object] | None 
         raise ValueError(f"init_soc must be in [0, 1], got {resolved['init_soc']}.")
     if not 0.0 <= resolved["soc_target"] <= 1.0:
         raise ValueError(f"soc_target must be in [0, 1], got {resolved['soc_target']}.")
+    return resolved
+
+
+def _normalize_signal_training_overrides(
+    overrides: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, dict[str, object]]:
+    normalized: dict[str, dict[str, object]] = {}
+    for signal_name, signal_overrides in dict(overrides or {}).items():
+        if not isinstance(signal_overrides, Mapping):
+            raise ValueError(
+                f"signal_training_overrides['{signal_name}'] must be a mapping, got {signal_overrides!r}."
+            )
+        normalized[str(signal_name).strip().lower()] = {
+            str(field_name): value for field_name, value in dict(signal_overrides).items()
+        }
+    return normalized
+
+
+def resolve_forecast_controls(cfg, forecast_controls: Mapping[str, object] | None = None) -> dict[str, object]:
+    controls = dict(forecast_controls or {})
+    target_signals = [str(value) for value in controls.get("target_signals", cfg.forecast.target_signals)]
+    history_window = int(controls.get("history_window", cfg.forecast.history_window))
+    configured_future_horizon = controls.get("future_horizon")
+    if configured_future_horizon is not None and int(configured_future_horizon) != int(cfg.env.future_horizon):
+        raise ValueError(
+            "forecast_controls.future_horizon must match cfg.env.future_horizon, "
+            f"got {configured_future_horizon} vs {cfg.env.future_horizon}."
+        )
+
+    artifact_root = controls.get("artifact_root", cfg.forecast.lstm_artifact_root)
+    resolved_artifact_root = None if artifact_root in (None, "") else str(Path(artifact_root).resolve())
+    signal_training_overrides = _normalize_signal_training_overrides(
+        controls.get("signal_training_overrides", getattr(cfg.forecast, "signal_training_overrides", {}))
+    )
+
+    resolved = {
+        "target_signals": target_signals,
+        "history_window": history_window,
+        "load_model_mode": str(controls.get("load_model_mode", cfg.forecast.load_model_mode)),
+        "load_component_split": bool(controls.get("load_component_split", cfg.forecast.load_component_split)),
+        "load_scaler_type": str(controls.get("load_scaler_type", cfg.forecast.load_scaler_type)),
+        "load_time_feature_mode": str(
+            controls.get("load_time_feature_mode", cfg.forecast.load_time_feature_mode)
+        ),
+        "pv_time_feature_mode": str(controls.get("pv_time_feature_mode", cfg.forecast.pv_time_feature_mode)),
+        "load_hybrid_mode": str(controls.get("load_hybrid_mode", cfg.forecast.load_hybrid_mode)),
+        "load_baseline_mode": str(controls.get("load_baseline_mode", cfg.forecast.load_baseline_mode)),
+        "pv_postprocess_mode": str(controls.get("pv_postprocess_mode", cfg.forecast.pv_postprocess_mode)),
+        "auto_train_missing": bool(controls.get("auto_train_missing", cfg.forecast.auto_train_missing)),
+        "artifact_root": resolved_artifact_root,
+        "signal_training_overrides": signal_training_overrides,
+    }
     return resolved
 
 
@@ -151,6 +173,7 @@ def apply_notebook_experiment_settings(
     pv_scale: float | list[float],
     future_horizon: int,
     battery_controls: Mapping[str, object] | None = None,
+    forecast_controls: Mapping[str, object] | None = None,
     train_year: int | None = None,
     test_year: int | None = None,
 ) -> dict[str, object]:
@@ -180,13 +203,7 @@ def apply_notebook_experiment_settings(
     cfg.data.load_scale = normalize_agent_scale(load_scale, n_agents=cfg.env.num_agents, name="load_scale")
     cfg.data.pv_scale = normalize_agent_scale(pv_scale, n_agents=cfg.env.num_agents, name="pv_scale")
     resolved_battery_controls = resolve_battery_controls(cfg, battery_controls)
-    cfg.env.battery_mode = resolved_battery_controls["mode"]
-    cfg.env.from_pv_power_ratio = resolved_battery_controls["from_pv_power_ratio"]
-    cfg.env.from_pv_duration_hours = resolved_battery_controls["from_pv_duration_hours"]
-    if resolved_battery_controls["mode"] == "fixed":
-        cfg.env.battery_capacity = list(resolved_battery_controls["battery_capacity"])
-    else:
-        cfg.env.battery_capacity = float(resolved_battery_controls["battery_capacity"])
+    cfg.env.battery_capacity = list(resolved_battery_controls["battery_capacity"])
     cfg.env.max_charge_rate = resolved_battery_controls["max_charge_rate"]
     cfg.env.efficiency = resolved_battery_controls["efficiency"]
     cfg.env.init_soc = resolved_battery_controls["init_soc"]
@@ -199,9 +216,26 @@ def apply_notebook_experiment_settings(
 
     resolved_prediction_mode = normalize_prediction_mode(prediction_mode)
     cfg.forecast.type = resolve_forecast_backend(resolved_prediction_mode, cfg.env.future_horizon)
+    resolved_forecast_controls = resolve_forecast_controls(cfg, forecast_controls)
+    cfg.forecast.target_signals = list(resolved_forecast_controls["target_signals"])
+    cfg.forecast.history_window = int(resolved_forecast_controls["history_window"])
+    cfg.forecast.load_model_mode = str(resolved_forecast_controls["load_model_mode"])
+    cfg.forecast.load_component_split = bool(resolved_forecast_controls["load_component_split"])
+    cfg.forecast.load_scaler_type = str(resolved_forecast_controls["load_scaler_type"])
+    cfg.forecast.load_time_feature_mode = str(resolved_forecast_controls["load_time_feature_mode"])
+    cfg.forecast.pv_time_feature_mode = str(resolved_forecast_controls["pv_time_feature_mode"])
+    cfg.forecast.load_hybrid_mode = str(resolved_forecast_controls["load_hybrid_mode"])
+    cfg.forecast.load_baseline_mode = str(resolved_forecast_controls["load_baseline_mode"])
+    cfg.forecast.pv_postprocess_mode = str(resolved_forecast_controls["pv_postprocess_mode"])
+    cfg.forecast.auto_train_missing = bool(resolved_forecast_controls["auto_train_missing"])
+    cfg.forecast.signal_training_overrides = dict(resolved_forecast_controls["signal_training_overrides"])
     cfg.runtime.observation_normalization_state = None
-    if cfg.forecast.type == "lstm" and cfg.forecast.lstm_artifact_root is None:
-        cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
+    if cfg.forecast.type == "lstm":
+        cfg.forecast.lstm_artifact_root = (
+            resolved_forecast_controls["artifact_root"] or str(get_default_lstm_artifact_dir())
+        )
+    else:
+        cfg.forecast.lstm_artifact_root = resolved_forecast_controls["artifact_root"]
 
     return {
         "prediction_mode": resolved_prediction_mode,
@@ -214,6 +248,15 @@ def apply_notebook_experiment_settings(
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
         "battery": dict(resolved_battery_controls),
+        "forecast": {
+            "artifact_root": cfg.forecast.lstm_artifact_root,
+            "target_signals": list(cfg.forecast.target_signals),
+            "history_window": int(cfg.forecast.history_window),
+            "auto_train_missing": bool(cfg.forecast.auto_train_missing),
+            "signal_training_overrides": dict(cfg.forecast.signal_training_overrides),
+            "load_component_split": bool(cfg.forecast.load_component_split),
+            "load_scaler_type": str(cfg.forecast.load_scaler_type),
+        },
         "train_year": int(cfg.data.train_year),
         "test_year": int(cfg.data.test_year),
         "agent_bus_ids": list(cfg.grid.agent_bus_ids),
@@ -270,6 +313,11 @@ def _power_to_normalized_action(power_kw: float, power_limit_kw: float) -> np.nd
     return np.asarray([action], dtype=np.float32)
 
 
+def _power_to_full_action(power_kw: float, power_limit_kw: float, *, pv_action: float = 1.0) -> np.ndarray:
+    battery_action = _power_to_normalized_action(power_kw, power_limit_kw)[0]
+    return np.asarray([battery_action, float(pv_action)], dtype=np.float32)
+
+
 def _solve_single_agent_mpc_action(
     *,
     price_seq: np.ndarray,
@@ -297,7 +345,7 @@ def _solve_single_agent_mpc_action(
     )
 
 
-def _mpc_policy(env, obs: dict[str, np.ndarray]) -> list[np.ndarray]:
+def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
     actions: list[np.ndarray] = []
     price_seq = np.asarray(obs["price_seq"], dtype=np.float32)
     load_seq = np.asarray(obs["load_seq"], dtype=np.float32)
@@ -315,8 +363,30 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> list[np.ndarray]:
             soc_min=float(env.soc_min),
             soc_max=float(env.soc_max),
         )
-        actions.append(_power_to_normalized_action(power_kw, float(env.agent_p_max[agent_idx])))
-    return actions
+        actions.append(_power_to_full_action(power_kw, float(env.agent_p_max[agent_idx]), pv_action=1.0))
+    load_raw = (
+        np.asarray(env.get_signal_step("load"), dtype=np.float32)
+        if hasattr(env, "get_signal_step")
+        else np.asarray(load_seq[:, 0], dtype=np.float32)
+    )
+    pv_raw = (
+        np.asarray(env.get_signal_step("pv"), dtype=np.float32)
+        if hasattr(env, "get_signal_step")
+        else np.asarray(pv_seq[:, 0], dtype=np.float32)
+    )
+    action_array = np.asarray(actions, dtype=np.float32)
+    action_info = compute_action_gap_metrics_numpy(
+        build_safety_local_numpy(
+            soc=np.asarray(env.soc, dtype=np.float32),
+            load_raw=load_raw,
+            pv_raw=pv_raw,
+            battery_capacity_kwh=np.asarray(env.agent_c_bat, dtype=np.float32),
+            p_max_kw=np.asarray(env.agent_p_max, dtype=np.float32),
+        ),
+        action_array,
+        action_array,
+    )
+    return actions, action_info
 
 
 @dataclass
@@ -366,11 +436,27 @@ def collect_controller_rollout(
 
                 if controller is not None:
                     actions = controller.act(obs, deterministic=True)
+                    action_info = getattr(controller, "last_action_info", None)
                 else:
-                    actions = action_fn(env, raw_obs)
+                    action_result = action_fn(env, raw_obs)
+                    if isinstance(action_result, tuple) and len(action_result) == 2:
+                        actions, action_info = action_result
+                    else:
+                        actions = action_result
+                        action_info = None
 
                 next_obs, reward, terminated, truncated, info = env.step(actions)
-                del reward, terminated, truncated
+                reward_array = np.asarray(reward, dtype=np.float32).reshape(-1)
+                apply_action_penalty = bool(getattr(controller, "apply_action_penalty", False))
+                info, action_penalty = merge_action_info_into_step_info(
+                    info,
+                    action_info,
+                    action_pen_weight=float(cfg.reward.w_action_pen),
+                    apply_action_penalty=apply_action_penalty,
+                )
+                reward_array = reward_array - np.asarray(action_penalty, dtype=np.float32)
+                info["reward"] = reward_array.astype(np.float32)
+                del terminated, truncated
                 raw_next_obs = (
                     env.obs_builder.build_raw(env)
                     if hasattr(env.obs_builder, "build_raw") and not bool(info.get("episode_done", False))
@@ -378,6 +464,67 @@ def collect_controller_rollout(
                 )
 
                 cost_per_agent = _operating_cost_per_agent(info, float(env.dt))
+                base_net_load = np.asarray(
+                    info.get(
+                        "base_net_load",
+                        np.asarray(info["load"], dtype=np.float32) - np.asarray(info["pv"], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                base_net_load_effective = np.asarray(
+                    info.get("base_net_load_effective", base_net_load),
+                    dtype=np.float32,
+                )
+                net_load = np.asarray(
+                    info.get(
+                        "net_load",
+                        base_net_load_effective + np.asarray(info["e_bat"], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                pv_raw = np.asarray(info.get("pv_raw", info["pv"]), dtype=np.float32)
+                pv_effective = np.asarray(info.get("pv_effective", pv_raw), dtype=np.float32)
+                pv_curtail = np.asarray(info.get("pv_curtail", pv_raw - pv_effective), dtype=np.float32)
+                pv_utilization = np.asarray(
+                    info.get("pv_utilization", np.ones_like(pv_raw, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                grid_import = np.asarray(
+                    info.get("grid_import_kw", np.maximum(net_load, 0.0)),
+                    dtype=np.float32,
+                )
+                grid_export = np.asarray(
+                    info.get("grid_export_kw", np.maximum(-net_load, 0.0)),
+                    dtype=np.float32,
+                )
+                controller_action_gap = np.asarray(
+                    info.get("controller_action_gap", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                battery_action_req = np.asarray(
+                    info.get("battery_action_req", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                battery_action_exec = np.asarray(
+                    info.get("battery_action_exec", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                pv_action_req = np.asarray(
+                    info.get("pv_action_req", np.ones(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                pv_action_exec = np.asarray(
+                    info.get("pv_action_exec", info.get("pv_action", np.ones(env.n, dtype=np.float32))),
+                    dtype=np.float32,
+                )
+                action_penalty_unweighted = np.asarray(
+                    info.get("action_penalty_unweighted", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                action_penalty = np.asarray(info.get("r_action_pen", np.zeros(env.n, dtype=np.float32)), dtype=np.float32)
+                battery_power = np.asarray(info["e_bat"], dtype=np.float32)
+                battery_charge = np.clip(battery_power, 0.0, None).astype(np.float32)
+                battery_discharge = np.maximum(-battery_power, 0.0).astype(np.float32)
                 step_rows.append(
                     {
                         "controller": label,
@@ -386,6 +533,19 @@ def collect_controller_rollout(
                         "timestamp": timestamp,
                         "price": float(info["price"]),
                         "price_pred": float(price_pred),
+                        "base_net_load_total": float(np.sum(base_net_load)),
+                        "base_net_load_effective_total": float(np.sum(base_net_load_effective)),
+                        "net_load_total": float(np.sum(net_load)),
+                        "load_total": float(np.sum(np.asarray(info["load"], dtype=np.float32))),
+                        "pv_raw_total": float(np.sum(pv_raw)),
+                        "pv_effective_total": float(np.sum(pv_effective)),
+                        "pv_curtail_total": float(np.sum(pv_curtail)),
+                        "grid_import_total": float(np.sum(grid_import)),
+                        "grid_export_total": float(np.sum(grid_export)),
+                        "battery_charge_total": float(np.sum(battery_charge)),
+                        "battery_discharge_total": float(np.sum(battery_discharge)),
+                        "controller_action_gap_total": float(np.sum(controller_action_gap)),
+                        "action_penalty_total": float(np.sum(action_penalty)),
                         "operating_cost": float(np.sum(cost_per_agent)),
                     }
                 )
@@ -402,8 +562,24 @@ def collect_controller_rollout(
                             "load": float(np.asarray(info["load"], dtype=np.float32)[agent_idx]),
                             "load_pred": float(np.asarray(load_pred, dtype=np.float32)[agent_idx]),
                             "pv": float(np.asarray(info["pv"], dtype=np.float32)[agent_idx]),
+                            "pv_raw": float(pv_raw[agent_idx]),
+                            "pv_effective": float(pv_effective[agent_idx]),
+                            "pv_curtail": float(pv_curtail[agent_idx]),
+                            "pv_utilization": float(pv_utilization[agent_idx]),
                             "pv_pred": float(np.asarray(pv_pred, dtype=np.float32)[agent_idx]),
-                            "e_bat": float(np.asarray(info["e_bat"], dtype=np.float32)[agent_idx]),
+                            "base_net_load": float(base_net_load[agent_idx]),
+                            "base_net_load_effective": float(base_net_load_effective[agent_idx]),
+                            "net_load": float(net_load[agent_idx]),
+                            "grid_import_kw": float(grid_import[agent_idx]),
+                            "grid_export_kw": float(grid_export[agent_idx]),
+                            "e_bat": float(battery_power[agent_idx]),
+                            "battery_action_req": float(battery_action_req[agent_idx]),
+                            "battery_action_exec": float(battery_action_exec[agent_idx]),
+                            "pv_action_req": float(pv_action_req[agent_idx]),
+                            "pv_action_exec": float(pv_action_exec[agent_idx]),
+                            "controller_action_gap": float(controller_action_gap[agent_idx]),
+                            "action_penalty_unweighted": float(action_penalty_unweighted[agent_idx]),
+                            "r_action_pen": float(action_penalty[agent_idx]),
                             "soc": float(np.asarray(info["soc_next"], dtype=np.float32)[agent_idx]),
                             "operating_cost": float(cost_per_agent[agent_idx]),
                         }
@@ -603,7 +779,7 @@ def plot_rollout_dashboard(
 
     agent_profiles = list(rollout.meta["agent_profiles"])
     n_agents = len(agent_profiles)
-    main_axis_count = 4 + n_agents
+    main_axis_count = 6 + n_agents
     if figsize is None:
         figsize = (18.0, 2.8 * main_axis_count)
 
@@ -649,26 +825,7 @@ def plot_rollout_dashboard(
         axis.grid(True, alpha=0.25)
         axis.legend(loc="upper right", ncol=2)
 
-    for agent_offset, profile in enumerate(agent_profiles, start=3):
-        axis = axes[agent_offset]
-        agent_frame = agent_df.loc[agent_df["agent_profile"] == profile]
-        charge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), 0.0, None)
-        discharge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), None, 0.0)
-        axis.bar(agent_frame["timestamp"], charge, width=0.008, color="#dc2626", alpha=0.7, label="Charge")
-        axis.bar(agent_frame["timestamp"], discharge, width=0.008, color="#2563eb", alpha=0.7, label="Discharge")
-        axis.set_ylabel(f"{profile}\nP_bat")
-        axis.grid(True, alpha=0.25)
-
-        soc_axis = axis.twinx()
-        soc_axis.plot(agent_frame["timestamp"], agent_frame["soc"], color="#111827", linewidth=1.2, label="SoC")
-        soc_axis.set_ylabel("SoC")
-        soc_axis.set_ylim(0.0, 1.0)
-
-        handles_1, labels_1 = axis.get_legend_handles_labels()
-        handles_2, labels_2 = soc_axis.get_legend_handles_labels()
-        axis.legend(handles_1 + handles_2, labels_1 + labels_2, loc="upper right")
-
-    voltage_axis = axes[-1]
+    voltage_axis = axes[3]
     if grid_df.empty:
         raise ValueError("Rollout does not contain full-grid voltage traces.")
 
@@ -714,12 +871,163 @@ def plot_rollout_dashboard(
         label="V max",
     )
     voltage_axis.set_ylabel("Voltage [p.u.]")
-    voltage_axis.set_xlabel("Timestamp")
     voltage_axis.grid(True, alpha=0.25)
     voltage_axis.legend(loc="upper right", ncol=2)
 
+    net_load_axis = axes[4]
+    net_load_axis.plot(
+        step_df["timestamp"],
+        step_df["base_net_load_total"],
+        color="#111827",
+        linewidth=1.6,
+        label="Raw net load",
+    )
+    if "base_net_load_effective_total" in step_df.columns:
+        net_load_axis.plot(
+            step_df["timestamp"],
+            step_df["base_net_load_effective_total"],
+            color="#16a34a",
+            linewidth=1.4,
+            linestyle="-.",
+            label="Post-curtail net load",
+        )
+    net_load_axis.plot(
+        step_df["timestamp"],
+        step_df["net_load_total"],
+        color="#2563eb",
+        linewidth=1.5,
+        linestyle="--",
+        label="Post-action net load",
+    )
+    trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
+    if trafo_limit_kw is not None:
+        trafo_limit_value = float(trafo_limit_kw)
+        if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
+            net_load_axis.axhline(
+                trafo_limit_value,
+                color="#dc2626",
+                linestyle=":",
+                linewidth=1.2,
+                label=f"Approx trafo +limit ({trafo_limit_value:.1f} kW)",
+            )
+            net_load_axis.axhline(
+                -trafo_limit_value,
+                color="#dc2626",
+                linestyle=":",
+                linewidth=1.2,
+                label=f"Approx trafo -limit ({trafo_limit_value:.1f} kW)",
+            )
+    net_load_axis.set_ylabel("Net load")
+    net_load_axis.grid(True, alpha=0.25)
+    net_load_axis.legend(loc="upper right")
+
+    pv_axis = axes[5]
+    if "pv_effective_total" in step_df.columns:
+        pv_axis.plot(
+            step_df["timestamp"],
+            step_df["pv_raw_total"],
+            color="#ea580c",
+            linewidth=1.5,
+            label="Raw PV",
+        )
+        pv_axis.plot(
+            step_df["timestamp"],
+            step_df["pv_effective_total"],
+            color="#16a34a",
+            linewidth=1.5,
+            linestyle="--",
+            label="Effective PV",
+        )
+        pv_axis.bar(
+            step_df["timestamp"],
+            step_df["pv_curtail_total"],
+            width=0.008,
+            color="#dc2626",
+            alpha=0.35,
+            label="Curtailment",
+        )
+        pv_axis.set_ylabel("PV")
+        pv_axis.grid(True, alpha=0.25)
+        pv_axis.legend(loc="upper right")
+
+    for agent_offset, profile in enumerate(agent_profiles, start=6):
+        axis = axes[agent_offset]
+        agent_frame = agent_df.loc[agent_df["agent_profile"] == profile]
+        charge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), 0.0, None)
+        discharge = np.clip(agent_frame["e_bat"].to_numpy(dtype=np.float32), None, 0.0)
+        axis.bar(agent_frame["timestamp"], charge, width=0.008, color="#dc2626", alpha=0.7, label="Charge")
+        axis.bar(agent_frame["timestamp"], discharge, width=0.008, color="#2563eb", alpha=0.7, label="Discharge")
+        axis.set_ylabel(f"{profile}\nP_bat")
+        axis.grid(True, alpha=0.25)
+
+        soc_axis = axis.twinx()
+        soc_axis.plot(agent_frame["timestamp"], agent_frame["soc"], color="#111827", linewidth=1.2, label="SoC")
+        soc_axis.set_ylabel("SoC")
+        soc_axis.set_ylim(0.0, 1.0)
+
+        handles_1, labels_1 = axis.get_legend_handles_labels()
+        handles_2, labels_2 = soc_axis.get_legend_handles_labels()
+        axis.legend(handles_1 + handles_2, labels_1 + labels_2, loc="upper right")
+
+    axes[-1].set_xlabel("Timestamp")
     figure.tight_layout()
     figure._dashboard_main_axes = list(axes)
+    return figure
+
+
+def plot_power_balance_bars(
+    rollout: RolloutResult,
+    *,
+    figsize: tuple[float, float] = (18.0, 4.8),
+):
+    step_df = rollout.step_df.copy()
+    if step_df.empty:
+        raise ValueError("Rollout is empty; nothing to plot.")
+
+    required_columns = {
+        "load_total",
+        "battery_charge_total",
+        "pv_effective_total",
+        "grid_import_total",
+        "battery_discharge_total",
+    }
+    missing = sorted(required_columns.difference(step_df.columns))
+    if missing:
+        raise ValueError(f"Rollout step_df is missing required power-balance columns: {missing}")
+
+    figure, axis = plt.subplots(1, 1, figsize=figsize)
+    timestamps = step_df["timestamp"]
+    width = 0.008
+
+    positive_specs = [
+        ("load_total", "Load", "#111827"),
+        ("battery_charge_total", "Charge", "#dc2626"),
+    ]
+    negative_specs = [
+        ("pv_effective_total", "PV", "#16a34a"),
+        ("grid_import_total", "Grid import", "#2563eb"),
+        ("battery_discharge_total", "Discharge", "#7c3aed"),
+    ]
+
+    positive_bottom = np.zeros(len(step_df), dtype=np.float32)
+    for column, label, color in positive_specs:
+        values = step_df[column].to_numpy(dtype=np.float32)
+        axis.bar(timestamps, values, width=width, bottom=positive_bottom, color=color, alpha=0.78, label=label)
+        positive_bottom = positive_bottom + values
+
+    negative_bottom = np.zeros(len(step_df), dtype=np.float32)
+    for column, label, color in negative_specs:
+        values = step_df[column].to_numpy(dtype=np.float32)
+        axis.bar(timestamps, -values, width=width, bottom=negative_bottom, color=color, alpha=0.78, label=label)
+        negative_bottom = negative_bottom - values
+
+    axis.axhline(0.0, color="#111827", linewidth=1.0)
+    axis.set_title(f"Power Balance - {rollout.meta['controller']}")
+    axis.set_ylabel("kW")
+    axis.set_xlabel("Timestamp")
+    axis.grid(True, axis="y", alpha=0.25)
+    axis.legend(loc="upper right", ncol=3)
+    figure.tight_layout()
     return figure
 
 
@@ -939,6 +1247,7 @@ __all__ = [
     "normalize_date_input",
     "normalize_prediction_mode",
     "plot_operating_cost_comparison",
+    "plot_power_balance_bars",
     "plot_rollout_comparison_dashboard",
     "plot_rollout_dashboard",
     "plot_test_rollout",

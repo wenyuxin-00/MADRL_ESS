@@ -13,7 +13,7 @@ from envs.observation.normalization import build_observation_normalizer
 from envs.rewards import NormalReward
 from predictors.registry import build_forecaster
 from scripts.utils.madrl_observation_cache_lab import ObservationCacheStore, build_or_load_observation_cache
-from tests.support.helpers import make_smoke_config
+from tests.support.helpers import make_smoke_config, write_prosumer_processed_dataset
 
 
 class _FakeGridCore:
@@ -74,6 +74,7 @@ def _assert_nested_close(lhs, rhs) -> None:
 
 def _make_lstm_cfg(tmp_path):
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
+    cfg.runtime.observation_cache_root = tmp_path / "cache"
     cfg.forecast.type = "lstm"
     cfg.forecast.history_window = 4
     cfg.forecast.lstm_hidden_size = 8
@@ -113,9 +114,37 @@ def _build_stepwise_episode_forecast_matrix(
     return np.stack(rows, axis=0).astype(np.float32)
 
 
+def _combine_episode_history(episode: dict) -> tuple[dict[str, np.ndarray], list[str], int]:
+    signals = {
+        key: np.asarray(value, dtype=np.float32)
+        for key, value in dict(episode.get("signals", {})).items()
+    }
+    history_signals = {
+        key: np.asarray(value, dtype=np.float32)
+        for key, value in dict(episode.get("history_signals", {})).items()
+    }
+    timestamps = list(dict(episode.get("meta", {})).get("timestamps") or [])
+    history_timestamps = [str(value) for value in list(episode.get("history_timestamps") or [])]
+    prefix_length = int(episode.get("history_length", len(history_timestamps)))
+
+    merged: dict[str, np.ndarray] = {}
+    for key, value in signals.items():
+        prefix = np.asarray(history_signals.get(key), dtype=np.float32)
+        if prefix.size == 0:
+            merged[key] = value.copy()
+        else:
+            merged[key] = np.concatenate([prefix, value], axis=0).astype(np.float32, copy=False)
+    return merged, [*history_timestamps, *timestamps], prefix_length
+
+
 def test_mainline_cache_matches_default_builder_for_lstm(tmp_path) -> None:
     cfg = _make_lstm_cfg(tmp_path)
-    cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
+    cache_result = build_or_load_observation_cache(
+        cfg,
+        split="train",
+        refresh=True,
+        root=cfg.runtime.observation_cache_root,
+    )
     store = ObservationCacheStore(cache_result.cache_dir)
 
     dataset = build_dataset(cfg, mode="train")
@@ -139,6 +168,8 @@ def test_mainline_cache_matches_default_builder_for_lstm(tmp_path) -> None:
 
     try:
         base_env.reset(episode_idx=0)
+        assert base_env.get_signal_history("price").shape[0] == int(cfg.forecast.history_window) + 1
+        assert len(base_env.get_signal_history_timestamps()) == int(cfg.forecast.history_window) + 1
         episode_cache = store.episode(0)
         for _ in range(2):
             raw_obs = base_env.obs_builder.build_raw(base_env)
@@ -147,7 +178,9 @@ def test_mainline_cache_matches_default_builder_for_lstm(tmp_path) -> None:
             assert np.allclose(episode_cache["price_seq"][step_idx], raw_obs["price_seq"])
             assert np.allclose(episode_cache["load_seq"][step_idx], raw_obs["load_seq"])
             assert np.allclose(episode_cache["pv_seq"][step_idx], raw_obs["pv_seq"])
-            base_env.step([np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)])
+            base_env.step(
+                [np.array([0.0, 1.0], dtype=np.float32) for _ in range(cfg.env.num_agents)]
+            )
     finally:
         base_env.close()
 
@@ -157,39 +190,76 @@ def test_lstm_forecaster_predict_episode_matrix_matches_stepwise_predict(tmp_pat
     forecaster = build_forecaster(cfg)
     dataset = build_dataset(cfg, mode="train")
     episode = dataset.get_episode(0)
-    signals = {
-        key: np.asarray(value, dtype=np.float32)
-        for key, value in dict(episode.get("signals", {})).items()
-    }
+    signals, timestamps, prefix_length = _combine_episode_history(episode)
     meta = dict(episode.get("meta", {}))
-    timestamps = list(meta.get("timestamps") or [])
     horizon = int(cfg.env.future_horizon) + 1
 
     forecaster.reset()
     forecaster.set_episode(signals, meta)
 
     for signal_name in ("price", "load", "pv"):
-        expected = _build_stepwise_episode_forecast_matrix(
+        expected_full = _build_stepwise_episode_forecast_matrix(
             forecaster,
             signals[signal_name],
             signal_name=signal_name,
             timestamps=timestamps,
             horizon=horizon,
         )
-        actual = forecaster.predict_episode_matrix(
+        actual_full = forecaster.predict_episode_matrix(
             signals[signal_name],
             horizon,
             signal_name=signal_name,
             history_timestamps=timestamps,
             batch_size=8,
         )
+        expected = expected_full[prefix_length:]
+        actual = actual_full[prefix_length:]
         assert actual.shape == expected.shape
         assert np.allclose(actual, expected)
 
 
+def test_dataset_episode_exposes_hidden_history_for_lstm(tmp_path) -> None:
+    cfg = _make_lstm_cfg(tmp_path)
+    dataset = build_dataset(cfg, mode="train")
+    episode = dataset.get_episode(0)
+
+    assert int(episode["history_length"]) == int(cfg.forecast.history_window)
+    assert len(episode["history_timestamps"]) == int(cfg.forecast.history_window)
+    assert np.asarray(episode["history_signals"]["price"], dtype=np.float32).shape[0] == int(cfg.forecast.history_window)
+    assert np.asarray(episode["signals"]["price"], dtype=np.float32).shape[0] == int(cfg.env.episode_limit)
+
+
+def test_test_split_keeps_pre_start_history_for_warmup(tmp_path) -> None:
+    cfg = _make_lstm_cfg(tmp_path)
+    cfg.data.agent_profiles = ["SFH12", "SFH14"]
+    cfg.data.data_dir = tmp_path / "data_windowed"
+    write_prosumer_processed_dataset(
+        cfg.data.data_dir,
+        agent_profiles=list(cfg.data.agent_profiles),
+        train_steps=24,
+        test_steps=110,
+    )
+    cfg.data.test_start_date = "2020-01-02"
+    cfg.data.test_end_date = "2020-01-02"
+
+    dataset = build_dataset(cfg, mode="test")
+    episode = dataset.get_episode(0)
+    history_timestamps = list(episode["history_timestamps"])
+    active_timestamps = list(dict(episode["meta"]).get("timestamps") or [])
+
+    assert len(history_timestamps) == int(cfg.forecast.history_window)
+    assert history_timestamps[-1] < active_timestamps[0]
+
+
 def test_mainline_cached_env_matches_base_env_on_test_split(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
-    cache_result = build_or_load_observation_cache(cfg, split="test", refresh=True)
+    cfg.runtime.observation_cache_root = tmp_path / "cache"
+    cache_result = build_or_load_observation_cache(
+        cfg,
+        split="test",
+        refresh=True,
+        root=cfg.runtime.observation_cache_root,
+    )
 
     normalizer = build_observation_normalizer(cfg)
     base_env = GridEnv(
@@ -228,7 +298,7 @@ def test_mainline_cached_env_matches_base_env_on_test_split(tmp_path) -> None:
         cached_obs, _ = cached_env.reset(episode_idx=0)
         _assert_nested_close(base_obs, cached_obs)
 
-        actions = [np.asarray([0.1], dtype=np.float32) for _ in range(cfg.env.num_agents)]
+        actions = [np.asarray([0.1, 1.0], dtype=np.float32) for _ in range(cfg.env.num_agents)]
         for _ in range(2):
             next_base_obs, base_reward, base_term, base_trunc, base_info = base_env.step(actions)
             next_cached_obs, cached_reward, cached_term, cached_trunc, cached_info = cached_env.step(actions)
@@ -247,7 +317,13 @@ def test_mainline_cached_env_matches_base_env_on_test_split(tmp_path) -> None:
 
 def test_mainline_train_env_returns_only_episode_done_and_components(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
-    cache_result = build_or_load_observation_cache(cfg, split="train", refresh=True)
+    cfg.runtime.observation_cache_root = tmp_path / "cache"
+    cache_result = build_or_load_observation_cache(
+        cfg,
+        split="train",
+        refresh=True,
+        root=cfg.runtime.observation_cache_root,
+    )
 
     normalizer = build_observation_normalizer(cfg)
     train_env = GridEnv(
@@ -270,7 +346,9 @@ def test_mainline_train_env_returns_only_episode_done_and_components(tmp_path) -
 
     try:
         train_env.reset(episode_idx=0)
-        _, _, _, _, info = train_env.step([np.asarray([0.1], dtype=np.float32) for _ in range(cfg.env.num_agents)])
+        _, _, _, _, info = train_env.step(
+            [np.asarray([0.1, 1.0], dtype=np.float32) for _ in range(cfg.env.num_agents)]
+        )
     finally:
         train_env.close()
 

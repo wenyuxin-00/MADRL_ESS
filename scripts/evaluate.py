@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from controllers.action_feasibility import merge_action_info_into_step_info
 from scripts.recorders.episode_recorder import append_step_record, init_episode_record
 from scripts.recorders.grid_recorder import append_grid_step_record, init_grid_record
 
@@ -46,8 +47,18 @@ def evaluate_controller(
         while not done:
             action_n = controller.act(obs_n, deterministic=deterministic)
             obs_n, r_n, terminated_n, truncated_n, info = env.step(action_n)
+            info, action_penalty = merge_action_info_into_step_info(
+                info,
+                getattr(controller, "last_action_info", None),
+                action_pen_weight=float(getattr(getattr(env, "cfg", object()), "reward", object()).w_action_pen)
+                if hasattr(getattr(env, "cfg", None), "reward")
+                else 0.0,
+                apply_action_penalty=bool(getattr(controller, "apply_action_penalty", False)),
+            )
+            reward_array = np.asarray(r_n, dtype=np.float32).reshape(-1) - np.asarray(action_penalty, dtype=np.float32)
+            info["reward"] = reward_array.astype(np.float32)
 
-            step_total = float(np.sum(np.asarray(r_n, dtype=np.float32)))
+            step_total = float(np.sum(reward_array))
             episode_reward += step_total
 
             if history is not None:

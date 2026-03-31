@@ -39,7 +39,7 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
         project_root=tmp_path,
         experiment_controls={"seed": 7, "algorithm": "MATD3"},
         data_controls={"prediction_mode": "perfect"},
-        battery_controls={"mode": "from_pv", "from_pv_power_ratio": 0.5, "from_pv_duration_hours": 2.5},
+        battery_controls={"battery_capacity": [25.0, 25.0, 25.0, 25.0, 25.0], "max_charge_rate": 0.4},
         train_controls={"profile": "gpu_fast", "launch_mode": "external", "train_episodes": 100},
         checkpoint_controls={"experiment_name": "grid_mainline"},
         env_name="GridTrainMainline",
@@ -210,3 +210,138 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert "agent_update_time_s" in result["perf_summary"]
     assert "cache_build_time_s" in result["perf_summary"]
     assert "cache_hit" in result["perf_summary"]
+    assert result["safety_summary"]["enabled"] is False
+    assert result["safety_controls"]["enabled"] is False
+
+
+def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
+    data_dir = tmp_path / "data"
+    write_prosumer_processed_dataset(
+        data_dir,
+        agent_profiles=["SFH12", "SFH14"],
+        train_steps=288,
+        test_steps=288,
+    )
+
+    controls_dir = tmp_path / "cs"
+    controls_dir.mkdir(parents=True, exist_ok=True)
+    experiment_controls = {
+        "algorithm": "MATD3_SAFE_POC",
+        "seed": 0,
+        "runtime_mode": "performance",
+        "device_request": "cpu",
+        "require_cuda": False,
+        "safety_controls": {
+            "enabled": True,
+            "projection_iters": 4,
+            "voltage_margin_pu": 0.005,
+            "line_margin_pct": 5.0,
+            "trafo_margin_pct": 5.0,
+            "record_diagnostics": True,
+        },
+    }
+    data_controls = {
+        "prediction_mode": "perfect",
+        "test_start_date": 20200101,
+        "test_end_date": 20200103,
+        "agent_profiles": ["SFH12", "SFH14"],
+        "agent_bus_ids": [6, 10],
+        "load_scale": [1.0, 1.0],
+        "pv_scale": [1.0, 1.0],
+        "future_horizon": 1,
+        "train_year": 2019,
+        "test_year": 2020,
+    }
+    battery_controls = {
+        "mode": "fixed",
+        "battery_capacity": [5.0, 6.0],
+        "max_charge_rate": 0.5,
+        "efficiency": 0.95,
+        "init_soc": 0.5,
+        "soc_min": 0.05,
+        "soc_max": 0.95,
+        "soc_target": 0.5,
+    }
+    train_controls = {
+        "launch_mode": "external",
+        "profile": "base",
+        "model_family": "mlp",
+        "num_envs": 1,
+        "vec_env_type": "dummy",
+        "train_episodes": 1,
+        "max_train_steps": 4,
+        "batch_size": 2,
+        "buffer_size": 32,
+        "update_interval": 1,
+        "updates_per_step": 1,
+        "policy_update_freq": 2,
+        "use_noise_decay": False,
+        "show_progress": False,
+        "progress_postfix_interval": 2,
+        "noise_std_init": 0.2,
+        "noise_std_min": 0.05,
+    }
+    checkpoint_controls = {
+        "experiment_name": "grid_mainline_safe_poc",
+        "checkpoint_root": str(tmp_path / "ck"),
+    }
+
+    experiment_path = controls_dir / "experiment_controls.json"
+    data_path = controls_dir / "data_controls.json"
+    battery_path = controls_dir / "battery_controls.json"
+    train_path = controls_dir / "train_controls.json"
+    checkpoint_path = controls_dir / "checkpoint_controls.json"
+    result_path = controls_dir / "result.json"
+
+    experiment_path.write_text(json.dumps(experiment_controls), encoding="utf-8")
+    data_path.write_text(json.dumps(data_controls), encoding="utf-8")
+    battery_path.write_text(json.dumps(battery_controls), encoding="utf-8")
+    train_path.write_text(json.dumps(train_controls), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps(checkpoint_controls), encoding="utf-8")
+
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.run_train_mainline",
+        "--experiment-controls",
+        str(experiment_path),
+        "--data-controls",
+        str(data_path),
+        "--battery-controls",
+        str(battery_path),
+        "--train-controls",
+        str(train_path),
+        "--checkpoint-controls",
+        str(checkpoint_path),
+        "--data-dir",
+        str(data_dir),
+        "--result-json",
+        str(result_path),
+        "--env-name",
+        "GridTrainMainlineSafePOC",
+        "--run-number",
+        "1",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+
+    assert result["algorithm"] == "MATD3_SAFE_POC"
+    assert result["safety_controls"]["enabled"] is True
+    assert result["safety_summary"]["enabled"] is True
+    assert result["safety_summary"]["projection_batches"] > 0
+    assert result["safety_summary"]["rollout_projection_calls"] > 0
+    assert result["safety_summary"]["target_projection_calls"] > 0
+    assert result["safety_summary"]["actor_projection_calls"] >= 0
+    assert result["safety_summary"]["projection_time_s"] >= 0.0
+    assert result["perf_summary"]["projection_time_s"] >= 0.0
+    assert "target_projection_time_s" in result["perf_summary"]
+    assert "actor_projection_time_s" in result["perf_summary"]
+    assert Path(result["model_root"]).parts[-4:-1] == ("MATD3_SAFE_POC", "perfect", "grid_mainline_safe_poc")

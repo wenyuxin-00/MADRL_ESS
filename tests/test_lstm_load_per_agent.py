@@ -142,6 +142,20 @@ def test_build_forecaster_uses_per_agent_load_bundle(tmp_path) -> None:
     assert all(runtime.baseline_mode == "last_value" for runtime in forecaster.signal_runtimes["load"])
 
 
+def test_build_forecaster_reuses_cfg_signal_training_overrides(tmp_path) -> None:
+    cfg = _make_load_only_cfg(tmp_path)
+    overrides = {"hidden_size": 12, "num_layers": 2, "dropout": 0.1, "epochs": 1}
+    cfg.forecast.signal_training_overrides = {"load": dict(overrides)}
+    cfg.forecast.auto_train_missing = False
+    train_signal_lstm(cfg, "load", overrides=overrides, show_progress=False)
+
+    forecaster = build_forecaster(cfg)
+
+    assert isinstance(forecaster, LSTMForecaster)
+    assert "load" in forecaster.signal_runtimes
+    assert len(forecaster.signal_runtimes["load"]) == cfg.env.num_agents
+
+
 def test_collect_available_lstm_artifacts_accepts_notebook_overrides(tmp_path) -> None:
     cfg = _make_load_only_cfg(tmp_path)
     overrides = {"hidden_size": 12, "num_layers": 2, "dropout": 0.1, "epochs": 1}
@@ -149,5 +163,17 @@ def test_collect_available_lstm_artifacts_accepts_notebook_overrides(tmp_path) -
     train_signal_lstm(cfg, "load", overrides=overrides, show_progress=False)
 
     artifact_map = collect_available_lstm_artifacts(cfg, overrides_by_signal={"load": overrides})
+    assert "load" in artifact_map
+    assert len(artifact_map["load"]) == cfg.env.num_agents
+
+
+def test_collect_available_lstm_artifacts_uses_cfg_signal_training_overrides(tmp_path) -> None:
+    cfg = _make_load_only_cfg(tmp_path)
+    overrides = {"hidden_size": 12, "num_layers": 2, "dropout": 0.1, "epochs": 1}
+    cfg.forecast.signal_training_overrides = {"load": dict(overrides)}
+
+    train_signal_lstm(cfg, "load", overrides=overrides, show_progress=False)
+
+    artifact_map = collect_available_lstm_artifacts(cfg)
     assert "load" in artifact_map
     assert len(artifact_map["load"]) == cfg.env.num_agents

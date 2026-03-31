@@ -38,11 +38,8 @@ def test_run_mainline_ab_smoke_outputs_cold_and_warm_mainline_rows(tmp_path):
         "test_year": 2020,
     }
     battery_controls = {
-        "mode": "from_pv",
-        "from_pv_power_ratio": 0.5,
-        "from_pv_duration_hours": 2.5,
-        "battery_capacity": 5.0,
-        "max_charge_rate": 2.5,
+        "battery_capacity": [5.0, 5.0],
+        "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
         "soc_min": 0.05,

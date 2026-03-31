@@ -99,6 +99,8 @@ def _current_timestamp_value(env) -> str:
 
 
 def _history_timestamps(env) -> list[str]:
+    if hasattr(env, "get_signal_history_timestamps"):
+        return [str(timestamp) for timestamp in env.get_signal_history_timestamps()]
     timestamps = list(dict(getattr(env, "episode_meta", {})).get("timestamps") or [])
     if not timestamps:
         return []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 from typing import Any
 
 
@@ -29,18 +30,34 @@ def _resolve_positive_scalar(value: object, *, name: str) -> float:
     return scalar
 
 
+def _coerce_vector_like(value: object) -> list[object] | None:
+    if isinstance(value, (str, bytes, bytearray)):
+        return None
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, Iterable):
+        return list(value)
+    return None
+
+
 def _resolve_capacity_vector(
     battery_capacity: float | list[float] | tuple[float, ...],
     *,
     n_agents: int,
 ) -> list[float]:
-    if isinstance(battery_capacity, (list, tuple)):
-        values = [float(value) for value in battery_capacity]
-        if len(values) != n_agents:
-            raise ValueError(
-                "battery_capacity should provide "
-                f"{n_agents} value(s) for fixed battery mode, got {len(values)}."
-            )
+    vector_like = _coerce_vector_like(battery_capacity)
+    if vector_like is not None:
+        values = [float(value) for value in vector_like]
+        if len(values) == 1:
+            values = values * n_agents
+        elif len(values) != n_agents:
+            if values and all(abs(value - values[0]) <= 1e-9 for value in values):
+                values = [values[0]] * n_agents
+            else:
+                raise ValueError(
+                    "battery_capacity should provide "
+                    f"{n_agents} value(s) for fixed battery mode, got {len(values)}."
+                )
     else:
         values = [_resolve_positive_scalar(battery_capacity, name="battery_capacity")] * n_agents
 
@@ -59,7 +76,7 @@ def resolve_fixed_battery_spec(
 
     `max_charge_rate` is interpreted as a scalar C-rate in fixed mode.
     """
-    if isinstance(max_charge_rate, (list, tuple)):
+    if _coerce_vector_like(max_charge_rate) is not None:
         raise ValueError(
             "fixed battery mode expects max_charge_rate to be a positive scalar C-rate, "
             f"got {max_charge_rate!r}."
@@ -80,18 +97,11 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     if not bus_ids:
         bus_ids = [deployment.bus_id for deployment in RURAL1_AGENT_DEPLOYMENTS[:n_agents]]
 
-    battery_mode = str(getattr(cfg.env, "battery_mode", "from_pv")).strip().lower()
-    if battery_mode == "fixed":
-        capacity_kwh, _, power_kw = resolve_fixed_battery_spec(
-            cfg.env.battery_capacity,
-            cfg.env.max_charge_rate,
-            n_agents=n_agents,
-        )
-    else:
-        battery_capacity = _resolve_positive_scalar(cfg.env.battery_capacity, name="battery_capacity")
-        battery_power = _resolve_positive_scalar(cfg.env.max_charge_rate, name="max_charge_rate")
-        capacity_kwh = [battery_capacity] * n_agents
-        power_kw = [battery_power] * n_agents
+    capacity_kwh, _, power_kw = resolve_fixed_battery_spec(
+        cfg.env.battery_capacity,
+        cfg.env.max_charge_rate,
+        n_agents=n_agents,
+    )
     init_soc = float(cfg.env.init_soc)
     soc_min = float(cfg.env.soc_min)
     soc_max = float(cfg.env.soc_max)

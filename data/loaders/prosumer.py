@@ -79,9 +79,11 @@ class ProsumerDataset(BaseEpisodeDataset):
         load_scale: Sequence[float] | float | None = None,
         pv_scale: Sequence[float] | float | None = None,
         node_ids: Sequence[int] | None = None,
+        history_warmup_steps: int = 0,
     ) -> None:
         self.data_dir = _resolve_dataset_dir(data_dir)
         self.episode_length = int(episode_length)
+        self.history_warmup_steps = int(history_warmup_steps)
         self.n_agents = int(n_agents)
         self.agent_profiles = list(agent_profiles)
         self.year = int(year)
@@ -99,7 +101,7 @@ class ProsumerDataset(BaseEpisodeDataset):
         self._signals: dict[str, np.ndarray] = {}
         self._timestamps: pd.Series | None = None
         self._meta_template: dict[str, object] = {}
-        self._episode_slices: list[tuple[int, int]] = []
+        self._episode_slices: list[tuple[int, int, int]] = []
         self._num_episodes = 0
 
         self._validate_init_args()
@@ -108,6 +110,10 @@ class ProsumerDataset(BaseEpisodeDataset):
     def _validate_init_args(self) -> None:
         if self.episode_length <= 0:
             raise ValueError(f"episode_length must be positive, got {self.episode_length}")
+        if self.history_warmup_steps < 0:
+            raise ValueError(
+                f"history_warmup_steps must be non-negative, got {self.history_warmup_steps}"
+            )
         if len(self.agent_profiles) != self.n_agents:
             raise ValueError(
                 f"agent_profiles length should equal n_agents={self.n_agents}, got {len(self.agent_profiles)}"
@@ -159,32 +165,34 @@ class ProsumerDataset(BaseEpisodeDataset):
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(TZ_LOCAL)
         return frame
 
-    def _filter_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
-        local_dates = frame["timestamp"].dt.date
-        mask = frame["timestamp"].dt.year == self.year
-        if self.start_date is not None:
-            mask &= local_dates >= self.start_date
-        if self.end_date is not None:
-            mask &= local_dates <= self.end_date
+    def _exclude_date_mask(self, local_dates: pd.Series) -> np.ndarray:
         if self.exclude_start_date is not None:
             if self.exclude_end_date is None:
-                mask &= local_dates < self.exclude_start_date
-            else:
-                mask &= ~(
-                    (local_dates >= self.exclude_start_date) & (local_dates <= self.exclude_end_date)
-                )
-        elif self.exclude_end_date is not None:
-            mask &= local_dates > self.exclude_end_date
+                return (local_dates >= self.exclude_start_date).to_numpy(dtype=bool)
+            return (
+                (local_dates >= self.exclude_start_date) & (local_dates <= self.exclude_end_date)
+            ).to_numpy(dtype=bool)
+        if self.exclude_end_date is not None:
+            return (local_dates <= self.exclude_end_date).to_numpy(dtype=bool)
+        return np.zeros((len(local_dates),), dtype=bool)
 
-        filtered = frame.loc[mask].copy()
-        if filtered.empty:
-            raise ValueError(
-                "Processed prosumer data does not contain any rows for "
-                f"year={self.year}, start_date={self.start_date}, end_date={self.end_date}, "
-                f"exclude_start_date={self.exclude_start_date}, exclude_end_date={self.exclude_end_date}."
-            )
-        filtered = filtered.sort_values("timestamp").reset_index(drop=True)
-        return filtered
+    def _build_split_masks(self, timestamps: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+        local_dates = timestamps.dt.date
+        year_mask = (timestamps.dt.year == self.year).to_numpy(dtype=bool)
+        exclude_mask = self._exclude_date_mask(local_dates)
+
+        active_mask = year_mask.copy()
+        if self.start_date is not None:
+            active_mask &= (local_dates >= self.start_date).to_numpy(dtype=bool)
+        if self.end_date is not None:
+            active_mask &= (local_dates <= self.end_date).to_numpy(dtype=bool)
+        active_mask &= ~exclude_mask
+
+        if self.history_warmup_steps > 0:
+            accessible_mask = year_mask & ~exclude_mask
+        else:
+            accessible_mask = active_mask.copy()
+        return active_mask, accessible_mask
 
     def _extract_component(self, frame: pd.DataFrame, component_name: str) -> pd.DataFrame:
         missing_profiles = [profile for profile in self.agent_profiles if profile not in frame.columns]
@@ -192,31 +200,50 @@ class ProsumerDataset(BaseEpisodeDataset):
             raise ValueError(f"Load component '{component_name}' is missing columns for {missing_profiles}")
         return frame.loc[:, ["timestamp", *self.agent_profiles]].copy()
 
-    def _load_components(self) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    def _load_components(self) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], np.ndarray, np.ndarray]:
         component_frames: dict[str, pd.DataFrame] = {}
         base_timestamp: pd.Series | None = None
+        active_mask_on_accessible: np.ndarray | None = None
+        accessible_source_positions: np.ndarray | None = None
         for component in self.load_components:
             frame = self._read_csv(f"{component}.csv")
-            frame = self._filter_frame(frame)
+            active_mask, accessible_mask = self._build_split_masks(frame["timestamp"])
+            frame = frame.loc[accessible_mask].copy()
+            if frame.empty:
+                raise ValueError(
+                    "Processed prosumer data does not contain any accessible rows for "
+                    f"year={self.year}, exclude_start_date={self.exclude_start_date}, "
+                    f"exclude_end_date={self.exclude_end_date}."
+                )
             frame = self._extract_component(frame, component)
             if base_timestamp is None:
                 base_timestamp = frame["timestamp"].reset_index(drop=True)
+                active_mask_on_accessible = np.asarray(active_mask[accessible_mask], dtype=bool)
+                accessible_source_positions = np.flatnonzero(accessible_mask).astype(np.int64)
             elif not base_timestamp.equals(frame["timestamp"].reset_index(drop=True)):
                 raise ValueError(f"Load component '{component}' timestamp axis does not match the base load axis.")
             component_frames[component] = frame.reset_index(drop=True)
 
         assert base_timestamp is not None
+        assert active_mask_on_accessible is not None
+        assert accessible_source_positions is not None
         merged = pd.DataFrame({"timestamp": base_timestamp})
         total_load = np.zeros((len(base_timestamp), self.n_agents), dtype=np.float32)
         for component in self.load_components:
             values = component_frames[component].loc[:, self.agent_profiles].to_numpy(dtype=np.float32)
             total_load += values
         merged.loc[:, self.agent_profiles] = total_load * self.load_scale[None, :]
-        return merged, component_frames
+        return (
+            merged,
+            component_frames,
+            active_mask_on_accessible.astype(bool, copy=False),
+            accessible_source_positions.astype(np.int64, copy=False),
+        )
 
     def _load_pv(self, base_timestamps: pd.Series) -> tuple[np.ndarray, np.ndarray]:
         frame = self._read_csv("pv_reference.csv")
-        frame = self._filter_frame(frame).set_index("timestamp").sort_index()
+        _, accessible_mask = self._build_split_masks(frame["timestamp"])
+        frame = frame.loc[accessible_mask].copy().set_index("timestamp").sort_index()
         frame = frame.reindex(base_timestamps)
         column = f"ref_{self.pv_reference}"
         if column not in frame.columns:
@@ -243,7 +270,8 @@ class ProsumerDataset(BaseEpisodeDataset):
 
     def _load_price(self, base_timestamps: pd.Series) -> np.ndarray:
         frame = self._read_csv("price.csv")
-        frame = self._filter_frame(frame).set_index("timestamp").sort_index()
+        _, accessible_mask = self._build_split_masks(frame["timestamp"])
+        frame = frame.loc[accessible_mask].copy().set_index("timestamp").sort_index()
         frame = frame.reindex(base_timestamps)
         price = pd.to_numeric(frame["price"], errors="coerce").to_numpy(dtype=np.float32)
         if np.isnan(price).any():
@@ -251,7 +279,7 @@ class ProsumerDataset(BaseEpisodeDataset):
         return price
 
     def _load(self) -> None:
-        load_frame, component_frames = self._load_components()
+        load_frame, component_frames, active_mask, accessible_source_positions = self._load_components()
         base_timestamps = load_frame["timestamp"].reset_index(drop=True)
         price = self._load_price(base_timestamps)
         pv, pv_peak_kw = self._load_pv(base_timestamps)
@@ -300,16 +328,63 @@ class ProsumerDataset(BaseEpisodeDataset):
 
         self._episode_slices = []
         total_steps = len(base_timestamps)
-        self._num_episodes = total_steps // self.episode_length
-        if self._num_episodes <= 0:
+        if total_steps <= 0:
             raise ValueError(
                 "Processed prosumer data is too short for "
                 f"episode_length={self.episode_length}: total_steps={total_steps}"
             )
-        for episode_idx in range(self._num_episodes):
-            start = episode_idx * self.episode_length
-            end = start + self.episode_length
-            self._episode_slices.append((start, end))
+
+        active_positions = np.flatnonzero(active_mask)
+        if active_positions.size == 0:
+            raise ValueError(
+                "Processed prosumer data does not contain any active rows for "
+                f"year={self.year}, start_date={self.start_date}, end_date={self.end_date}, "
+                f"exclude_start_date={self.exclude_start_date}, exclude_end_date={self.exclude_end_date}."
+            )
+
+        contiguous_accessible_starts = [0]
+        for idx in range(1, len(accessible_source_positions)):
+            if int(accessible_source_positions[idx]) != int(accessible_source_positions[idx - 1]) + 1:
+                contiguous_accessible_starts.append(idx)
+        contiguous_accessible_starts.append(len(accessible_source_positions))
+
+        for seg_idx in range(len(contiguous_accessible_starts) - 1):
+            seg_start = contiguous_accessible_starts[seg_idx]
+            seg_end = contiguous_accessible_starts[seg_idx + 1]
+            seg_active = active_positions[(active_positions >= seg_start) & (active_positions < seg_end)]
+            if seg_active.size == 0:
+                continue
+
+            run_start = 0
+            while run_start < seg_active.size:
+                run_end = run_start + 1
+                while run_end < seg_active.size and int(seg_active[run_end]) == int(seg_active[run_end - 1]) + 1:
+                    run_end += 1
+                run_positions = seg_active[run_start:run_end]
+                first_active = int(run_positions[0])
+                last_active = int(run_positions[-1])
+                first_usable = max(first_active, seg_start + self.history_warmup_steps)
+                usable_steps = last_active - first_usable + 1
+                if usable_steps >= self.episode_length:
+                    num_episodes = usable_steps // self.episode_length
+                    for episode_offset in range(num_episodes):
+                        active_start = first_usable + episode_offset * self.episode_length
+                        active_end = active_start + self.episode_length
+                        history_start = active_start - self.history_warmup_steps
+                        self._episode_slices.append((history_start, active_start, active_end))
+                run_start = run_end
+
+        self._num_episodes = len(self._episode_slices)
+        if self._num_episodes <= 0:
+            history_msg = (
+                f"history_warmup_steps={self.history_warmup_steps}, "
+                if self.history_warmup_steps > 0
+                else ""
+            )
+            raise ValueError(
+                "Processed prosumer data does not contain any usable episodes after split filtering: "
+                f"{history_msg}episode_length={self.episode_length}, total_steps={total_steps}."
+            )
 
     def num_episodes(self) -> int:
         return self._num_episodes
@@ -318,19 +393,29 @@ class ProsumerDataset(BaseEpisodeDataset):
         if episode_idx < 0 or episode_idx >= self._num_episodes:
             raise IndexError(f"episode_idx={episode_idx} is out of range [0, {self._num_episodes - 1}]")
 
-        start, end = self._episode_slices[episode_idx]
+        history_start, start, end = self._episode_slices[episode_idx]
         timestamps = self._timestamps.iloc[start:end].reset_index(drop=True)
+        history_timestamps = self._timestamps.iloc[history_start:start].reset_index(drop=True)
         episode_signals = {
             "price": self._signals["price"][start:end].copy(),
             "load": self._signals["load"][start:end, :].copy(),
             "pv": self._signals["pv"][start:end, :].copy(),
         }
+        history_signals = {
+            "price": self._signals["price"][history_start:start].copy(),
+            "load": self._signals["load"][history_start:start, :].copy(),
+            "pv": self._signals["pv"][history_start:start, :].copy(),
+        }
         for comp_name in self.load_components:
             comp_key = f"load_{comp_name}"
             if comp_key in self._signals:
                 episode_signals[comp_key] = self._signals[comp_key][start:end, :].copy()
+                history_signals[comp_key] = self._signals[comp_key][history_start:start, :].copy()
         return {
             "signals": episode_signals,
+            "history_signals": history_signals,
+            "history_timestamps": history_timestamps.astype(str).tolist(),
+            "history_length": int(start - history_start),
             "meta": {
                 "episode_idx": int(episode_idx),
                 "segment_id": int(self.year),

@@ -11,6 +11,7 @@ from configs.experiment_config import (
     ObsConfig,
     RewardConfig,
     RuntimeConfig,
+    SafetyConfig,
     TrainConfig,
 )
 from configs.profiles import (
@@ -38,6 +39,7 @@ __all__ = [
     "ObsConfig",
     "RewardConfig",
     "RuntimeConfig",
+    "SafetyConfig",
     "TrainConfig",
     "apply_forecast_profile",
     "apply_model_profile",

@@ -22,6 +22,7 @@
 from controllers.madrl.base_agent import BaseAgent
 from controllers.madrl.maddpg import MADDPG
 from controllers.madrl.matd3 import MATD3
+from controllers.madrl.matd3_safe_poc import MATD3SafePOC
 from controllers.madrl.registry import AGENT_REGISTRY, get_agent_cls
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     "BaseAgent",
     "MADDPG",
     "MATD3",
+    "MATD3SafePOC",
     "get_agent_cls",
 ]

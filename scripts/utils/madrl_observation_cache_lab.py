@@ -83,7 +83,7 @@ def _artifact_signature(forecast_ready: dict[str, object] | None) -> dict[str, o
 
 def _cache_signature(cfg, *, split: str, forecast_ready: dict[str, object] | None) -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
         "split": str(split),
         "forecast_type": str(cfg.forecast.type),
         "num_agents": int(cfg.env.num_agents),
@@ -181,6 +181,23 @@ def _required_array_names(cfg) -> list[str]:
         names.append("pv_seq")
     names.extend(["mu_t", "mu_next"])
     return names
+
+
+def _merge_history_with_episode_signals(
+    signals: dict[str, np.ndarray],
+    history_signals: dict[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], int]:
+    merged: dict[str, np.ndarray] = {}
+    prefix_length = 0
+    for name, signal in signals.items():
+        prefix = np.asarray(history_signals.get(name), dtype=np.float32)
+        value = np.asarray(signal, dtype=np.float32)
+        if prefix.size == 0:
+            merged[name] = value.copy()
+            continue
+        prefix_length = max(prefix_length, int(prefix.shape[0]))
+        merged[name] = np.concatenate([prefix, value], axis=0).astype(np.float32, copy=False)
+    return merged, prefix_length
 
 
 @dataclass(frozen=True)
@@ -312,11 +329,18 @@ def build_or_load_observation_cache(
             key: np.asarray(value, dtype=np.float32)
             for key, value in dict(episode.get("signals", {})).items()
         }
+        history_signals = {
+            key: np.asarray(value, dtype=np.float32)
+            for key, value in dict(episode.get("history_signals", {})).items()
+        }
         meta = dict(episode.get("meta", {}))
         timestamps = list(meta.get("timestamps") or [])
+        history_timestamps = [str(value) for value in list(episode.get("history_timestamps") or [])]
+        combined_signals, prefix_length = _merge_history_with_episode_signals(signals, history_signals)
+        combined_timestamps = [*history_timestamps, *timestamps]
 
         forecaster.reset()
-        forecaster.set_episode(signals, meta)
+        forecaster.set_episode(combined_signals, meta)
         mu_t, mu_next = _compute_future_mean_price(signals["price"], int(cfg.env.future_horizon))
         arrays["mu_t"][episode_idx] = mu_t
         arrays["mu_next"][episode_idx] = mu_next
@@ -327,55 +351,55 @@ def build_or_load_observation_cache(
         if vectorized_forecaster:
             if "price_seq" in arrays:
                 arrays["price_seq"][episode_idx] = forecaster.predict_episode_matrix(
-                    signals["price"],
+                    combined_signals["price"],
                     sequence_length,
                     signal_name="price",
-                    history_timestamps=timestamps,
+                    history_timestamps=combined_timestamps,
                     batch_size=resolved_batch_size,
-                ).astype(np.float32)
+                ).astype(np.float32)[prefix_length:]
             if "load_seq" in arrays:
                 arrays["load_seq"][episode_idx] = forecaster.predict_episode_matrix(
-                    signals["load"],
+                    combined_signals["load"],
                     sequence_length,
                     signal_name="load",
-                    history_timestamps=timestamps,
+                    history_timestamps=combined_timestamps,
                     batch_size=resolved_batch_size,
-                ).astype(np.float32)
+                ).astype(np.float32)[prefix_length:]
             if "pv_seq" in arrays:
                 arrays["pv_seq"][episode_idx] = forecaster.predict_episode_matrix(
-                    signals["pv"],
+                    combined_signals["pv"],
                     sequence_length,
                     signal_name="pv",
-                    history_timestamps=timestamps,
+                    history_timestamps=combined_timestamps,
                     batch_size=resolved_batch_size,
-                ).astype(np.float32)
+                ).astype(np.float32)[prefix_length:]
             continue
 
         for step_idx in range(episode_length):
-            history_timestamps = timestamps[: step_idx + 1]
+            current_history_timestamps = combined_timestamps[: prefix_length + step_idx + 1]
             if "price_seq" in arrays:
-                price_history = signals["price"][: step_idx + 1]
+                price_history = combined_signals["price"][: prefix_length + step_idx + 1]
                 arrays["price_seq"][episode_idx, step_idx] = forecaster.predict(
                     price_history,
                     sequence_length,
                     signal_name="price",
-                    history_timestamps=history_timestamps,
+                    history_timestamps=current_history_timestamps,
                 ).astype(np.float32)
             if "load_seq" in arrays:
-                load_history = signals["load"][: step_idx + 1, :]
+                load_history = combined_signals["load"][: prefix_length + step_idx + 1, :]
                 arrays["load_seq"][episode_idx, step_idx] = forecaster.predict(
                     load_history,
                     sequence_length,
                     signal_name="load",
-                    history_timestamps=history_timestamps,
+                    history_timestamps=current_history_timestamps,
                 ).astype(np.float32)
             if "pv_seq" in arrays:
-                pv_history = signals["pv"][: step_idx + 1, :]
+                pv_history = combined_signals["pv"][: prefix_length + step_idx + 1, :]
                 arrays["pv_seq"][episode_idx, step_idx] = forecaster.predict(
                     pv_history,
                     sequence_length,
                     signal_name="pv",
-                    history_timestamps=history_timestamps,
+                    history_timestamps=current_history_timestamps,
                 ).astype(np.float32)
 
     for array in arrays.values():

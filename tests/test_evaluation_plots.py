@@ -13,6 +13,7 @@ import pandas as pd
 from scripts.plots.reward_plots import plot_reward_decomposition
 from scripts.utils.grid_notebook_workflow import (
     RolloutResult,
+    plot_power_balance_bars,
     plot_rollout_comparison_dashboard,
     plot_rollout_dashboard,
     plot_test_voltage_profile,
@@ -92,6 +93,17 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
             "timestamp": timestamps,
             "price": [0.10, 0.20, 0.15],
             "price_pred": [0.12, 0.18, 0.16],
+            "base_net_load_total": [2.40, 2.55, 2.70],
+            "base_net_load_effective_total": [2.00, 2.15, 2.30],
+            "net_load_total": [2.10, 2.20, 2.35],
+            "pv_raw_total": [1.20, 1.10, 1.00],
+            "pv_effective_total": [1.00, 0.90, 0.75],
+            "pv_curtail_total": [0.20, 0.20, 0.25],
+            "load_total": [3.20, 3.25, 3.30],
+            "grid_import_total": [2.10, 2.20, 2.35],
+            "grid_export_total": [0.0, 0.0, 0.0],
+            "battery_charge_total": [0.3, 0.2, 0.15],
+            "battery_discharge_total": [0.0, 0.0, 0.0],
             "operating_cost": [1.0, 1.1, 0.9],
             "episode_idx": [0, 0, 0],
             "step": [0, 1, 2],
@@ -112,7 +124,16 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
                     "load": 1.0 + 0.1 * agent_id + 0.05 * step_idx,
                     "load_pred": 0.95 + 0.1 * agent_id + 0.04 * step_idx,
                     "pv": 0.2 + 0.03 * agent_id + 0.02 * step_idx,
+                    "pv_raw": 0.2 + 0.03 * agent_id + 0.02 * step_idx,
+                    "pv_effective": 0.17 + 0.02 * agent_id + 0.015 * step_idx,
+                    "pv_curtail": 0.03 + 0.01 * agent_id + 0.005 * step_idx,
+                    "pv_utilization": 0.85 - 0.03 * agent_id,
                     "pv_pred": 0.18 + 0.03 * agent_id + 0.01 * step_idx,
+                    "base_net_load": 0.8 + 0.07 * agent_id + 0.03 * step_idx,
+                    "base_net_load_effective": 0.7 + 0.06 * agent_id + 0.02 * step_idx,
+                    "net_load": 0.7 + 0.05 * agent_id + 0.02 * step_idx,
+                    "grid_import_kw": 0.7 + 0.05 * agent_id + 0.02 * step_idx,
+                    "grid_export_kw": 0.0,
                     "operating_cost": 0.2 + 0.1 * agent_id,
                     "controller": "DRL",
                 }
@@ -155,11 +176,39 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
 
     figure = plot_rollout_dashboard(rollout)
     main_axes = getattr(figure, "_dashboard_main_axes")
-    assert len(main_axes) == 7
+    assert len(main_axes) == 9
     assert len(main_axes[0].lines) == 2
     assert len(main_axes[1].lines) == 6
     assert len(main_axes[2].lines) == 6
-    assert len(main_axes[-1].lines) >= 5
+    assert len(main_axes[3].lines) >= 5
+    assert len(main_axes[4].lines) == 3
+    assert len(main_axes[5].lines) >= 2
+    assert len(main_axes[6:]) == 3
+    plt.close(figure)
+
+
+def test_power_balance_plot_renders_expected_stacks():
+    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "load_total": [3.0, 3.2, 3.1],
+                "battery_charge_total": [0.4, 0.1, 0.0],
+                "pv_effective_total": [1.5, 1.2, 1.0],
+                "grid_import_total": [1.2, 1.7, 1.9],
+                "battery_discharge_total": [0.0, 0.2, 0.3],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "DRL (forecast_eval)"},
+    )
+
+    figure = plot_power_balance_bars(rollout)
+    assert len(figure.axes) == 1
+    assert len(figure.axes[0].patches) == 15
     plt.close(figure)
 
 

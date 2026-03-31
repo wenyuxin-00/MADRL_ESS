@@ -155,6 +155,10 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     return env
 
 
+def _zero_actions() -> list[np.ndarray]:
+    return [np.array([0.0, 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
+
+
 @pytest.fixture(scope="module")
 def grid_env():
     return _build_env(_make_cfg(), mode="test")
@@ -168,6 +172,7 @@ def test_required_attributes_present(grid_env) -> None:
     assert hasattr(env, "observation_schema")
     assert hasattr(env, "observation_layout")
     assert hasattr(env, "action_space") and len(env.action_space) == N_AGENTS
+    assert env.action_space[0].shape == (2,)
     assert hasattr(env, "reward_fn")
 
 
@@ -180,21 +185,29 @@ def test_reset_returns_correct_obs_shape(grid_env) -> None:
     assert "p_max" in reset_info
 
 
-def test_from_pv_battery_mode_uses_episode_pv_peak(grid_env) -> None:
+def test_default_battery_config_uses_fixed_defaults(grid_env) -> None:
     _, reset_info = grid_env.reset(episode_idx=0)
-    pv_peak_kw = np.asarray(reset_info["episode_meta"]["pv_peak_kw"], dtype=np.float32)
-    expected_p_max = pv_peak_kw * np.float32(grid_env.from_pv_power_ratio)
-    expected_capacity = expected_p_max * np.float32(grid_env.from_pv_duration_hours)
-
-    assert grid_env.battery_mode == "from_pv"
-    assert np.allclose(reset_info["p_max"], expected_p_max)
-    assert np.allclose(reset_info["battery_capacity_kwh"], expected_capacity)
+    assert np.allclose(reset_info["p_max"], np.full((N_AGENTS,), 10.0, dtype=np.float32))
+    assert np.allclose(reset_info["battery_capacity_kwh"], np.full((N_AGENTS,), 25.0, dtype=np.float32))
 
 
 def test_fixed_battery_mode_uses_cfg_defaults() -> None:
     cfg = _make_cfg()
-    cfg.env.battery_mode = "fixed"
     cfg.env.battery_capacity = [10.0, 12.0, 8.0]
+    cfg.env.max_charge_rate = 0.5
+    env = _build_env(cfg, mode="test")
+
+    try:
+        _, reset_info = env.reset(episode_idx=0)
+        assert np.allclose(reset_info["p_max"], np.array([5.0, 6.0, 4.0], dtype=np.float32))
+        assert np.allclose(reset_info["battery_capacity_kwh"], np.array([10.0, 12.0, 8.0], dtype=np.float32))
+    finally:
+        env.close()
+
+
+def test_fixed_battery_mode_accepts_numpy_capacity_vector() -> None:
+    cfg = _make_cfg()
+    cfg.env.battery_capacity = np.asarray([10.0, 12.0, 8.0], dtype=np.float32)
     cfg.env.max_charge_rate = 0.5
     env = _build_env(cfg, mode="test")
 
@@ -208,7 +221,7 @@ def test_fixed_battery_mode_uses_cfg_defaults() -> None:
 
 def test_step_return_types(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     obs, reward_list, terminated_list, truncated_list, info = grid_env.step(actions)
     assert isinstance(obs, dict)
     assert isinstance(reward_list, list) and len(reward_list) == N_AGENTS
@@ -219,13 +232,20 @@ def test_step_return_types(grid_env) -> None:
 
 def test_info_contains_required_fields(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.1], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = [np.array([0.1, 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
     _, _, _, _, info = grid_env.step(actions)
 
     required = [
         "price",
         "e_bat_req",
         "e_bat",
+        "pv_raw",
+        "pv_effective",
+        "pv_curtail",
+        "pv_utilization",
+        "base_net_load_effective",
+        "grid_import_kw",
+        "grid_export_kw",
         "soc_next",
         "pf_converged",
         "pf_error",
@@ -251,7 +271,7 @@ def test_info_contains_required_fields(grid_env) -> None:
 
 def test_info_contains_reward_component_keys(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
     for meta in grid_env.reward_fn.component_meta:
         assert meta.key in info
@@ -260,7 +280,7 @@ def test_info_contains_reward_component_keys(grid_env) -> None:
 def test_soc_stays_in_bounds(grid_env) -> None:
     grid_env.reset()
     for _ in range(EPISODE_LIMIT):
-        actions = [np.array([np.random.uniform(-1, 1)], dtype=np.float32) for _ in range(N_AGENTS)]
+        actions = [np.array([np.random.uniform(-1, 1), 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
         _, _, terminated_list, truncated_list, _ = grid_env.step(actions)
         assert np.all(grid_env.soc >= grid_env.soc_min - 1e-5)
         assert np.all(grid_env.soc <= grid_env.soc_max + 1e-5)
@@ -279,7 +299,7 @@ def test_episode_recorder_compatible(grid_env) -> None:
     )
 
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, reward_list, _, _, info = grid_env.step(actions)
     append_step_record(history, info, step_total=sum(reward_list), reward_metas=reward_metas)
 
@@ -298,7 +318,7 @@ def test_episode_recorder_compatible(grid_env) -> None:
 
 def test_reward_tracks_local_voltage_differences(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, reward_list, _, _, info = grid_env.step(actions)
     assert not np.allclose(info["v_violation"], info["v_violation"][0])
     assert info["r_safe_v"][0] > info["r_safe_v"][2]
@@ -307,18 +327,22 @@ def test_reward_tracks_local_voltage_differences(grid_env) -> None:
 
 def test_trafo_penalty_is_shared(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
     assert info["r_safe_trafo"][0] == info["r_safe_trafo"][1] == info["r_safe_trafo"][2]
 
 
 def test_grid_fields_shapes(grid_env) -> None:
     grid_env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
 
     assert info["agent_vm_pu"].shape == (N_AGENTS,)
     assert info["v_violation"].shape == (N_AGENTS,)
+    assert info["pv_effective"].shape == (N_AGENTS,)
+    assert info["pv_curtail"].shape == (N_AGENTS,)
+    assert info["grid_import_kw"].shape == (N_AGENTS,)
+    assert info["grid_export_kw"].shape == (N_AGENTS,)
     assert info["line_loading_pct"].shape == (30,)
     assert info["trafo_loading_pct"].shape == (2,)
     assert isinstance(info["line_violation"], float)
@@ -337,8 +361,34 @@ def test_compact_info_omits_large_arrays() -> None:
     reward_fn = env.reward_fn
 
     env.reset()
-    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    actions = _zero_actions()
     _, _, _, _, info = env.step(actions)
 
     assert set(info) == {"episode_done", *[str(meta.key) for meta in reward_fn.component_meta]}
     env.close()
+
+
+def test_single_dim_actions_raise_fail_fast(grid_env) -> None:
+    grid_env.reset()
+    actions = [np.array([0.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    with pytest.raises(ValueError, match="exactly two action dimensions"):
+        grid_env.step(actions)
+
+
+def test_second_action_dimension_controls_pv_curtailment(grid_env) -> None:
+    grid_env.reset()
+    actions = [np.array([0.0, -1.0], dtype=np.float32) for _ in range(N_AGENTS)]
+    _, _, _, _, info = grid_env.step(actions)
+
+    np.testing.assert_allclose(info["pv_effective"], 0.0, atol=1e-6)
+    np.testing.assert_allclose(info["pv_curtail"], info["pv_raw"], atol=1e-6)
+    np.testing.assert_allclose(info["pv_utilization"], 0.0, atol=1e-6)
+
+
+def test_locally_infeasible_charge_action_raises(grid_env) -> None:
+    grid_env.reset()
+    grid_env.soc = np.full((N_AGENTS,), grid_env.soc_max, dtype=np.float32)
+    actions = [np.array([1.0, 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
+
+    with pytest.raises(ValueError, match="locally infeasible battery action"):
+        grid_env.step(actions)

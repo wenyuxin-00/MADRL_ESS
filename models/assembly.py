@@ -46,6 +46,8 @@ from models.registry import (
     get_encoder_cls,
 )
 
+_TWIN_Q_ALGORITHMS = {"MATD3", "MATD3_SAFE_POC"}
+
 
 class ActorNetwork(nn.Module):
     """组装后的 Actor 网络：adapter -> encoder -> actor head。
@@ -173,8 +175,10 @@ def validate_and_finalize_model_config(cfg):
     """
     algorithm = cfg.algo.name
     # 校验算法名称
-    if algorithm not in {"MADDPG", "MATD3"}:
-        raise ValueError(f"Unknown algo.name '{algorithm}', available: ['MADDPG', 'MATD3']")
+    if algorithm not in {"MADDPG", *_TWIN_Q_ALGORITHMS}:
+        raise ValueError(
+            f"Unknown algo.name '{algorithm}', available: ['MADDPG', 'MATD3', 'MATD3_SAFE_POC']"
+        )
 
     # 校验模型家族
     if cfg.model.family not in {"mlp", "transformer", "graph"}:
