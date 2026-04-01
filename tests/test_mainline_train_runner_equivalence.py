@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from scripts.builder import build_train_runner
+from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
 from scripts.utils.torch_runtime import STRICT_REPRO_RUNTIME_MODE
 from tests.support.helpers import make_smoke_config
 
@@ -29,21 +30,22 @@ def _make_train_equivalence_cfg(tmp_path):
     return cfg
 
 
-def _run_cached_mainline_runner(cfg, *, seed: int, tmp_path, refresh_cache: bool):
-    cfg.runtime.observation_cache_root = str(tmp_path / "cache")
-    cfg.runtime.refresh_observation_cache = bool(refresh_cache)
+def _run_mainline_runner_with_shared_data(cfg, *, seed: int, tmp_path):
+    shared_data = ensure_madrl_shared_data(cfg, root=tmp_path / "shared_data_root")
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
 
-    runner = build_train_runner(cfg, seed=seed, env_name="GridTrainMainlineCachedExact", number=1)
+    runner = build_train_runner(cfg, seed=seed, env_name="GridTrainMainlineSharedData", number=1)
     try:
         episodes = runner.run()
-        train_cache_meta = dict(getattr(runner, "cache_metadata", {}).get("train", {}))
+        shared_data_meta = dict(getattr(runner, "shared_data_metadata", {}) or {})
         return {
             "episodes": episodes,
             "total_steps": runner.total_steps,
             "episode_rewards": list(runner.episode_rewards),
             "reward_summary": runner.build_reward_summary(),
-            "cache_hit": bool(train_cache_meta.get("cache_hit", False)),
-            "cache_dir": str(train_cache_meta.get("cache_dir", "")),
+            "shared_data_dir": str(shared_data_meta.get("shared_data_dir", "")),
+            "shared_data_signature": str(shared_data_meta.get("shared_data_signature", "")),
             "history_length": len(runner.history),
             "perf_summary": dict(runner.perf_summary),
         }
@@ -51,26 +53,23 @@ def _run_cached_mainline_runner(cfg, *, seed: int, tmp_path, refresh_cache: bool
         runner.close()
 
 
-def test_cached_mainline_train_runner_is_deterministic_with_reused_cache(tmp_path) -> None:
+def test_mainline_train_runner_is_deterministic_with_reused_shared_data(tmp_path) -> None:
     seed = 11
     base_cfg = _make_train_equivalence_cfg(tmp_path / "deterministic")
 
-    first_result = _run_cached_mainline_runner(
+    first_result = _run_mainline_runner_with_shared_data(
         deepcopy(base_cfg),
         seed=seed,
         tmp_path=tmp_path,
-        refresh_cache=True,
     )
-    second_result = _run_cached_mainline_runner(
+    second_result = _run_mainline_runner_with_shared_data(
         deepcopy(base_cfg),
         seed=seed,
         tmp_path=tmp_path,
-        refresh_cache=False,
     )
 
-    assert first_result["cache_hit"] is False
-    assert second_result["cache_hit"] is True
-    assert first_result["cache_dir"] == second_result["cache_dir"]
+    assert first_result["shared_data_dir"] == second_result["shared_data_dir"]
+    assert first_result["shared_data_signature"] == second_result["shared_data_signature"]
     assert first_result["episodes"] == second_result["episodes"]
     assert first_result["total_steps"] == second_result["total_steps"]
     assert first_result["history_length"] == 0

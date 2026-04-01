@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from controllers.action_feasibility import _local_bounds_numpy, build_safety_local_numpy
 from envs.rewards import NormalReward
+from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
 N_AGENTS = 3
@@ -98,6 +100,8 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
     cfg.grid.train_compact_info = False
     cfg.grid.agent_bus_ids = [10, 6, 12][:n_agents]
     cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16"][:n_agents]
+    cfg.data.load_scale = [10.0] * n_agents
+    cfg.data.pv_scale = [10.0] * n_agents
     cfg.data.load_components = ["household", "heatpump"]
     cfg.data.pv_reference = "south"
     cfg.data.data_dir = _ensure_case_data(n_agents=n_agents, total_steps=episode_limit * 3)
@@ -157,6 +161,41 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
 
 def _zero_actions() -> list[np.ndarray]:
     return [np.array([0.0, 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
+
+
+def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
+    from data.loaders.registry import build_dataset
+    from envs.grid_env import GridEnv
+    from envs.observation.precomputed_builder import PrecomputedObservationBuilder
+
+    cfg = _make_cfg()
+    shared_data = ensure_madrl_shared_data(cfg, root=tmp_path / "shared_data")
+    dataset = build_dataset(cfg, mode="test")
+    obs_builder = PrecomputedObservationBuilder(
+        local_features=cfg.obs.local_features,
+        sequence_features=cfg.obs.sequence_features,
+        future_horizon=cfg.env.future_horizon,
+        adjacency_type=cfg.obs.adjacency_type,
+    )
+    env = GridEnv(
+        cfg,
+        mode="test",
+        dataset=dataset,
+        reward_fn=NormalReward(cfg),
+        forecaster=None,
+        obs_builder=obs_builder,
+        grid_core=FakeGridCore(n_agents=int(cfg.env.num_agents)),
+        precomputed_data_dir=shared_data.shared_data_dir / "test",
+    )
+
+    try:
+        obs, _ = env.reset(episode_idx=0)
+        assert env.forecaster is None
+        assert env.has_precomputed_observations() is True
+        for key, shape in env.observation_schema.items():
+            assert obs[key].shape == shape
+    finally:
+        env.close()
 
 
 @pytest.fixture(scope="module")
@@ -280,7 +319,25 @@ def test_info_contains_reward_component_keys(grid_env) -> None:
 def test_soc_stays_in_bounds(grid_env) -> None:
     grid_env.reset()
     for _ in range(EPISODE_LIMIT):
-        actions = [np.array([np.random.uniform(-1, 1), 1.0], dtype=np.float32) for _ in range(N_AGENTS)]
+        safety_local = build_safety_local_numpy(
+            soc=np.asarray(grid_env.soc, dtype=np.float32),
+            load_raw=np.asarray(grid_env.get_signal_step("load"), dtype=np.float32),
+            pv_raw=np.asarray(grid_env.get_signal_step("pv"), dtype=np.float32),
+            battery_capacity_kwh=np.asarray(grid_env.agent_c_bat, dtype=np.float32),
+            p_max_kw=np.asarray(grid_env.agent_p_max, dtype=np.float32),
+        )
+        lower_kw, upper_kw, p_max_kw, _ = _local_bounds_numpy(
+            safety_local,
+            efficiency=float(grid_env.eff),
+            dt_hours=float(grid_env.dt),
+            soc_min=float(grid_env.soc_min),
+            soc_max=float(grid_env.soc_max),
+        )
+        actions = []
+        for lower, upper, p_max in zip(lower_kw, upper_kw, p_max_kw, strict=False):
+            sampled_kw = float(np.random.uniform(lower, upper)) if upper > lower else float(lower)
+            normalized = sampled_kw / max(float(p_max), 1e-6)
+            actions.append(np.array([normalized, 1.0], dtype=np.float32))
         _, _, terminated_list, truncated_list, _ = grid_env.step(actions)
         assert np.all(grid_env.soc >= grid_env.soc_min - 1e-5)
         assert np.all(grid_env.soc <= grid_env.soc_max + 1e-5)
@@ -307,9 +364,10 @@ def test_episode_recorder_compatible(grid_env) -> None:
     assert len(history["base_net_load"][0]) == 1
     assert len(history["e_bat_exec"][0]) == 1
     assert len(history["r_total_per_agent"][0]) == 1
-    assert "r_cost_sum" in history
-    assert "r_throughput_sum" in history
-    assert "r_action_pen_sum" in history
+    assert "r_purchase_cost_sum" in history
+    assert "r_export_subsidy_sum" in history
+    assert "r_safe_line_sum" in history
+    assert "r_action_pen_sum" not in history
     assert "r_safe_v_per_agent" in history
     assert "r_safe_trafo_per_agent" in history
     assert history["r_safe_trafo_per_agent"][0][0] == history["r_safe_trafo_per_agent"][2][0]

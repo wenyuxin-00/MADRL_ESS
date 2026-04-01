@@ -11,6 +11,69 @@ import torch
 def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+@dataclass
+class DataConfig:
+    """Processed prosumer dataset selection."""
+
+    data_dir: str | Path | None = None
+    agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"])
+    train_year: int = 2019
+    test_year: int = 2020
+    train_start_date: str | None = None
+    train_end_date: str | None = None
+    test_start_date: str | None = None
+    test_end_date: str | None = None
+    load_components: list[str] = field(default_factory=lambda: ["household", "heatpump"])
+    pv_reference: str = "south"
+    pv_capacity_kw: list[float] = field(default_factory=list)
+    load_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
+    pv_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
+
+    def resolved_load_scale(self, n_agents: int) -> list[float]:
+        values = list(self.load_scale)
+        if not values:
+            return [1.0] * int(n_agents)
+        return [float(value) for value in values]
+
+    def resolved_pv_scale(self, n_agents: int) -> list[float]:
+        values = list(self.pv_scale)
+        if not values:
+            return [1.0] * int(n_agents)
+        return [float(value) for value in values]
+
+
+@dataclass
+class TrainConfig:
+    """Training-loop settings."""
+
+    train_episodes: int = 1000
+    max_train_steps: int | None = None
+    num_envs: int = 1
+    vec_env_type: str = "dummy"
+    batch_size: int = 4096
+    buffer_size: int = int(1e6)
+    update_interval: int = 1
+    updates_per_step: int = 1
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    noise_std_init: float = 0.4
+    noise_std_min: float = 0.2
+    noise_decay_steps: float = 3e5
+    use_noise_decay: bool = True
+    show_progress: bool = True
+    progress_postfix_interval: int = 10
+    progress_write_interval_seconds: float = 5.0
+
+    def resolved_max_train_steps(self, episode_limit: int) -> int:
+        if self.max_train_steps is not None:
+            return int(self.max_train_steps)
+        return int(self.train_episodes * episode_limit)
+
+    def resolved_noise_std_decay(self) -> float:
+        if self.noise_decay_steps <= 0:
+            return 0.0
+        return float((self.noise_std_init - self.noise_std_min) / self.noise_decay_steps)
+
 
 @dataclass
 class EnvConfig:
@@ -35,6 +98,7 @@ class RewardConfig:
 
     w_action_pen: float = 6.0
     lambda_throughput: float = 0.001
+    export_subsidy_eur_per_kwh: float = 0.079
     w_voltage_pen: float = 10.0
     w_line_pen: float = 10.0
     w_trafo_pen: float = 10.0
@@ -133,56 +197,6 @@ class ForecastConfig:
         )
 
 
-@dataclass
-class DataConfig:
-    """Processed prosumer dataset selection."""
-
-    data_dir: str | Path | None = None
-    agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"])
-    train_year: int = 2019
-    test_year: int = 2020
-    train_start_date: str | None = None
-    train_end_date: str | None = None
-    test_start_date: str | None = None
-    test_end_date: str | None = None
-    load_components: list[str] = field(default_factory=lambda: ["household", "heatpump"])
-    pv_reference: str = "south"
-    pv_capacity_kw: list[float] = field(default_factory=list)
-    load_scale: list[float] = field(default_factory=list)
-    pv_scale: list[float] = field(default_factory=list)
-
-
-@dataclass
-class TrainConfig:
-    """Training-loop settings."""
-
-    train_episodes: int = 1000
-    max_train_steps: int | None = None
-    num_envs: int = 1
-    vec_env_type: str = "dummy"
-    batch_size: int = 4096
-    buffer_size: int = int(1e6)
-    update_interval: int = 1
-    updates_per_step: int = 1
-    actor_lr: float = 1e-4
-    critic_lr: float = 1e-4
-    noise_std_init: float = 0.4
-    noise_std_min: float = 0.2
-    noise_decay_steps: float = 3e5
-    use_noise_decay: bool = True
-    show_progress: bool = True
-    progress_postfix_interval: int = 10
-    progress_write_interval_seconds: float = 5.0
-
-    def resolved_max_train_steps(self, episode_limit: int) -> int:
-        if self.max_train_steps is not None:
-            return int(self.max_train_steps)
-        return int(self.train_episodes * episode_limit)
-
-    def resolved_noise_std_decay(self) -> float:
-        if self.noise_decay_steps <= 0:
-            return 0.0
-        return float((self.noise_std_init - self.noise_std_min) / self.noise_decay_steps)
 
 
 @dataclass
@@ -212,9 +226,8 @@ class RuntimeConfig:
     observation_normalization_state: dict[str, object] | None = None
     action_dim: int = 1
     progress_state_path: str | None = None
-    observation_cache_root: str | None = None
-    observation_cache_batch_size: int = 8192
-    refresh_observation_cache: bool = False
+    shared_data_dir: str | None = None
+    shared_data_signature: str | None = None
     forecast_ready: dict[str, object] | None = None
 
 

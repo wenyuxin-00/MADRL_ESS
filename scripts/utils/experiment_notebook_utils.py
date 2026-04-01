@@ -127,10 +127,18 @@ def write_notebook_run_metadata(
     return written_paths
 
 
+def _uses_precomputed_shared_data(cfg) -> bool:
+    shared_data_dir = getattr(getattr(cfg, "runtime", None), "shared_data_dir", None)
+    return shared_data_dir not in (None, "")
+
+
 def evaluate_runner(runner, cfg, n_episodes: int = 1, deterministic: bool = True) -> dict:
     from scripts.utils.grid_notebook_workflow import ensure_forecast_ready
 
-    cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
+    if _uses_precomputed_shared_data(cfg):
+        cfg.runtime.forecast_ready = None
+    else:
+        cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
     eval_env = build_env(cfg, mode="test")
     controller = MADRLController(runner.agent_n, noise_std=runner.noise_std)
     try:
@@ -179,7 +187,10 @@ def load_madrl_controller(
     load_cfg.algo.name = algorithm or load_cfg.algo.name
     if device is not None:
         load_cfg.runtime.device = resolve_device(device)
-    load_cfg.runtime.forecast_ready = ensure_forecast_ready(load_cfg)
+    if _uses_precomputed_shared_data(load_cfg):
+        load_cfg.runtime.forecast_ready = None
+    else:
+        load_cfg.runtime.forecast_ready = ensure_forecast_ready(load_cfg)
 
     resolved_prediction_mode = prediction_mode or (
         "perfect" if str(load_cfg.forecast.type).strip().lower() == "perfect" else "normal"

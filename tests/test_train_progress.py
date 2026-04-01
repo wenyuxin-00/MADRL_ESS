@@ -35,8 +35,6 @@ def test_train_runner_batches_progress_updates(monkeypatch, tmp_path):
     cfg.train.progress_write_interval_seconds = 60.0
     cfg.train.show_progress = True
     cfg.train.use_noise_decay = False
-    cfg.runtime.observation_cache_root = str(case_dir / "cache")
-    cfg.runtime.refresh_observation_cache = True
     progress_path = case_dir / "progress.json"
     cfg.runtime.progress_state_path = str(progress_path)
 

@@ -9,4 +9,4 @@ __all__ = [
     "FORECASTER_REGISTRY",
     "PerfectForecaster",
     "build_forecaster",
-]
+]

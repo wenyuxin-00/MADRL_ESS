@@ -35,7 +35,12 @@
       "Bash(find /d/GithubProject/MADRL_ESS/data -type f -name *.csv)",
       "Bash(find d:GithubProjectMADRL_ESS -name *config*.yaml -o -name *config*.json)",
       "Bash(python -m pytest tests/test_lstm_load_per_agent.py tests/test_forecast_scaling.py -x -q)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(/tmp/extract_nb.py:*)",
+      "Read(//tmp/**)",
+      "Bash(python -c \"import json; nb = json.load\\(open\\(''/c/Users/10856/Desktop/GithubProject/MADRL_ESS/notebooks/madrl/train_madrl_grid_safe_poc_compare.ipynb''\\)\\); [print\\(f''Cell {i} \\({c[\"\"cell_type\"\"]}\\): {c[\"\"source\"\"][:200] if c[\"\"cell_type\"\"] == \"\"code\"\" else c[\"\"source\"\"][:100]}...''\\) for i, c in enumerate\\(nb[''cells''][:15]\\)]\")",
+      "Bash(python -c \"import json; nb = json.load\\(open\\(''notebooks/madrl/train_madrl_grid_safe_poc_compare.ipynb''\\)\\); print\\(''Total cells:'', len\\(nb[''cells'']\\)\\)\")",
+      "Bash(find /c/Users/10856/Desktop/GithubProject/MADRL_ESS -name \"*.py\" -type f -exec grep -l \"observation_cache_root\\\\|observation_cache_batch_size\\\\|refresh_observation_cache\\\\|forecast_data_source\\\\|CachedObservationBuilder\\\\|observation_cache_dir\\\\|precomputed_observation_cache\\\\|madrl_observation_cache_lab\\\\|forecast_madrl_handoff\\\\|run_mainline_ab\\\\|madrl_perf_lab\" {} \\\\;)"
     ]
   }
 }

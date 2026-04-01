@@ -9,8 +9,9 @@ from envs.rewards import NormalReward
 
 def _make_cfg():
     class _Reward:
-        w_action_pen = 5.0
-        lambda_throughput = 0.01
+        w_action_pen = 0.0
+        lambda_throughput = 0.0
+        export_subsidy_eur_per_kwh = 0.079
         w_voltage_pen = 10.0
         w_line_pen = 3.0
         w_trafo_pen = 7.0
@@ -28,34 +29,22 @@ def _make_cfg():
 def _make_env_state(
     n_agents: int = 3,
     *,
-    e_bat_req=None,
-    e_bat=None,
     price_t: float = 0.15,
-    net_load_t=None,
-    p_max=None,
+    actual_grid_power_t=None,
     dt: float = 0.25,
     v_violation=None,
     psi_v_raw: float = 0.0,
     psi_line_raw: float = 0.0,
     psi_trafo_raw: float = 0.0,
 ):
-    if e_bat_req is None:
-        e_bat_req = np.zeros(n_agents, dtype=np.float32)
-    if e_bat is None:
-        e_bat = np.zeros(n_agents, dtype=np.float32)
-    if net_load_t is None:
-        net_load_t = np.ones(n_agents, dtype=np.float32)
-    if p_max is None:
-        p_max = np.full(n_agents, 0.5, dtype=np.float32)
+    if actual_grid_power_t is None:
+        actual_grid_power_t = np.zeros(n_agents, dtype=np.float32)
     if v_violation is None:
         v_violation = np.zeros(n_agents, dtype=np.float32)
 
     return {
-        "e_bat_req": np.asarray(e_bat_req, dtype=np.float32),
-        "e_bat": np.asarray(e_bat, dtype=np.float32),
         "price_t": float(price_t),
-        "net_load_t": np.asarray(net_load_t, dtype=np.float32),
-        "p_max": np.asarray(p_max, dtype=np.float32),
+        "actual_grid_power_t": np.asarray(actual_grid_power_t, dtype=np.float32),
         "dt": float(dt),
         "v_violation": np.asarray(v_violation, dtype=np.float32),
         "psi_v_raw": float(psi_v_raw),
@@ -68,53 +57,29 @@ def test_component_meta_has_expected_keys() -> None:
     rf = NormalReward(_make_cfg())
     meta_keys = [meta.key for meta in rf.component_meta]
     assert meta_keys == [
-        "r_cost",
-        "r_throughput",
-        "r_action_pen",
+        "r_purchase_cost",
+        "r_export_subsidy",
         "r_safe_v",
         "r_safe_line",
         "r_safe_trafo",
     ]
 
 
-def test_cost_only_behavior_without_violations() -> None:
+def test_purchase_cost_and_export_subsidy_follow_grid_power_direction() -> None:
     rf = NormalReward(_make_cfg())
-    env_state = _make_env_state(e_bat=np.array([0.2, -0.2, 0.0], dtype=np.float32))
+    env_state = _make_env_state(actual_grid_power_t=np.array([2.0, -1.0, 0.0], dtype=np.float32))
 
     total, components = rf.compute(env_state)
 
-    expected_cost = -env_state["e_bat"] * env_state["dt"] * env_state["price_t"]
-    np.testing.assert_allclose(components["r_cost"], expected_cost, rtol=1e-5)
-    np.testing.assert_allclose(components["r_safe_v"], 0.0, atol=1e-7)
-    np.testing.assert_allclose(components["r_safe_line"], 0.0, atol=1e-7)
-    np.testing.assert_allclose(components["r_safe_trafo"], 0.0, atol=1e-7)
+    expected_purchase = np.array([0.075, 0.0, 0.0], dtype=np.float32)
+    expected_subsidy = np.array([0.0, 0.01975, 0.0], dtype=np.float32)
+    np.testing.assert_allclose(components["r_purchase_cost"], expected_purchase, rtol=1e-6)
+    np.testing.assert_allclose(components["r_export_subsidy"], expected_subsidy, rtol=1e-6)
     np.testing.assert_allclose(
         total,
-        components["r_cost"] + components["r_throughput"] - components["r_action_pen"],
-        rtol=1e-5,
+        -components["r_purchase_cost"] + components["r_export_subsidy"],
+        rtol=1e-6,
     )
-
-
-def test_throughput_reward_matches_abs_battery_power() -> None:
-    rf = NormalReward(_make_cfg())
-    env_state = _make_env_state(e_bat=np.array([0.4, -0.2, 0.0], dtype=np.float32))
-
-    _, components = rf.compute(env_state)
-
-    expected = 0.01 * np.abs(env_state["e_bat"]) * env_state["dt"]
-    np.testing.assert_allclose(components["r_throughput"], expected, rtol=1e-5)
-
-
-def test_storage_action_limit_penalty_uses_request_execution_gap() -> None:
-    rf = NormalReward(_make_cfg())
-    env_state = _make_env_state(
-        e_bat_req=np.array([0.5, -0.5, 0.1], dtype=np.float32),
-        e_bat=np.array([0.2, -0.1, 0.1], dtype=np.float32),
-    )
-
-    _, components = rf.compute(env_state)
-
-    np.testing.assert_allclose(components["r_action_pen"], 0.0, atol=1e-7)
 
 
 def test_voltage_penalty_splits_by_local_violation_proportion() -> None:
@@ -165,17 +130,23 @@ def test_line_penalty_is_shared() -> None:
     np.testing.assert_allclose(components["r_safe_line"], expected, rtol=1e-5)
 
 
-def test_pv_curtailment_gap_increases_action_penalty() -> None:
+def test_objective_combines_cost_subsidy_and_penalties() -> None:
     rf = NormalReward(_make_cfg())
     env_state = _make_env_state(
-        e_bat_req=np.zeros(3, dtype=np.float32),
-        e_bat=np.zeros(3, dtype=np.float32),
-        p_max=np.ones(3, dtype=np.float32),
+        actual_grid_power_t=np.array([2.0, -1.0, 0.5], dtype=np.float32),
+        v_violation=np.array([0.01, 0.0, 0.0], dtype=np.float32),
+        psi_v_raw=0.002,
+        psi_line_raw=0.1,
+        psi_trafo_raw=0.05,
     )
-    env_state["pv_raw"] = np.array([3.0, 2.0, 0.0], dtype=np.float32)
-    env_state["pv_effective_req"] = np.array([3.0, 2.0, 0.0], dtype=np.float32)
-    env_state["pv_effective"] = np.array([2.0, 1.0, 0.0], dtype=np.float32)
 
-    _, components = rf.compute(env_state)
+    total, components = rf.compute(env_state)
 
-    np.testing.assert_allclose(components["r_action_pen"], 0.0, atol=1e-7)
+    expected = (
+        -components["r_purchase_cost"]
+        + components["r_export_subsidy"]
+        - components["r_safe_v"]
+        - components["r_safe_line"]
+        - components["r_safe_trafo"]
+    )
+    np.testing.assert_allclose(total, expected, rtol=1e-6)

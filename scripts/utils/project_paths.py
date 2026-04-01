@@ -31,6 +31,11 @@ def get_notebook_root(root: str | Path | None = None) -> Path:
     return _resolve_root(root) / "notebooks"
 
 
+def get_forecast_lstm_notebook_path(root: str | Path | None = None) -> Path:
+    """Return the canonical managed forecast notebook path."""
+    return get_notebook_root(root) / "forecast" / "forecast_lstm.ipynb"
+
+
 def get_artifact_root(root: str | Path | None = None) -> Path:
     """Return the canonical artifact directory."""
     return _resolve_root(root) / "artifacts"
@@ -44,6 +49,11 @@ def get_forecast_artifact_root(root: str | Path | None = None) -> Path:
 def get_training_artifact_root(root: str | Path | None = None) -> Path:
     """Return the artifact directory used by training runs."""
     return get_artifact_root(root) / "training"
+
+
+def get_shared_data_root(root: str | Path | None = None) -> Path:
+    """Return the root directory that stores shared MADRL data packages."""
+    return get_training_artifact_root(root) / "shared_data"
 
 
 def get_checkpoint_root(root: str | Path | None = None) -> Path:

@@ -1,8 +1,7 @@
-"""Factory helpers for the single-stack cached Grid MADRL mainline."""
+"""Factory helpers for the Grid MADRL mainline."""
 
 from __future__ import annotations
 
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -12,85 +11,65 @@ from data.loaders.registry import build_dataset
 from envs.grid.core.grid_core import GridCore
 from envs.grid.deployments import build_agent_deployments
 from envs.grid_env import GridEnv
-from envs.observation.cached_builder import CachedObservationBuilder
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.normalization import build_observation_normalizer
+from envs.observation.precomputed_builder import PrecomputedObservationBuilder
 from envs.rewards import NormalReward
 from envs.subproc_vec_env import SubprocVecEnv
 from envs.vec_env import DummyVecEnv
 from models import validate_and_finalize_model_config
 from predictors.registry import build_forecaster
 from scripts.train import TrainRunner
-from scripts.utils.madrl_observation_cache_lab import build_or_load_observation_cache
+from scripts.utils.madrl_shared_data import load_madrl_shared_data_manifest
 from scripts.utils.torch_runtime import configure_torch_runtime
 
 
-def _runtime_cache_results(cfg: Any) -> dict[str, Any]:
-    cached = getattr(cfg.runtime, "_observation_cache_results", None)
-    if not isinstance(cached, dict):
-        cached = {}
-        setattr(cfg.runtime, "_observation_cache_results", cached)
-    return cached
+def _resolve_shared_data_dir(cfg: Any) -> Path | None:
+    shared_data_dir = getattr(getattr(cfg, "runtime", None), "shared_data_dir", None)
+    if shared_data_dir in (None, ""):
+        return None
+    return Path(shared_data_dir).resolve()
 
 
-def _runtime_cache_dirs(cfg: Any) -> dict[str, str]:
-    cached = getattr(cfg.runtime, "_observation_cache_dirs", None)
-    if not isinstance(cached, dict):
-        cached = {}
-        setattr(cfg.runtime, "_observation_cache_dirs", cached)
-    return cached
+def _shared_split_dir(cfg: Any, split: str) -> Path | None:
+    if str(split) not in {"train", "test"}:
+        return None
+    shared_data_dir = _resolve_shared_data_dir(cfg)
+    if shared_data_dir is None:
+        return None
+    split_dir = (shared_data_dir / str(split)).resolve()
+    manifest_path = split_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"shared_data_dir is set to '{shared_data_dir}', but split='{split}' is missing '{manifest_path.name}'."
+        )
+    return split_dir
 
 
-def _resolve_cache_root(cfg: Any) -> str | Path | None:
-    return getattr(cfg.runtime, "observation_cache_root", None)
-
-
-def _resolve_cache_batch_size(cfg: Any) -> int:
-    return int(getattr(cfg.runtime, "observation_cache_batch_size", 8192))
-
-
-def _resolve_cache_refresh(cfg: Any) -> bool:
-    return bool(getattr(cfg.runtime, "refresh_observation_cache", False))
-
-
-def _prepare_observation_cache(
-    cfg: Any,
-    *,
-    split: str,
-    refresh: bool | None = None,
-) -> Any:
-    split_name = str(split)
-    cached_results = _runtime_cache_results(cfg)
-    if split_name in cached_results:
-        return cached_results[split_name]
-
-    cache_result = build_or_load_observation_cache(
-        cfg,
-        split=split_name,
-        forecast_ready=getattr(cfg.runtime, "forecast_ready", None),
-        refresh=_resolve_cache_refresh(cfg) if refresh is None else bool(refresh),
-        root=_resolve_cache_root(cfg),
-        batch_size=_resolve_cache_batch_size(cfg),
-    )
-    cached_results[split_name] = cache_result
-    _runtime_cache_dirs(cfg)[split_name] = str(cache_result.cache_dir)
-    return cache_result
-
-
-def _cache_dir_for_split(cfg: Any, split: str) -> Path | None:
-    split_name = str(split)
-    cached_dirs = _runtime_cache_dirs(cfg)
-    if split_name not in cached_dirs:
-        cached_dirs[split_name] = str(_prepare_observation_cache(cfg, split=split_name).cache_dir)
-    cache_dir = cached_dirs.get(split_name)
-    return None if not cache_dir else Path(cache_dir).resolve()
+def _shared_data_metadata(cfg: Any) -> dict[str, Any] | None:
+    shared_data_dir = _resolve_shared_data_dir(cfg)
+    if shared_data_dir is None:
+        return None
+    manifest = load_madrl_shared_data_manifest(shared_data_dir)
+    return {
+        "shared_data_dir": str(shared_data_dir),
+        "shared_data_signature": str(
+            getattr(getattr(cfg, "runtime", None), "shared_data_signature", manifest.get("signature_hash", ""))
+        ),
+        "manifest": manifest,
+        "split_dirs": {
+            split: str((shared_data_dir / split).resolve())
+            for split in ("train", "test")
+            if (shared_data_dir / split / "manifest.json").exists()
+        },
+    }
 
 
 def _subproc_vec_env_is_supported_in_current_process() -> tuple[bool, str | None]:
     main_module = sys.modules.get("__main__")
     main_file = getattr(main_module, "__file__", None)
 
-    if "ipykernel" in sys.modules or os.environ.get("JPY_PARENT_PID"):
+    if "ipykernel" in sys.modules:
         return (
             False,
             "Jupyter/IPython kernels do not reliably support spawn-based vector environments.",
@@ -113,16 +92,20 @@ def build_env(
     forecaster: Any | None = None,
     obs_builder: Any | None = None,
 ) -> Any:
-    cache_dir = _cache_dir_for_split(cfg, mode) if str(mode) in {"train", "test"} else None
+    split_name = str(mode)
+    split_precomputed_dir = _shared_split_dir(cfg, split_name) if split_name in {"train", "test"} else None
+
     if dataset is None:
         dataset = build_dataset(cfg, mode=mode)
     if reward_fn is None:
         reward_fn = NormalReward(cfg)
-    if forecaster is None:
+
+    if forecaster is None and split_precomputed_dir is None:
         forecaster = build_forecaster(cfg)
+
     if obs_builder is None:
         normalizer = build_observation_normalizer(cfg)
-        builder_cls = CachedObservationBuilder if cache_dir is not None else DefaultObservationBuilder
+        builder_cls = PrecomputedObservationBuilder if split_precomputed_dir is not None else DefaultObservationBuilder
         obs_builder = builder_cls(
             local_features=cfg.obs.local_features,
             sequence_features=cfg.obs.sequence_features,
@@ -140,10 +123,8 @@ def build_env(
         forecaster=forecaster,
         obs_builder=obs_builder,
         grid_core=grid_core,
-        observation_cache_dir=cache_dir,
+        precomputed_data_dir=split_precomputed_dir,
     )
-    if cache_dir is not None:
-        env.cache_dir = str(cache_dir)
     return env
 
 
@@ -193,9 +174,6 @@ def build_train_runner(
     configure_torch_runtime(cfg, seed=seed)
     validate_and_finalize_model_config(cfg)
 
-    train_cache_result = _prepare_observation_cache(cfg, split="train")
-    test_cache_result = _prepare_observation_cache(cfg, split="test", refresh=False)
-
     train_env = _build_train_vec_env(cfg, seed=seed)
     eval_dataset = build_dataset(cfg, mode="test")
     eval_env = build_env(cfg, mode="test", dataset=eval_dataset)
@@ -211,20 +189,7 @@ def build_train_runner(
         number=number,
         seed=seed,
     )
-    runner.cache_metadata = {
-        "train": {
-            "cache_dir": str(train_cache_result.cache_dir),
-            "cache_hit": bool(train_cache_result.cache_hit),
-            "cache_build_time_s": float(train_cache_result.cache_build_time_s),
-        },
-        "test": {
-            "cache_dir": str(test_cache_result.cache_dir),
-            "cache_hit": bool(test_cache_result.cache_hit),
-            "cache_build_time_s": float(test_cache_result.cache_build_time_s),
-        },
-        "cache_root": None if _resolve_cache_root(cfg) is None else str(Path(_resolve_cache_root(cfg)).resolve()),
-        "observation_cache_batch_size": _resolve_cache_batch_size(cfg),
-    }
+    runner.shared_data_metadata = _shared_data_metadata(cfg)
     return runner
 
 

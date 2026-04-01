@@ -16,7 +16,7 @@ except ModuleNotFoundError as exc:
         "instead of falling back to legacy Gym."
     ) from exc
 
-from scripts.utils.madrl_observation_cache_lab import ObservationCacheStore
+from scripts.utils.madrl_shared_data import PrecomputedObservationStore
 from controllers.action_feasibility import build_safety_local_numpy, validate_executed_actions_numpy
 from envs.grid.deployments import resolve_fixed_battery_spec
 
@@ -36,7 +36,7 @@ class GridEnv(gym.Env):
         obs_builder: Any | None = None,
         grid_core: Any | None = None,
         data_path: str | None = None,
-        observation_cache_dir: str | Path | None = None,
+        precomputed_data_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -87,8 +87,7 @@ class GridEnv(gym.Env):
                 cfg.data.data_dir = str(Path(data_path).parent)
             dataset = build_dataset(cfg, mode=mode)
         self._dataset = dataset
-
-        if forecaster is None:
+        if forecaster is None and precomputed_data_dir is None:
             from predictors.oracle import PerfectForecaster
 
             forecaster = PerfectForecaster()
@@ -128,15 +127,15 @@ class GridEnv(gym.Env):
         self.history_timestamps: list[str] = []
         self.episode_meta: dict[str, Any] = {}
         self._last_episode_idx: int | None = None
-        self._observation_cache_dir = (
-            None if observation_cache_dir is None else Path(observation_cache_dir).resolve()
+        self._precomputed_data_dir = (
+            None if precomputed_data_dir is None else Path(precomputed_data_dir).resolve()
         )
-        self._observation_cache = (
+        self._precomputed_store = (
             None
-            if self._observation_cache_dir is None
-            else ObservationCacheStore(self._observation_cache_dir)
+            if self._precomputed_data_dir is None
+            else PrecomputedObservationStore(self._precomputed_data_dir)
         )
-        self._episode_cache: dict[str, np.ndarray] = {}
+        self._episode_precomputed: dict[str, np.ndarray] = {}
         self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
@@ -317,25 +316,25 @@ class GridEnv(gym.Env):
                 combined[name] = np.concatenate([prefix, signal], axis=0).astype(np.float32, copy=False)
         return combined
 
-    def has_cached_observations(self) -> bool:
-        return self._observation_cache is not None
+    def has_precomputed_observations(self) -> bool:
+        return self._precomputed_store is not None
 
-    def get_cached_local_feature(self, feature_name: str) -> np.ndarray:
+    def get_precomputed_local_feature(self, feature_name: str) -> np.ndarray:
         if feature_name != "calendar_time":
-            raise KeyError(f"Unknown cached local feature '{feature_name}'.")
-        if "calendar_time" not in self._episode_cache:
-            raise KeyError("Observation cache does not contain 'calendar_time'.")
-        return np.asarray(self._episode_cache["calendar_time"][self.cur_step], dtype=np.float32)
+            raise KeyError(f"Unknown precomputed local feature '{feature_name}'.")
+        if "calendar_time" not in self._episode_precomputed:
+            raise KeyError("Precomputed observation data does not contain 'calendar_time'.")
+        return np.asarray(self._episode_precomputed["calendar_time"][self.cur_step], dtype=np.float32)
 
-    def get_cached_sequence_feature(self, feature_name: str) -> np.ndarray:
+    def get_precomputed_sequence_feature(self, feature_name: str) -> np.ndarray:
         cache_key = f"{feature_name}_seq"
-        if cache_key not in self._episode_cache:
-            raise KeyError(f"Observation cache does not contain '{cache_key}'.")
-        return np.asarray(self._episode_cache[cache_key][self.cur_step], dtype=np.float32)
+        if cache_key not in self._episode_precomputed:
+            raise KeyError(f"Precomputed observation data does not contain '{cache_key}'.")
+        return np.asarray(self._episode_precomputed[cache_key][self.cur_step], dtype=np.float32)
 
     def _future_mean_price(self, t: int) -> float:
-        if "mu_t" in self._episode_cache:
-            return float(np.asarray(self._episode_cache["mu_t"], dtype=np.float32)[int(t)])
+        if "mu_t" in self._episode_precomputed:
+            return float(np.asarray(self._episode_precomputed["mu_t"], dtype=np.float32)[int(t)])
         start = t + 1
         end = min(t + 1 + self.future_horizon, self.episode_length)
         if start >= self.episode_length:
@@ -346,8 +345,8 @@ class GridEnv(gym.Env):
         return float(np.mean(seg))
 
     def _future_mean_price_next(self, t: int) -> float:
-        if "mu_next" in self._episode_cache:
-            return float(np.asarray(self._episode_cache["mu_next"], dtype=np.float32)[int(t)])
+        if "mu_next" in self._episode_precomputed:
+            return float(np.asarray(self._episode_precomputed["mu_next"], dtype=np.float32)[int(t)])
         return self._future_mean_price(min(t + 1, self.episode_length - 1))
 
     def _build_reset_info(self, episode_idx: int) -> dict[str, Any]:
@@ -384,15 +383,16 @@ class GridEnv(gym.Env):
             )
 
         self._load_episode(int(episode_idx))
-        self._episode_cache = (
-            {} if self._observation_cache is None else self._observation_cache.episode(int(episode_idx))
+        self._episode_precomputed = (
+            {} if self._precomputed_store is None else self._precomputed_store.episode(int(episode_idx))
         )
         self._last_episode_idx = int(episode_idx)
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
 
-        self.forecaster.reset()
-        self.forecaster.set_episode(self.get_combined_episode_signals(), self.episode_meta)
+        if self.forecaster is not None:
+            self.forecaster.reset()
+            self.forecaster.set_episode(self.get_combined_episode_signals(), self.episode_meta)
 
         base_load = np.asarray(self.ep_load[0], dtype=np.float32)
         base_pv = np.asarray(self.ep_pv[0], dtype=np.float32)

@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from configs import compose_experiment_config, recommended_gpu_fast_num_envs
+from scripts.run_train_mainline import _apply_runtime_controls
+from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
+from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
 from scripts.utils.train_mainline_launcher import (
     build_train_mainline_command,
     prepare_train_mainline_launch,
@@ -63,6 +68,22 @@ def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
     assert "3" in command
 
 
+@pytest.mark.parametrize(
+    ("deprecated_key", "value"),
+    [
+        ("forecast_" "data_source", "precomputed_" "observation_cache"),
+        ("observation_" "cache_root", "C:/tmp/cache"),
+        ("observation_" "cache_batch_size", 8192),
+        ("refresh_" "observation_cache", True),
+    ],
+)
+def test_apply_runtime_controls_rejects_legacy_cache_keys(tmp_path, deprecated_key, value):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    with pytest.raises(ValueError, match=deprecated_key):
+        _apply_runtime_controls(cfg, {deprecated_key: value})
+
+
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     data_dir = tmp_path / "data"
     write_prosumer_processed_dataset(
@@ -74,13 +95,47 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
 
     controls_dir = tmp_path / "controls"
     controls_dir.mkdir(parents=True, exist_ok=True)
+    shared_cfg = compose_experiment_config(
+        profile="gpu_fast",
+        algorithm="MATD3",
+        data_dir=data_dir,
+        device="cpu",
+        runtime_mode="performance",
+        seed=0,
+        require_cuda=False,
+    )
+    apply_notebook_experiment_settings(
+        shared_cfg,
+        prediction_mode="perfect",
+        test_start_date=20200101,
+        test_end_date=20200103,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[6, 10],
+        load_scale=[1.0, 1.0],
+        pv_scale=[1.0, 1.0],
+        future_horizon=1,
+        train_year=2019,
+        test_year=2020,
+    )
+    shared_data = ensure_madrl_shared_data(shared_cfg, root=tmp_path / "shared_data")
     experiment_controls = {
         "algorithm": "MATD3",
         "seed": 0,
         "runtime_mode": "performance",
         "device_request": "cpu",
         "require_cuda": False,
-        "observation_cache_root": str(tmp_path / "cache"),
+        "runtime_controls": {
+            "shared_data_dir": str(shared_data.shared_data_dir),
+            "shared_data_signature": str(shared_data.signature_hash),
+        },
+        "reward_controls": {
+            "export_subsidy_eur_per_kwh": 0.079,
+            "lambda_throughput": 0.0,
+            "w_action_pen": 0.0,
+            "w_voltage_pen": 0.0,
+            "w_line_pen": 0.0,
+            "w_trafo_pen": 0.0,
+        },
     }
     data_controls = {
         "prediction_mode": "perfect",
@@ -128,12 +183,12 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "checkpoint_root": str(tmp_path / "checkpoints"),
     }
 
-    experiment_path = controls_dir / "experiment_controls.json"
-    data_path = controls_dir / "data_controls.json"
-    battery_path = controls_dir / "battery_controls.json"
-    train_path = controls_dir / "train_controls.json"
-    checkpoint_path = controls_dir / "checkpoint_controls.json"
-    result_path = controls_dir / "result.json"
+    experiment_path = (controls_dir / "experiment_controls.json").resolve()
+    data_path = (controls_dir / "data_controls.json").resolve()
+    battery_path = (controls_dir / "battery_controls.json").resolve()
+    train_path = (controls_dir / "train_controls.json").resolve()
+    checkpoint_path = (controls_dir / "checkpoint_controls.json").resolve()
+    result_path = (controls_dir / "result.json").resolve()
 
     experiment_path.write_text(json.dumps(experiment_controls), encoding="utf-8")
     data_path.write_text(json.dumps(data_controls), encoding="utf-8")
@@ -199,6 +254,10 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert len(reward_summary["episodes"]) == result["episodes_completed"]
     assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
     assert "components" in reward_summary
+    assert {"r_purchase_cost", "r_export_subsidy", "r_safe_v", "r_safe_line", "r_safe_trafo"} == set(
+        reward_summary["components"]
+    )
+    assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
     assert progress_payload["estimated_end_time"]
     assert progress_payload["remaining_seconds"] == 0.0
     assert "steps_per_sec" in result["perf_summary"]
@@ -208,8 +267,10 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert "history_time_s" in result["perf_summary"]
     assert "progress_io_time_s" in result["perf_summary"]
     assert "agent_update_time_s" in result["perf_summary"]
-    assert "cache_build_time_s" in result["perf_summary"]
-    assert "cache_hit" in result["perf_summary"]
+    assert result["perf_summary"]["shared_data_enabled"] is True
+    assert result["perf_summary"]["shared_data_signature"] == str(shared_data.signature_hash)
+    assert result["shared_data_signature"] == str(shared_data.signature_hash)
+    assert result["shared_data_dir"] == str(shared_data.shared_data_dir)
     assert result["safety_summary"]["enabled"] is False
     assert result["safety_controls"]["enabled"] is False
 
@@ -231,6 +292,11 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "runtime_mode": "performance",
         "device_request": "cpu",
         "require_cuda": False,
+        "reward_controls": {
+            "export_subsidy_eur_per_kwh": 0.079,
+            "lambda_throughput": 0.0,
+            "w_action_pen": 0.0,
+        },
         "safety_controls": {
             "enabled": True,
             "projection_iters": 4,
@@ -286,18 +352,28 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "checkpoint_root": str(tmp_path / "ck"),
     }
 
-    experiment_path = controls_dir / "experiment_controls.json"
-    data_path = controls_dir / "data_controls.json"
-    battery_path = controls_dir / "battery_controls.json"
-    train_path = controls_dir / "train_controls.json"
-    checkpoint_path = controls_dir / "checkpoint_controls.json"
-    result_path = controls_dir / "result.json"
+    experiment_path = (controls_dir / "experiment_controls.json").resolve()
+    data_path = (controls_dir / "data_controls.json").resolve()
+    battery_path = (controls_dir / "battery_controls.json").resolve()
+    train_path = (controls_dir / "train_controls.json").resolve()
+    checkpoint_path = (controls_dir / "checkpoint_controls.json").resolve()
+    result_path = (controls_dir / "result.json").resolve()
 
     experiment_path.write_text(json.dumps(experiment_controls), encoding="utf-8")
     data_path.write_text(json.dumps(data_controls), encoding="utf-8")
     battery_path.write_text(json.dumps(battery_controls), encoding="utf-8")
     train_path.write_text(json.dumps(train_controls), encoding="utf-8")
     checkpoint_path.write_text(json.dumps(checkpoint_controls), encoding="utf-8")
+    assert experiment_path.exists()
+    assert data_path.exists()
+    assert battery_path.exists()
+    assert train_path.exists()
+    assert checkpoint_path.exists()
+    assert experiment_path.exists()
+    assert data_path.exists()
+    assert battery_path.exists()
+    assert train_path.exists()
+    assert checkpoint_path.exists()
 
     command = [
         sys.executable,
@@ -334,6 +410,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     result = json.loads(result_path.read_text(encoding="utf-8"))
 
     assert result["algorithm"] == "MATD3_SAFE_POC"
+    assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
     assert result["safety_controls"]["enabled"] is True
     assert result["safety_summary"]["enabled"] is True
     assert result["safety_summary"]["projection_batches"] > 0

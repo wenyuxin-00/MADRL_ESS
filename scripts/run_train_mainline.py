@@ -1,4 +1,4 @@
-"""CLI entrypoint for the cached-observation MADRL training mainline."""
+"""CLI entrypoint for the Grid MADRL training mainline."""
 
 from __future__ import annotations
 
@@ -104,6 +104,20 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
         "compile_dynamic",
     )
     str_fields = ("amp_dtype", "compile_mode", "matmul_precision")
+    deprecated_fields = (
+        "forecast_" "data_source",
+        "observation_" "cache_root",
+        "observation_" "cache_batch_size",
+        "refresh_" "observation_cache",
+    )
+    deprecated_hits = [field_name for field_name in deprecated_fields if field_name in controls]
+    if deprecated_hits:
+        joined = ", ".join(sorted(deprecated_hits))
+        raise ValueError(
+            "runtime_controls no longer supports legacy cache fields: "
+            f"{joined}. Use shared_data_dir/shared_data_signature for precomputed data, "
+            "or omit them to use the live forecaster path."
+        )
 
     for field_name in bool_fields:
         if field_name in controls:
@@ -111,6 +125,29 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
     for field_name in str_fields:
         if field_name in controls:
             setattr(cfg.runtime, field_name, str(controls[field_name]))
+    if "shared_data_dir" in controls:
+        cfg.runtime.shared_data_dir = None if controls["shared_data_dir"] in (None, "") else str(
+            Path(controls["shared_data_dir"]).resolve()
+        )
+    if "shared_data_signature" in controls:
+        cfg.runtime.shared_data_signature = None if controls["shared_data_signature"] in (None, "") else str(
+            controls["shared_data_signature"]
+        )
+
+
+def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
+    controls = dict(reward_controls or {})
+    numeric_fields = (
+        "export_subsidy_eur_per_kwh",
+        "lambda_throughput",
+        "w_action_pen",
+        "w_voltage_pen",
+        "w_line_pen",
+        "w_trafo_pen",
+    )
+    for field_name in numeric_fields:
+        if field_name in controls:
+            setattr(cfg.reward, field_name, float(controls[field_name]))
 
 
 def _apply_safety_controls(cfg, safety_controls: dict[str, Any] | None) -> None:
@@ -241,6 +278,8 @@ def _build_result_payload(
         "device": str(cfg.runtime.device),
         "vec_env": _public_vec_env_name(runner.env),
         "perf_summary": dict(runner.perf_summary),
+        "shared_data_dir": getattr(cfg.runtime, "shared_data_dir", None),
+        "shared_data_signature": getattr(cfg.runtime, "shared_data_signature", None),
         "started_at": run_metadata.get("started_at"),
         "finished_at": run_metadata.get("finished_at"),
         "elapsed_seconds": run_metadata.get("elapsed_seconds"),
@@ -260,7 +299,7 @@ def _build_result_payload(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the cached-observation Grid MADRL training mainline.")
+    parser = argparse.ArgumentParser(description="Run the Grid MADRL training mainline.")
     parser.add_argument("--experiment-controls", required=True)
     parser.add_argument("--data-controls", required=True)
     parser.add_argument("--battery-controls")
@@ -322,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _apply_model_controls(cfg, experiment_controls.get("model_controls"))
     _apply_runtime_controls(cfg, experiment_controls.get("runtime_controls"))
+    _apply_reward_controls(cfg, experiment_controls.get("reward_controls"))
     _apply_safety_controls(cfg, experiment_controls.get("safety_controls"))
     agent_profiles = list(data_controls.get("agent_profiles", cfg.data.agent_profiles))
     n_requested_agents = len(agent_profiles)
@@ -343,9 +383,6 @@ def main(argv: list[str] | None = None) -> int:
     _apply_train_controls(cfg, train_controls)
     cfg.train.noise_decay_steps = cfg.train.train_episodes * cfg.env.episode_limit
     cfg.runtime.progress_state_path = str(progress_json)
-    cfg.runtime.observation_cache_root = experiment_controls.get("observation_cache_root")
-    cfg.runtime.observation_cache_batch_size = int(experiment_controls.get("observation_cache_batch_size", 8192))
-    cfg.runtime.refresh_observation_cache = bool(experiment_controls.get("refresh_observation_cache", False))
 
     runtime_state = configure_torch_runtime(
         cfg,
@@ -353,7 +390,10 @@ def main(argv: list[str] | None = None) -> int:
         seed=seed,
         require_cuda=experiment_controls.get("require_cuda"),
     )
-    forecast_ready = ensure_forecast_ready(cfg)
+    if getattr(cfg.runtime, "shared_data_dir", None):
+        forecast_ready = None
+    else:
+        forecast_ready = ensure_forecast_ready(cfg)
     cfg.runtime.forecast_ready = forecast_ready
 
     summary = print_experiment_summary(cfg)
@@ -366,14 +406,13 @@ def main(argv: list[str] | None = None) -> int:
     summary["log_path"] = str(log_path)
     summary["run_label"] = str(save_dir.name)
     summary["training_backend"] = "mainline"
-    summary["observation_cache_root"] = cfg.runtime.observation_cache_root
-    summary["observation_cache_batch_size"] = int(cfg.runtime.observation_cache_batch_size)
-    summary["refresh_observation_cache"] = bool(cfg.runtime.refresh_observation_cache)
+    summary["shared_data_dir"] = getattr(cfg.runtime, "shared_data_dir", None)
+    summary["shared_data_signature"] = getattr(cfg.runtime, "shared_data_signature", None)
     summary["safety"] = _serialize_safety_cfg(cfg)
 
     runner = build_train_runner(cfg, seed=seed, env_name=args.env_name, number=args.run_number)
-    train_cache_meta = dict(getattr(runner, "cache_metadata", {}).get("train", {}))
-    summary["observation_cache_dir"] = train_cache_meta.get("cache_dir")
+    shared_data_meta = dict(getattr(runner, "shared_data_metadata", {}) or {})
+    summary["shared_data_metadata"] = shared_data_meta
     episodes_completed = 0
     try:
         episodes_completed = runner.run()
@@ -404,11 +443,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         result_payload["perf_summary"].update(
             {
-                "cache_build_time_s": float(train_cache_meta.get("cache_build_time_s", 0.0)),
-                "cache_hit": bool(train_cache_meta.get("cache_hit", False)),
-                "observation_cache_batch_size": int(
-                    getattr(cfg.runtime, "observation_cache_batch_size", 8192)
-                ),
+                "shared_data_enabled": bool(getattr(cfg.runtime, "shared_data_dir", None)),
+                "shared_data_dir": getattr(cfg.runtime, "shared_data_dir", None),
+                "shared_data_signature": getattr(cfg.runtime, "shared_data_signature", None),
             }
         )
         _write_json(result_json, result_payload)

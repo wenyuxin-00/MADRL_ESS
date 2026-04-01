@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,11 +168,11 @@ def apply_notebook_experiment_settings(
     prediction_mode: str,
     test_start_date: str | int | None,
     test_end_date: str | int | None,
-    agent_profiles: list[str],
+    agent_profiles: list[str] | None = None,
     agent_bus_ids: list[int] | None = None,
-    load_scale: float | list[float],
-    pv_scale: float | list[float],
-    future_horizon: int,
+    load_scale: float | list[float] | None = None,
+    pv_scale: float | list[float] | None = None,
+    future_horizon: int | None = None,
     battery_controls: Mapping[str, object] | None = None,
     forecast_controls: Mapping[str, object] | None = None,
     train_year: int | None = None,
@@ -181,9 +182,9 @@ def apply_notebook_experiment_settings(
     cfg.obs.sequence_features = ["price", "load", "pv"]
     cfg.forecast.target_signals = ["price", "load", "pv"]
 
-    cfg.data.agent_profiles = list(agent_profiles)
-    cfg.env.num_agents = int(len(agent_profiles))
-    cfg.env.future_horizon = int(future_horizon)
+    cfg.data.agent_profiles = list(cfg.data.agent_profiles if agent_profiles is None else agent_profiles)
+    cfg.env.num_agents = int(len(cfg.data.agent_profiles))
+    cfg.env.future_horizon = int(cfg.env.future_horizon if future_horizon is None else future_horizon)
 
     resolved_agent_bus_ids = list(cfg.grid.agent_bus_ids if agent_bus_ids is None else agent_bus_ids)
     if len(resolved_agent_bus_ids) < cfg.env.num_agents:
@@ -200,8 +201,22 @@ def apply_notebook_experiment_settings(
 
     cfg.data.test_start_date = normalize_date_input(test_start_date)
     cfg.data.test_end_date = normalize_date_input(test_end_date)
-    cfg.data.load_scale = normalize_agent_scale(load_scale, n_agents=cfg.env.num_agents, name="load_scale")
-    cfg.data.pv_scale = normalize_agent_scale(pv_scale, n_agents=cfg.env.num_agents, name="pv_scale")
+    resolved_load_scale = (
+        cfg.data.resolved_load_scale(cfg.env.num_agents) if load_scale is None else load_scale
+    )
+    resolved_pv_scale = (
+        cfg.data.resolved_pv_scale(cfg.env.num_agents) if pv_scale is None else pv_scale
+    )
+    cfg.data.load_scale = normalize_agent_scale(
+        resolved_load_scale,
+        n_agents=cfg.env.num_agents,
+        name="load_scale",
+    )
+    cfg.data.pv_scale = normalize_agent_scale(
+        resolved_pv_scale,
+        n_agents=cfg.env.num_agents,
+        name="pv_scale",
+    )
     resolved_battery_controls = resolve_battery_controls(cfg, battery_controls)
     cfg.env.battery_capacity = list(resolved_battery_controls["battery_capacity"])
     cfg.env.max_charge_rate = resolved_battery_controls["max_charge_rate"]
@@ -269,6 +284,11 @@ def ensure_forecast_ready(cfg) -> dict[str, object] | None:
     return ensure_lstm_artifacts(cfg, device=cfg.runtime.device)
 
 
+def cache_only_forecast_enabled(cfg) -> bool:
+    shared_data_dir = getattr(getattr(cfg, "runtime", None), "shared_data_dir", None)
+    return shared_data_dir not in (None, "")
+
+
 def build_comparison_cfg(cfg, *, prediction_mode: str):
     comparison_cfg = deepcopy(cfg)
     comparison_cfg.forecast.type = resolve_forecast_backend(prediction_mode, comparison_cfg.env.future_horizon)
@@ -299,12 +319,175 @@ def _step_timestamp(reset_info: dict[str, object], step_idx: int) -> pd.Timestam
     return pd.Timestamp(step_idx, unit="m")
 
 
-def _operating_cost_per_agent(info: dict[str, object], dt: float) -> np.ndarray:
-    return (
-        np.asarray(info["net_load"], dtype=np.float32)
-        * np.float32(dt)
-        * np.float32(info["price"])
-    ).astype(np.float32)
+def _purchase_cost_per_agent(info: dict[str, object], dt: float) -> np.ndarray:
+    grid_import = np.asarray(
+        info.get("grid_import_kw", np.maximum(np.asarray(info["net_load"], dtype=np.float32), 0.0)),
+        dtype=np.float32,
+    )
+    return (grid_import * np.float32(dt) * np.float32(info["price"])).astype(np.float32)
+
+
+def _export_subsidy_per_agent(info: dict[str, object], dt: float, subsidy_rate: float) -> np.ndarray:
+    grid_export = np.asarray(
+        info.get("grid_export_kw", np.maximum(-np.asarray(info["net_load"], dtype=np.float32), 0.0)),
+        dtype=np.float32,
+    )
+    return (grid_export * np.float32(dt) * np.float32(subsidy_rate)).astype(np.float32)
+
+
+def _mean_component_total(info: dict[str, object], component_key: str, n_agents: int) -> float:
+    values = np.asarray(info.get(component_key, np.zeros((n_agents,), dtype=np.float32)), dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return 0.0
+    return float(np.mean(values))
+
+
+def _approx_trafo_limit_kw(env) -> float | None:
+    net = getattr(getattr(env, "_grid_core", None), "net", None)
+    trafo_table = getattr(net, "trafo", None)
+    if trafo_table is None or len(trafo_table) == 0:
+        return None
+    try:
+        if "sn_mva" not in trafo_table:
+            return None
+        sn_mva = np.asarray(trafo_table["sn_mva"], dtype=np.float64).reshape(-1)
+        if sn_mva.size == 0:
+            return None
+        return float(np.sum(sn_mva) * 1000.0)
+    except Exception:
+        return None
+
+
+def _load_json_payload(path: Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _canonicalize_compare_value(value):
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonicalize_compare_value(sub_value)
+            for key, sub_value in sorted(dict(value).items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_canonicalize_compare_value(item) for item in value]
+    if isinstance(value, float):
+        return round(float(value), 10)
+    return value
+
+
+def load_training_run_bundle(model_root) -> dict[str, object]:
+    resolved_model_root = Path(model_root).resolve()
+    meta_dir = resolved_model_root / "_meta"
+    required_files = (
+        "train_result.json",
+        "experiment_controls.json",
+        "data_controls.json",
+        "battery_controls.json",
+        "train_controls.json",
+        "checkpoint_controls.json",
+    )
+    missing = [filename for filename in required_files if not (meta_dir / filename).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Training metadata is incomplete for '{resolved_model_root}'. Missing: {missing}"
+        )
+    bundle = {
+        "model_root": str(resolved_model_root),
+        "meta_dir": str(meta_dir),
+    }
+    for filename in required_files:
+        bundle[filename.removesuffix(".json")] = _load_json_payload(meta_dir / filename)
+    return bundle
+
+
+def _extract_compare_signature(bundle: Mapping[str, object]) -> dict[str, object]:
+    experiment_controls = dict(bundle["experiment_controls"])
+    data_controls = dict(bundle["data_controls"])
+    battery_controls = dict(bundle["battery_controls"])
+    train_controls = dict(bundle["train_controls"])
+    reward_controls = dict(experiment_controls.get("reward_controls", {}))
+    forecast_controls = dict(experiment_controls.get("forecast_controls", {}))
+    model_controls = dict(experiment_controls.get("model_controls", {}))
+    return {
+        "prediction_mode": str(data_controls.get("prediction_mode", "perfect")),
+        "seed": int(experiment_controls.get("seed", 0)),
+        "export_subsidy_eur_per_kwh": float(reward_controls.get("export_subsidy_eur_per_kwh", 0.079)),
+        "lambda_throughput": float(reward_controls.get("lambda_throughput", 0.0)),
+        "w_action_pen": float(reward_controls.get("w_action_pen", 0.0)),
+        "agent_profiles": list(data_controls.get("agent_profiles", [])),
+        "agent_bus_ids": list(data_controls.get("agent_bus_ids", [])),
+        "load_scale": list(data_controls.get("load_scale", [])),
+        "pv_scale": list(data_controls.get("pv_scale", [])),
+        "future_horizon": int(data_controls.get("future_horizon", 0)),
+        "train_year": data_controls.get("train_year"),
+        "test_year": data_controls.get("test_year"),
+        "test_start_date": data_controls.get("test_start_date"),
+        "test_end_date": data_controls.get("test_end_date"),
+        "shared_data_signature": bundle.get("train_result", {}).get("shared_data_signature"),
+        "battery_controls": battery_controls,
+        "forecast_controls": forecast_controls,
+        "model_controls": model_controls,
+        "train_controls": {
+            key: train_controls.get(key)
+            for key in (
+                "profile",
+                "model_family",
+                "train_episodes",
+                "max_train_steps",
+                "num_envs",
+                "vec_env_type",
+                "batch_size",
+                "buffer_size",
+                "update_interval",
+                "updates_per_step",
+                "policy_update_freq",
+                "actor_lr",
+                "critic_lr",
+                "noise_std_init",
+                "noise_std_min",
+                "noise_decay_steps",
+                "use_noise_decay",
+            )
+        },
+    }
+
+
+def validate_compare_model_bundles(
+    model_roots: Mapping[str, str | Path],
+    *,
+    expected_count: int = 3,
+) -> dict[str, dict[str, object]]:
+    if len(model_roots) != int(expected_count):
+        raise ValueError(
+            f"Compare requires exactly {expected_count} DRL model roots, got {len(model_roots)}."
+        )
+
+    bundles: dict[str, dict[str, object]] = {}
+    signatures: dict[str, dict[str, object]] = {}
+    for label, model_root in dict(model_roots).items():
+        bundle = load_training_run_bundle(model_root)
+        bundles[str(label)] = bundle
+        signatures[str(label)] = _extract_compare_signature(bundle)
+
+    labels = list(signatures)
+    reference_label = labels[0]
+    reference_signature = signatures[reference_label]
+    mismatch_lines: list[str] = []
+    for label in labels[1:]:
+        current_signature = signatures[label]
+        for field_name, reference_value in reference_signature.items():
+            current_value = current_signature[field_name]
+            if _canonicalize_compare_value(current_value) != _canonicalize_compare_value(reference_value):
+                mismatch_lines.append(
+                    f"{field_name}: {reference_label}={reference_value!r} vs {label}={current_value!r}"
+                )
+    if mismatch_lines:
+        joined = "\n".join(mismatch_lines)
+        raise ValueError(
+            "Compare model metadata mismatch detected. All DRL runs must share the same "
+            f"subsidy, hyperparameters, forecast controls, battery controls, dates, and seed.\n{joined}"
+        )
+    return bundles
 
 
 def _power_to_normalized_action(power_kw: float, power_limit_kw: float) -> np.ndarray:
@@ -410,7 +593,10 @@ def collect_controller_rollout(
 
     from scripts.builder import build_env
 
-    cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
+    if cache_only_forecast_enabled(cfg):
+        cfg.runtime.forecast_ready = None
+    else:
+        cfg.runtime.forecast_ready = ensure_forecast_ready(cfg)
     env = build_env(cfg, mode="test")
     step_rows: list[dict[str, object]] = []
     agent_rows: list[dict[str, object]] = []
@@ -418,6 +604,7 @@ def collect_controller_rollout(
     bus_ids = [int(bus_id) for bus_id in env._grid_core.net.bus.index.tolist()]
     agent_bus_ids = [int(bus_id) for bus_id in getattr(env._grid_core, "agent_bus_ids", cfg.grid.agent_bus_ids)]
     agent_bus_set = set(agent_bus_ids)
+    trafo_limit_kw = _approx_trafo_limit_kw(env)
     try:
         for episode_idx in range(env.num_available_episodes):
             obs, reset_info = env.reset(episode_idx=episode_idx)
@@ -463,7 +650,7 @@ def collect_controller_rollout(
                     else next_obs
                 )
 
-                cost_per_agent = _operating_cost_per_agent(info, float(env.dt))
+                purchase_cost_per_agent = _purchase_cost_per_agent(info, float(env.dt))
                 base_net_load = np.asarray(
                     info.get(
                         "base_net_load",
@@ -525,6 +712,35 @@ def collect_controller_rollout(
                 battery_power = np.asarray(info["e_bat"], dtype=np.float32)
                 battery_charge = np.clip(battery_power, 0.0, None).astype(np.float32)
                 battery_discharge = np.maximum(-battery_power, 0.0).astype(np.float32)
+                export_subsidy_per_agent = _export_subsidy_per_agent(
+                    info,
+                    float(env.dt),
+                    float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
+                )
+                voltage_penalty_per_agent = np.asarray(
+                    info.get("r_safe_v", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                line_penalty_per_agent = np.asarray(
+                    info.get("r_safe_line", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                trafo_penalty_per_agent = np.asarray(
+                    info.get("r_safe_trafo", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                objective_per_agent = (
+                    purchase_cost_per_agent
+                    - export_subsidy_per_agent
+                    + voltage_penalty_per_agent
+                    + line_penalty_per_agent
+                    + trafo_penalty_per_agent
+                ).astype(np.float32)
+                voltage_penalty_total = _mean_component_total(info, "r_safe_v", env.n)
+                line_penalty_total = _mean_component_total(info, "r_safe_line", env.n)
+                trafo_penalty_total = _mean_component_total(info, "r_safe_trafo", env.n)
+                purchase_cost_total = float(np.sum(purchase_cost_per_agent))
+                export_subsidy_total = float(np.sum(export_subsidy_per_agent))
                 step_rows.append(
                     {
                         "controller": label,
@@ -544,9 +760,24 @@ def collect_controller_rollout(
                         "grid_export_total": float(np.sum(grid_export)),
                         "battery_charge_total": float(np.sum(battery_charge)),
                         "battery_discharge_total": float(np.sum(battery_discharge)),
+                        "purchase_cost_total": purchase_cost_total,
+                        "export_subsidy_total": export_subsidy_total,
+                        "voltage_penalty_total": voltage_penalty_total,
+                        "line_penalty_total": line_penalty_total,
+                        "trafo_penalty_total": trafo_penalty_total,
+                        "objective_total": (
+                            purchase_cost_total
+                            - export_subsidy_total
+                            + voltage_penalty_total
+                            + line_penalty_total
+                            + trafo_penalty_total
+                        ),
+                        "voltage_violation_count": int(
+                            ((np.asarray(info.get("vm_pu", []), dtype=np.float32) < float(cfg.grid.v_min_pu))
+                            | (np.asarray(info.get("vm_pu", []), dtype=np.float32) > float(cfg.grid.v_max_pu))).sum()
+                        ),
                         "controller_action_gap_total": float(np.sum(controller_action_gap)),
                         "action_penalty_total": float(np.sum(action_penalty)),
-                        "operating_cost": float(np.sum(cost_per_agent)),
                     }
                 )
 
@@ -580,8 +811,13 @@ def collect_controller_rollout(
                             "controller_action_gap": float(controller_action_gap[agent_idx]),
                             "action_penalty_unweighted": float(action_penalty_unweighted[agent_idx]),
                             "r_action_pen": float(action_penalty[agent_idx]),
+                            "r_safe_v": float(voltage_penalty_per_agent[agent_idx]),
+                            "r_safe_line": float(line_penalty_per_agent[agent_idx]),
+                            "r_safe_trafo": float(trafo_penalty_per_agent[agent_idx]),
                             "soc": float(np.asarray(info["soc_next"], dtype=np.float32)[agent_idx]),
-                            "operating_cost": float(cost_per_agent[agent_idx]),
+                            "purchase_cost": float(purchase_cost_per_agent[agent_idx]),
+                            "export_subsidy": float(export_subsidy_per_agent[agent_idx]),
+                            "objective_total": float(objective_per_agent[agent_idx]),
                         }
                     )
 
@@ -610,9 +846,11 @@ def collect_controller_rollout(
         agent_df = pd.DataFrame(agent_rows).sort_values(["episode_idx", "step", "agent_id"]).reset_index(drop=True)
         grid_df = pd.DataFrame(grid_rows).sort_values(["episode_idx", "step", "bus_id"]).reset_index(drop=True)
         summary = (
-            agent_df.groupby(["controller", "agent_profile"], as_index=False)["operating_cost"].sum()
+            agent_df.groupby(["controller", "agent_profile"], as_index=False)[
+                ["purchase_cost", "export_subsidy", "objective_total"]
+            ].sum()
             if not agent_df.empty
-            else pd.DataFrame(columns=["controller", "agent_profile", "operating_cost"])
+            else pd.DataFrame(columns=["controller", "agent_profile", "purchase_cost", "export_subsidy", "objective_total"])
         )
         return RolloutResult(
             step_df=step_df,
@@ -633,6 +871,8 @@ def collect_controller_rollout(
                     resolve_prediction_mode_from_forecast_backend(cfg.forecast.type)
                 ),
                 "dt_hours": float(cfg.env.dt),
+                "trafo_limit_kw": trafo_limit_kw,
+                "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
             },
         )
     finally:
@@ -647,6 +887,7 @@ def collect_madrl_rollout(
     episode_tag: int | None = None,
     experiment_name: str = "grid_mainline",
     checkpoint_root=None,
+    label: str | None = None,
 ) -> RolloutResult:
     from scripts.utils.experiment_notebook_utils import load_madrl_controller
 
@@ -663,7 +904,7 @@ def collect_madrl_rollout(
     )
     return collect_controller_rollout(
         loaded["cfg"],
-        label=f"DRL ({resolve_evaluation_mode(prediction_mode)})",
+        label=label or f"DRL ({resolve_evaluation_mode(prediction_mode)})",
         controller=loaded["controller"],
     )
 
@@ -679,25 +920,37 @@ def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) 
     )
 
 
-def compare_operating_costs(*rollouts: RolloutResult) -> pd.DataFrame:
+def compare_purchase_costs(*rollouts: RolloutResult) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for rollout in rollouts:
-        total_cost = float(rollout.agent_df["operating_cost"].sum()) if not rollout.agent_df.empty else 0.0
+        total_cost = float(rollout.agent_df["purchase_cost"].sum()) if not rollout.agent_df.empty else 0.0
         rows.append(
             {
                 "controller": rollout.meta["controller"],
-                "total_operating_cost": total_cost,
+                "purchase_cost_total": total_cost,
             }
         )
-    return pd.DataFrame(rows).sort_values("total_operating_cost").reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values("purchase_cost_total").reset_index(drop=True)
 
 
 def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
     step_df = rollout.step_df.copy()
     agent_df = rollout.agent_df.copy()
     grid_df = rollout.grid_df.copy()
+    summary_df = rollout.summary.copy()
 
-    total_operating_cost = float(agent_df["operating_cost"].sum()) if not agent_df.empty else 0.0
+    purchase_cost_total = float(step_df["purchase_cost_total"].sum()) if "purchase_cost_total" in step_df.columns else 0.0
+    export_subsidy_total = (
+        float(step_df["export_subsidy_total"].sum()) if "export_subsidy_total" in step_df.columns else 0.0
+    )
+    objective_total = float(step_df["objective_total"].sum()) if "objective_total" in step_df.columns else 0.0
+    voltage_penalty_total = (
+        float(step_df["voltage_penalty_total"].sum()) if "voltage_penalty_total" in step_df.columns else 0.0
+    )
+    line_penalty_total = float(step_df["line_penalty_total"].sum()) if "line_penalty_total" in step_df.columns else 0.0
+    trafo_penalty_total = (
+        float(step_df["trafo_penalty_total"].sum()) if "trafo_penalty_total" in step_df.columns else 0.0
+    )
     price_mae = (
         float(np.abs(step_df["price"] - step_df["price_pred"]).mean())
         if not step_df.empty
@@ -730,9 +983,15 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         min_vm_pu = float(grid_df["vm_pu"].min())
         max_vm_pu = float(grid_df["vm_pu"].max())
 
-    return {
+    metrics = {
         "controller": str(rollout.meta.get("controller", "unknown")),
-        "total_operating_cost": total_operating_cost,
+        "purchase_cost_total": purchase_cost_total,
+        "export_subsidy_total": export_subsidy_total,
+        "objective_total": objective_total,
+        "voltage_penalty_total": voltage_penalty_total,
+        "trafo_penalty_total": trafo_penalty_total,
+        "line_penalty_total": line_penalty_total,
+        "voltage_violation_count": voltage_violation_bus_points,
         "price_mae": price_mae,
         "load_mae": load_mae,
         "pv_mae": pv_mae,
@@ -743,6 +1002,12 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         "v_min_pu": v_min,
         "v_max_pu": v_max,
     }
+    if not summary_df.empty:
+        for row in summary_df.itertuples(index=False):
+            profile = str(getattr(row, "agent_profile", "unknown")).strip().lower()
+            safe_profile = "".join(ch if ch.isalnum() else "_" for ch in profile).strip("_") or "unknown"
+            metrics[f"purchase_cost_{safe_profile}"] = float(getattr(row, "purchase_cost"))
+    return metrics
 
 
 def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
@@ -751,7 +1016,13 @@ def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "controller",
-                "total_operating_cost",
+                "purchase_cost_total",
+                "export_subsidy_total",
+                "objective_total",
+                "voltage_penalty_total",
+                "trafo_penalty_total",
+                "line_penalty_total",
+                "voltage_violation_count",
                 "price_mae",
                 "load_mae",
                 "pv_mae",
@@ -988,7 +1259,9 @@ def plot_power_balance_bars(
         "load_total",
         "battery_charge_total",
         "pv_effective_total",
+        "pv_curtail_total",
         "grid_import_total",
+        "grid_export_total",
         "battery_discharge_total",
     }
     missing = sorted(required_columns.difference(step_df.columns))
@@ -1002,6 +1275,7 @@ def plot_power_balance_bars(
     positive_specs = [
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
+        ("grid_export_total", "Grid export", "#f59e0b"),
     ]
     negative_specs = [
         ("pv_effective_total", "PV", "#16a34a"),
@@ -1020,6 +1294,18 @@ def plot_power_balance_bars(
         values = step_df[column].to_numpy(dtype=np.float32)
         axis.bar(timestamps, -values, width=width, bottom=negative_bottom, color=color, alpha=0.78, label=label)
         negative_bottom = negative_bottom - values
+
+    curtailment = step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+    axis.bar(
+        timestamps,
+        curtailment,
+        width=width,
+        color="none",
+        edgecolor="#dc2626",
+        linewidth=1.0,
+        hatch="//",
+        label="Curtailment loss",
+    )
 
     axis.axhline(0.0, color="#111827", linewidth=1.0)
     axis.set_title(f"Power Balance - {rollout.meta['controller']}")
@@ -1156,17 +1442,218 @@ def plot_test_voltage_profile(
     return figure
 
 
-def plot_operating_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[float, float] = (10.0, 4.5)):
+def plot_voltage_profile_comparison(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] | None = None,
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    n_rows = len(rollouts)
+    figure, axes = plt.subplots(
+        n_rows,
+        1,
+        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes)
+    muted_color = "#cbd5e1"
+    highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+
+    for axis, rollout in zip(axes, rollouts, strict=False):
+        grid_df = rollout.grid_df.copy()
+        if grid_df.empty:
+            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no grid_df.")
+        for _, frame in grid_df.loc[~grid_df["is_agent_bus"]].groupby("bus_id"):
+            axis.plot(frame["timestamp"], frame["vm_pu"], color=muted_color, linewidth=0.9, alpha=0.35, zorder=1)
+        for color_idx, bus_id in enumerate(rollout.meta["agent_bus_ids"]):
+            frame = grid_df.loc[grid_df["bus_id"] == int(bus_id)]
+            if frame.empty:
+                continue
+            axis.plot(
+                frame["timestamp"],
+                frame["vm_pu"],
+                color=highlight_palette[color_idx % len(highlight_palette)],
+                linewidth=2.1,
+                alpha=0.95,
+                label=f"Agent bus {bus_id}",
+                zorder=3,
+            )
+        axis.axhline(float(rollout.meta["v_min_pu"]), color="#dc2626", linestyle="--", linewidth=1.1, label="V min")
+        axis.axhline(float(rollout.meta["v_max_pu"]), color="#ea580c", linestyle="--", linewidth=1.1, label="V max")
+        axis.set_ylabel("V [p.u.]")
+        axis.set_title(str(rollout.meta["controller"]))
+        axis.grid(True, alpha=0.25)
+        axis.legend(loc="upper right", ncol=2)
+
+    axes[-1].set_xlabel("Timestamp")
+    figure.tight_layout()
+    return figure
+
+
+def plot_net_load_comparison(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] | None = None,
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    n_rows = len(rollouts)
+    figure, axes = plt.subplots(
+        n_rows,
+        1,
+        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes)
+
+    for axis, rollout in zip(axes, rollouts, strict=False):
+        step_df = rollout.step_df.copy()
+        if step_df.empty:
+            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
+        axis.plot(step_df["timestamp"], step_df["base_net_load_total"], color="#111827", linewidth=1.6, label="Raw net load")
+        if "base_net_load_effective_total" in step_df.columns:
+            axis.plot(
+                step_df["timestamp"],
+                step_df["base_net_load_effective_total"],
+                color="#16a34a",
+                linewidth=1.4,
+                linestyle="-.",
+                label="Post-curtail net load",
+            )
+        axis.plot(
+            step_df["timestamp"],
+            step_df["net_load_total"],
+            color="#2563eb",
+            linewidth=1.5,
+            linestyle="--",
+            label="Post-action net load",
+        )
+        trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
+        if trafo_limit_kw is not None:
+            trafo_limit_value = float(trafo_limit_kw)
+            if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
+                axis.axhline(
+                    trafo_limit_value,
+                    color="#dc2626",
+                    linestyle=":",
+                    linewidth=1.2,
+                    label=f"Approx trafo +limit ({trafo_limit_value:.1f} kW)",
+                )
+                axis.axhline(
+                    -trafo_limit_value,
+                    color="#dc2626",
+                    linestyle=":",
+                    linewidth=1.2,
+                    label=f"Approx trafo -limit ({trafo_limit_value:.1f} kW)",
+                )
+        axis.set_ylabel("kW")
+        axis.set_title(str(rollout.meta["controller"]))
+        axis.grid(True, alpha=0.25)
+        axis.legend(loc="upper right")
+
+    axes[-1].set_xlabel("Timestamp")
+    figure.tight_layout()
+    return figure
+
+
+def plot_power_balance_comparison(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] | None = None,
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    n_rows = len(rollouts)
+    figure, axes = plt.subplots(
+        n_rows,
+        1,
+        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes)
+    width = 0.008
+    positive_specs = [
+        ("load_total", "Load", "#111827"),
+        ("battery_charge_total", "Charge", "#dc2626"),
+        ("grid_export_total", "Grid export", "#f59e0b"),
+    ]
+    negative_specs = [
+        ("pv_effective_total", "PV", "#16a34a"),
+        ("grid_import_total", "Grid import", "#2563eb"),
+        ("battery_discharge_total", "Discharge", "#7c3aed"),
+    ]
+
+    for axis_idx, (axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
+        step_df = rollout.step_df.copy()
+        if step_df.empty:
+            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
+
+        positive_bottom = np.zeros(len(step_df), dtype=np.float32)
+        for column, label, color in positive_specs:
+            values = step_df[column].to_numpy(dtype=np.float32)
+            axis.bar(
+                step_df["timestamp"],
+                values,
+                width=width,
+                bottom=positive_bottom,
+                color=color,
+                alpha=0.78,
+                label=label if axis_idx == 0 else None,
+            )
+            positive_bottom = positive_bottom + values
+
+        negative_bottom = np.zeros(len(step_df), dtype=np.float32)
+        for column, label, color in negative_specs:
+            values = step_df[column].to_numpy(dtype=np.float32)
+            axis.bar(
+                step_df["timestamp"],
+                -values,
+                width=width,
+                bottom=negative_bottom,
+                color=color,
+                alpha=0.78,
+                label=label if axis_idx == 0 else None,
+            )
+            negative_bottom = negative_bottom - values
+
+        axis.bar(
+            step_df["timestamp"],
+            step_df["pv_curtail_total"].to_numpy(dtype=np.float32),
+            width=width,
+            color="none",
+            edgecolor="#dc2626",
+            linewidth=1.0,
+            hatch="//",
+            label="Curtailment loss" if axis_idx == 0 else None,
+        )
+        axis.axhline(0.0, color="#111827", linewidth=1.0)
+        axis.set_ylabel("kW")
+        axis.set_title(str(rollout.meta["controller"]))
+        axis.grid(True, axis="y", alpha=0.25)
+        if axis_idx == 0:
+            axis.legend(loc="upper right", ncol=4)
+
+    axes[-1].set_xlabel("Timestamp")
+    figure.tight_layout()
+    return figure
+
+
+def plot_purchase_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[float, float] = (10.0, 4.5)):
     if cost_df.empty:
         raise ValueError("cost_df is empty; nothing to plot.")
     figure, axis = plt.subplots(1, 1, figsize=figsize)
-    ordered = cost_df.sort_values("total_operating_cost", ascending=True)
-    axis.bar(ordered["controller"], ordered["total_operating_cost"], color=["#2563eb", "#16a34a", "#dc2626"])
-    axis.set_ylabel("Real Operating Cost")
-    axis.set_title("Operating Cost Comparison")
+    ordered = cost_df.sort_values("purchase_cost_total", ascending=True)
+    axis.bar(ordered["controller"], ordered["purchase_cost_total"], color=["#2563eb", "#16a34a", "#dc2626"])
+    axis.set_ylabel("Purchase Cost")
+    axis.set_title("Purchase Cost Comparison")
     axis.grid(True, axis="y", alpha=0.25)
     figure.tight_layout()
     return figure
+
+
+def plot_operating_cost_comparison(cost_df: pd.DataFrame, *, figsize: tuple[float, float] = (10.0, 4.5)):
+    return plot_purchase_cost_comparison(cost_df, figsize=figsize)
 
 
 def plot_rollout_comparison_dashboard(
@@ -1185,46 +1672,19 @@ def plot_rollout_comparison_dashboard(
     colors = [bar_palette[idx % len(bar_palette)] for idx in range(len(controllers))]
 
     metric_specs = [
-        ("total_operating_cost", "Total Operating Cost"),
-        ("price_mae", "Price MAE"),
-        ("load_mae", "Load MAE"),
-        ("pv_mae", "PV MAE"),
-        ("voltage_violation_steps", "Voltage Violation Steps"),
+        ("purchase_cost_total", "Purchase Cost"),
+        ("export_subsidy_total", "Export Subsidy"),
+        ("objective_total", "Objective Total"),
+        ("voltage_violation_count", "Voltage Violation Count"),
+        ("trafo_penalty_total", "Transformer Penalty"),
+        ("line_penalty_total", "Line Penalty"),
     ]
-    for axis, (column, title) in zip(axes[:5], metric_specs, strict=False):
+    for axis, (column, title) in zip(axes, metric_specs, strict=False):
         axis.bar(x, metrics_df[column].astype(float).to_numpy(), color=colors)
         axis.set_xticks(x)
         axis.set_xticklabels(controllers, rotation=15, ha="right")
         axis.set_title(title)
         axis.grid(True, axis="y", alpha=0.25)
-
-    voltage_axis = axes[5]
-    min_values = metrics_df["min_vm_pu"].astype(float).to_numpy()
-    max_values = metrics_df["max_vm_pu"].astype(float).to_numpy()
-    voltage_axis.vlines(x, min_values, max_values, color=colors, linewidth=3.0, alpha=0.9)
-    voltage_axis.scatter(x, min_values, color=colors, s=42, marker="v", label="Min vm_pu")
-    voltage_axis.scatter(x, max_values, color=colors, s=42, marker="^", label="Max vm_pu")
-    if "v_min_pu" in metrics_df.columns and metrics_df["v_min_pu"].notna().any():
-        voltage_axis.axhline(
-            float(metrics_df["v_min_pu"].dropna().iloc[0]),
-            color="#dc2626",
-            linestyle="--",
-            linewidth=1.1,
-            label="V min",
-        )
-    if "v_max_pu" in metrics_df.columns and metrics_df["v_max_pu"].notna().any():
-        voltage_axis.axhline(
-            float(metrics_df["v_max_pu"].dropna().iloc[0]),
-            color="#ea580c",
-            linestyle="--",
-            linewidth=1.1,
-            label="V max",
-        )
-    voltage_axis.set_xticks(x)
-    voltage_axis.set_xticklabels(controllers, rotation=15, ha="right")
-    voltage_axis.set_title("Voltage Range")
-    voltage_axis.grid(True, axis="y", alpha=0.25)
-    voltage_axis.legend(loc="upper right")
 
     figure.tight_layout()
     return figure
@@ -1241,19 +1701,25 @@ __all__ = [
     "collect_madrl_rollout",
     "collect_mpc_rollout",
     "collect_controller_rollout",
+    "compare_purchase_costs",
     "compare_rollout_metrics",
-    "compare_operating_costs",
     "ensure_forecast_ready",
     "normalize_date_input",
     "normalize_prediction_mode",
+    "load_training_run_bundle",
+    "plot_purchase_cost_comparison",
     "plot_operating_cost_comparison",
+    "plot_net_load_comparison",
     "plot_power_balance_bars",
+    "plot_power_balance_comparison",
     "plot_rollout_comparison_dashboard",
     "plot_rollout_dashboard",
     "plot_test_rollout",
     "plot_test_voltage_profile",
+    "plot_voltage_profile_comparison",
     "resolve_evaluation_mode",
     "resolve_forecast_backend",
     "resolve_prediction_mode_from_forecast_backend",
     "summarize_rollout_metrics",
+    "validate_compare_model_bundles",
 ]
