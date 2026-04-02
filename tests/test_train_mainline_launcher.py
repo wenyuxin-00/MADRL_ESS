@@ -4,15 +4,17 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from configs import compose_experiment_config, recommended_gpu_fast_num_envs
-from scripts.run_train_mainline import _apply_runtime_controls
+from scripts.run_train_mainline import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
 from scripts.utils.train_mainline_launcher import (
+    _monitor_process_progress,
     build_train_mainline_command,
     prepare_train_mainline_launch,
 )
@@ -84,6 +86,129 @@ def test_apply_runtime_controls_rejects_legacy_cache_keys(tmp_path, deprecated_k
         _apply_runtime_controls(cfg, {deprecated_key: value})
 
 
+def test_apply_reward_controls_supports_w_soc_pen_and_compat(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    _apply_reward_controls(cfg, {"w_soc_pen": 5.0})
+    assert cfg.reward.w_soc_pen == pytest.approx(5.0)
+
+    cfg2 = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+    _apply_reward_controls(cfg2, {"w_action_pen": 3.0})
+    assert cfg2.reward.w_soc_pen == pytest.approx(3.0)
+
+
+def test_apply_reward_controls_ignores_lambda_throughput(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    _apply_reward_controls(
+        cfg,
+        {
+            "export_subsidy_eur_per_kwh": 0.081,
+            "lambda_throughput": 0.123,
+            "w_soc_pen": 0.0,
+        },
+    )
+
+    assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
+    assert cfg.reward.w_soc_pen == pytest.approx(0.0)
+
+
+def test_apply_reward_controls_rejects_unknown_keys(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    with pytest.raises(ValueError, match="Unknown reward_controls"):
+        _apply_reward_controls(cfg, {"w_soc_pen": 5.0, "bogus_key": 1.0})
+
+
+def test_apply_train_controls_sets_progress_episode_interval(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    _apply_train_controls(cfg, {"progress_episode_interval": 7})
+
+    assert cfg.train.progress_episode_interval == 7
+
+
+def test_monitor_process_progress_reports_at_episode_intervals(monkeypatch, tmp_path):
+    progress_json_path = tmp_path / "progress.json"
+    progress_json_path.write_text("{}", encoding="utf-8")
+    payloads = iter(
+        [
+            {
+                "interaction_step": 10,
+                "target_interactions": 100,
+                "episodes_completed": 5,
+                "avg_reward": 1.0,
+                "steps_per_sec": 2.0,
+                "status": "running",
+            },
+            {
+                "interaction_step": 20,
+                "target_interactions": 100,
+                "episodes_completed": 10,
+                "avg_reward": 1.5,
+                "steps_per_sec": 2.0,
+                "status": "running",
+            },
+            {
+                "interaction_step": 30,
+                "target_interactions": 100,
+                "episodes_completed": 15,
+                "avg_reward": 1.7,
+                "steps_per_sec": 2.0,
+                "status": "running",
+            },
+            {
+                "interaction_step": 30,
+                "target_interactions": 100,
+                "episodes_completed": 15,
+                "avg_reward": 1.7,
+                "steps_per_sec": 2.0,
+                "status": "completed",
+                "estimated_end_time": "2026-04-01T12:00:00+00:00",
+                "remaining_seconds": 0.0,
+            },
+        ]
+    )
+    printed: list[str] = []
+
+    class DummyProcess:
+        def __init__(self) -> None:
+            self._poll_results = iter([None, None, None, 0])
+
+        def poll(self):
+            return next(self._poll_results)
+
+    original_stat = Path.stat
+    stat_counter = {"value": 0}
+
+    def fake_load_progress(_path: Path):
+        return next(payloads)
+
+    def fake_stat(self: Path):
+        if self == progress_json_path:
+            stat_counter["value"] += 1
+            return SimpleNamespace(st_mtime_ns=stat_counter["value"])
+        return original_stat(self)
+
+    monkeypatch.setattr("scripts.utils.train_mainline_launcher._load_progress_payload", fake_load_progress)
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr("builtins.print", lambda message: printed.append(str(message)))
+    monkeypatch.setattr("scripts.utils.train_mainline_launcher.time.sleep", lambda _seconds: None)
+
+    last_payload = _monitor_process_progress(
+        DummyProcess(),
+        progress_json_path=progress_json_path,
+        summary_interval_s=0.0,
+        progress_episode_interval=10,
+    )
+
+    assert len(printed) == 2
+    assert "episodes=10" in printed[0]
+    assert "[train:completed]" in printed[1]
+    assert "episodes=15" in printed[1]
+    assert last_payload["status"] == "completed"
+
+
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     data_dir = tmp_path / "data"
     write_prosumer_processed_dataset(
@@ -130,8 +255,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         },
         "reward_controls": {
             "export_subsidy_eur_per_kwh": 0.079,
-            "lambda_throughput": 0.0,
-            "w_action_pen": 0.0,
+            "w_soc_pen": 0.0,
             "w_voltage_pen": 0.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 0.0,
@@ -254,7 +378,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert len(reward_summary["episodes"]) == result["episodes_completed"]
     assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
     assert "components" in reward_summary
-    assert {"r_purchase_cost", "r_export_subsidy", "r_safe_v", "r_safe_line", "r_safe_trafo"} == set(
+    assert {"r_purchase_cost", "r_export_subsidy", "r_soc_pen", "r_safe_v", "r_safe_line", "r_safe_trafo"} == set(
         reward_summary["components"]
     )
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
@@ -294,8 +418,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "require_cuda": False,
         "reward_controls": {
             "export_subsidy_eur_per_kwh": 0.079,
-            "lambda_throughput": 0.0,
-            "w_action_pen": 0.0,
+            "w_soc_pen": 0.0,
         },
         "safety_controls": {
             "enabled": True,
@@ -408,6 +531,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    reward_summary = json.loads(Path(result["reward_summary_path"]).read_text(encoding="utf-8"))
 
     assert result["algorithm"] == "MATD3_SAFE_POC"
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
@@ -418,7 +542,9 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     assert result["safety_summary"]["target_projection_calls"] > 0
     assert result["safety_summary"]["actor_projection_calls"] >= 0
     assert result["safety_summary"]["projection_time_s"] >= 0.0
+    assert result["safety_summary"]["projector_local_infeasible_count"] >= 0
     assert result["perf_summary"]["projection_time_s"] >= 0.0
     assert "target_projection_time_s" in result["perf_summary"]
     assert "actor_projection_time_s" in result["perf_summary"]
+    assert "r_soc_pen" in reward_summary["components"]
     assert Path(result["model_root"]).parts[-4:-1] == ("MATD3_SAFE_POC", "perfect", "grid_mainline_safe_poc")

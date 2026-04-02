@@ -687,8 +687,7 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
             "seed": seed,
             "reward_controls": {
                 "export_subsidy_eur_per_kwh": subsidy,
-                "lambda_throughput": 0.0,
-                "w_action_pen": 0.0,
+                "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},
             "model_controls": {"hidden_dim": 256},
@@ -759,8 +758,7 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
             "seed": 0,
             "reward_controls": {
                 "export_subsidy_eur_per_kwh": 0.079,
-                "lambda_throughput": 0.0,
-                "w_action_pen": 0.0,
+                "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},
             "model_controls": {"hidden_dim": 256},

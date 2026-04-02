@@ -27,6 +27,8 @@ from scripts.utils.nested import to_torch_nested
 from scripts.utils.project_paths import get_tensorboard_run_dir
 from scripts.utils.replay_buffer import ReplayBuffer
 
+_PROJECTION_RESIDUAL_TOL = 1e-6
+
 
 def _iso_timestamp(value: datetime) -> str:
     return value.astimezone().isoformat(timespec="seconds")
@@ -103,6 +105,21 @@ def _write_progress_snapshot(path: str | os.PathLike[str], payload: dict[str, ob
     target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _override_soc_penalty_metrics(
+    action_info: dict[str, torch.Tensor] | None,
+    penalty_source_info: dict[str, torch.Tensor] | None,
+) -> dict[str, torch.Tensor] | None:
+    if action_info is None:
+        return penalty_source_info
+    if penalty_source_info is None:
+        return action_info
+    merged = dict(action_info)
+    for key in ("soc_penalty_unweighted", "action_penalty_unweighted"):
+        if key in penalty_source_info:
+            merged[key] = penalty_source_info[key]
+    return merged
+
+
 class TrainRunner:
     """Lightweight explicit training runner."""
 
@@ -124,7 +141,7 @@ class TrainRunner:
         agent_cls = get_agent_cls(self.cfg.algo.name)
         self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
         self.safety_projector = getattr(self.agent_n[0], "safety_projector", None) if self.agent_n else None
-        self.apply_action_penalty = not self._safe_projection_enabled()
+        self.apply_action_penalty = True
 
         self.replay_buffer = ReplayBuffer(self.cfg)
         log_dir = get_tensorboard_run_dir(
@@ -178,6 +195,7 @@ class TrainRunner:
         self._safety_env_fallback_steps = 0
         self._safety_env_observations = 0
         self._safety_env_action_pen_total = 0.0
+        self._projector_local_infeasible_count = 0
         self._closed = False
 
     def _safe_projection_enabled(self) -> bool:
@@ -222,6 +240,21 @@ class TrainRunner:
         del info
         return
 
+    def _record_projector_local_infeasible(
+        self,
+        residual_action_info: dict[str, torch.Tensor] | None,
+    ) -> None:
+        if residual_action_info is None:
+            return
+        residual = residual_action_info.get("soc_penalty_unweighted")
+        if residual is None:
+            return
+        residual_tensor = torch.as_tensor(residual, dtype=torch.float32)
+        if residual_tensor.ndim == 1:
+            residual_tensor = residual_tensor.unsqueeze(0)
+        affected = torch.any(residual_tensor > _PROJECTION_RESIDUAL_TOL, dim=-1)
+        self._projector_local_infeasible_count += int(torch.count_nonzero(affected).item())
+
     def build_safety_summary(self) -> dict[str, Any]:
         if not self._safe_projection_enabled():
             return {
@@ -258,6 +291,7 @@ class TrainRunner:
             "env_fallback_action_pen_steps": int(self._safety_env_fallback_steps),
             "env_fallback_action_pen_rate": float(self._safety_env_fallback_steps / env_denominator),
             "env_fallback_action_pen_mean": float(self._safety_env_action_pen_total / env_denominator),
+            "projector_local_infeasible_count": int(self._projector_local_infeasible_count),
         }
 
     def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
@@ -276,7 +310,7 @@ class TrainRunner:
             action_info = None
             if self._safe_projection_enabled():
                 projection_started = time.perf_counter()
-                action_t, diagnostics = self.safety_projector.project_actions_from_safety_local(
+                projected_action_t, diagnostics = self.safety_projector.project_actions_from_safety_local(
                     obs_t["safety_local"],
                     raw_action_t,
                     return_diagnostics=True,
@@ -287,7 +321,17 @@ class TrainRunner:
                     elapsed_s=time.perf_counter() - projection_started,
                     diagnostics=diagnostics,
                 )
+                action_t, projector_residual_info = enforce_local_action_feasibility_torch(
+                    obs_t["safety_local"],
+                    projected_action_t,
+                    efficiency=float(self.cfg.env.efficiency),
+                    dt_hours=float(self.cfg.env.dt),
+                    soc_min=float(self.cfg.env.soc_min),
+                    soc_max=float(self.cfg.env.soc_max),
+                )
+                self._record_projector_local_infeasible(projector_residual_info)
                 action_info = compute_action_gap_metrics_torch(obs_t["safety_local"], raw_action_t, action_t)
+                action_info = _override_soc_penalty_metrics(action_info, projector_residual_info)
             elif "safety_local" in obs_t:
                 action_t, action_info = enforce_local_action_feasibility_torch(
                     obs_t["safety_local"],
@@ -329,7 +373,7 @@ class TrainRunner:
             merged_info, action_penalty = merge_action_info_into_step_info(
                 info,
                 env_action_info,
-                action_pen_weight=float(self.cfg.reward.w_action_pen),
+                soc_pen_weight=float(self.cfg.reward.w_soc_pen),
                 apply_action_penalty=self.apply_action_penalty,
             )
             reward_array[env_idx, :, 0] -= np.asarray(action_penalty, dtype=np.float32)

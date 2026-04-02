@@ -11,8 +11,7 @@ class NormalReward(RewardFn):
     """Purchase-cost reward with export subsidy and grid-safety penalties."""
 
     def __init__(self, cfg: object) -> None:
-        self.w_action_pen = float(cfg.reward.w_action_pen)
-        self.lambda_throughput = float(cfg.reward.lambda_throughput)
+        self.w_soc_pen = float(getattr(cfg.reward, "w_soc_pen", getattr(cfg.reward, "w_action_pen", 10.0)))
         self.export_subsidy_eur_per_kwh = float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079))
         self.w_voltage_pen = float(cfg.reward.w_voltage_pen)
         self.w_line_pen = float(getattr(cfg.reward, "w_line_pen", 0.0))
@@ -23,6 +22,7 @@ class NormalReward(RewardFn):
         return [
             ComponentMeta("r_purchase_cost", "- r_purchase_cost (grid purchase cost)", "green", -1),
             ComponentMeta("r_export_subsidy", "+ r_export_subsidy (grid export subsidy)", "teal", +1),
+            ComponentMeta("r_soc_pen", "- r_soc_pen (SoC feasibility penalty)", "orange", -1),
             ComponentMeta("r_safe_v", "- r_safe_v (voltage penalty)", "red", -1),
             ComponentMeta("r_safe_line", "- r_safe_line (line penalty)", "purple", -1),
             ComponentMeta("r_safe_trafo", "- r_safe_trafo (trafo penalty)", "maroon", -1),
@@ -67,10 +67,13 @@ class NormalReward(RewardFn):
         trafo_total = self.w_trafo_pen * psi_trafo_raw
         r_safe_trafo = np.full((n_agents,), trafo_total, dtype=np.float32)
 
-        total = (-r_purchase_cost + r_export_subsidy - r_safe_v - r_safe_line - r_safe_trafo).astype(np.float32)
+        r_soc_pen = np.zeros((n_agents,), dtype=np.float32)
+
+        total = (-r_purchase_cost + r_export_subsidy - r_soc_pen - r_safe_v - r_safe_line - r_safe_trafo).astype(np.float32)
         components = {
             "r_purchase_cost": r_purchase_cost,
             "r_export_subsidy": r_export_subsidy,
+            "r_soc_pen": r_soc_pen,
             "r_safe_v": r_safe_v,
             "r_safe_line": r_safe_line,
             "r_safe_trafo": r_safe_trafo,

@@ -170,6 +170,7 @@ def compute_action_gap_metrics_numpy(
     pv_gap = np.abs(pv_effective_req_kw - pv_effective_exec_kw) / np.maximum(pv_raw_kw, _ACTION_EPS)
     pv_gap = np.where(pv_raw_kw > _ACTION_EPS, pv_gap, 0.0).astype(np.float32)
 
+    soc_penalty_unweighted = battery_gap.astype(np.float32)
     metrics = {
         "requested_action": requested.astype(np.float32),
         "executed_action": executed.astype(np.float32),
@@ -185,7 +186,8 @@ def compute_action_gap_metrics_numpy(
         "pv_effective_exec_kw": pv_effective_exec_kw,
         "pv_curtail_req_kw": pv_curtail_req_kw,
         "pv_curtail_exec_kw": pv_curtail_exec_kw,
-        "action_penalty_unweighted": (battery_gap + pv_gap).astype(np.float32),
+        "soc_penalty_unweighted": soc_penalty_unweighted,
+        "action_penalty_unweighted": soc_penalty_unweighted,
     }
     if squeezed:
         return {key: np.asarray(value[0], dtype=np.float32) for key, value in metrics.items()}
@@ -225,6 +227,7 @@ def compute_action_gap_metrics_torch(
     pv_gap = (pv_effective_req_kw - pv_effective_exec_kw).abs() / torch.clamp(pv_raw_kw, min=_ACTION_EPS)
     pv_gap = torch.where(pv_raw_kw > _ACTION_EPS, pv_gap, torch.zeros_like(pv_gap))
 
+    soc_penalty_unweighted = battery_gap
     metrics = {
         "requested_action": requested,
         "executed_action": executed,
@@ -240,7 +243,8 @@ def compute_action_gap_metrics_torch(
         "pv_effective_exec_kw": pv_effective_exec_kw,
         "pv_curtail_req_kw": pv_curtail_req_kw,
         "pv_curtail_exec_kw": pv_curtail_exec_kw,
-        "action_penalty_unweighted": battery_gap + pv_gap,
+        "soc_penalty_unweighted": soc_penalty_unweighted,
+        "action_penalty_unweighted": soc_penalty_unweighted,
     }
     if squeezed:
         return {key: value.squeeze(0) for key, value in metrics.items()}
@@ -291,13 +295,17 @@ def merge_action_info_into_step_info(
     info: dict[str, Any],
     action_info: dict[str, np.ndarray] | None,
     *,
-    action_pen_weight: float = 0.0,
+    soc_pen_weight: float = 0.0,
+    action_pen_weight: float | None = None,
     apply_action_penalty: bool = False,
 ) -> tuple[dict[str, Any], np.ndarray]:
+    if action_pen_weight is not None and soc_pen_weight == 0.0:
+        soc_pen_weight = float(action_pen_weight)
+
     updated = dict(info)
     if action_info is None:
         existing_penalty = np.asarray(
-            updated.get("r_action_pen", np.zeros_like(np.asarray(updated.get("e_bat", []), dtype=np.float32))),
+            updated.get("r_soc_pen", updated.get("r_action_pen", np.zeros_like(np.asarray(updated.get("e_bat", []), dtype=np.float32)))),
             dtype=np.float32,
         )
         return updated, existing_penalty
@@ -323,10 +331,11 @@ def merge_action_info_into_step_info(
     n_agents = int(np.asarray(updated.get("e_bat", np.zeros(0, dtype=np.float32))).reshape(-1).shape[0])
     if apply_action_penalty:
         penalty = (
-            float(action_pen_weight) * np.asarray(action_info["action_penalty_unweighted"], dtype=np.float32)
+            float(soc_pen_weight) * np.asarray(action_info["soc_penalty_unweighted"], dtype=np.float32)
         ).astype(np.float32)
     else:
         penalty = np.zeros((n_agents,), dtype=np.float32)
+    updated["r_soc_pen"] = penalty
     updated["r_action_pen"] = penalty
     return updated, penalty
 

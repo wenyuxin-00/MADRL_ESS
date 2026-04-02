@@ -14,6 +14,21 @@ from controllers.base import BaseController
 from scripts.utils.nested import add_batch_dim, to_torch_nested
 
 
+def _override_soc_penalty_metrics(
+    action_info: dict[str, torch.Tensor] | None,
+    penalty_source_info: dict[str, torch.Tensor] | None,
+) -> dict[str, torch.Tensor] | None:
+    if action_info is None:
+        return penalty_source_info
+    if penalty_source_info is None:
+        return action_info
+    merged = dict(action_info)
+    for key in ("soc_penalty_unweighted", "action_penalty_unweighted"):
+        if key in penalty_source_info:
+            merged[key] = penalty_source_info[key]
+    return merged
+
+
 class MADRLController(BaseController):
     """Coordinate one action per agent for evaluation or deployment."""
 
@@ -23,7 +38,7 @@ class MADRLController(BaseController):
         default_projector = getattr(self.agent_n[0], "safety_projector", None) if self.agent_n else None
         self.projector = projector if projector is not None else default_projector
         self.device = getattr(self.agent_n[0], "device", torch.device("cpu")) if self.agent_n else torch.device("cpu")
-        self.apply_action_penalty = self.projector is None
+        self.apply_action_penalty = True
         self.last_action_info: dict[str, np.ndarray] | None = None
 
     def reset(self) -> None:
@@ -61,9 +76,17 @@ class MADRLController(BaseController):
 
         with torch.inference_mode():
             if self.projector is not None:
-                executed_t = self.projector.project_actions_from_safety_local(
+                projected_t = self.projector.project_actions_from_safety_local(
                     obs_t["safety_local"],
                     action_t,
+                )
+                executed_t, projector_residual_info = enforce_local_action_feasibility_torch(
+                    obs_t["safety_local"],
+                    projected_t,
+                    efficiency=float(getattr(self.agent_n[0].cfg.env, "efficiency", 1.0)),
+                    dt_hours=float(getattr(self.agent_n[0].cfg.env, "dt", 1.0)),
+                    soc_min=float(getattr(self.agent_n[0].cfg.env, "soc_min", 0.0)),
+                    soc_max=float(getattr(self.agent_n[0].cfg.env, "soc_max", 1.0)),
                 )
             else:
                 executed_t, _ = enforce_local_action_feasibility_torch(
@@ -74,7 +97,9 @@ class MADRLController(BaseController):
                     soc_min=float(getattr(self.agent_n[0].cfg.env, "soc_min", 0.0)),
                     soc_max=float(getattr(self.agent_n[0].cfg.env, "soc_max", 1.0)),
                 )
+                projector_residual_info = None
             action_info = compute_action_gap_metrics_torch(obs_t["safety_local"], action_t, executed_t)
+            action_info = _override_soc_penalty_metrics(action_info, projector_residual_info)
         executed_np = executed_t.to(dtype=torch.float32).cpu().numpy()
         action_info_np = action_info_to_numpy(action_info)
 

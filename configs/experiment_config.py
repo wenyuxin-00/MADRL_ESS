@@ -62,6 +62,7 @@ class TrainConfig:
     use_noise_decay: bool = True
     show_progress: bool = True
     progress_postfix_interval: int = 10
+    progress_episode_interval: int = 10
     progress_write_interval_seconds: float = 5.0
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
@@ -83,7 +84,7 @@ class EnvConfig:
     episode_limit: int = 96 * 2
     future_horizon: int = 24
     battery_capacity: float | list[float] = field(default_factory=lambda: [25.0] * 5)
-    max_charge_rate: float = 0.4
+    max_charge_rate: float = 0.5
     efficiency: float = 0.95
     init_soc: float = 0.5
     dt: float = 0.25
@@ -96,8 +97,7 @@ class EnvConfig:
 class RewardConfig:
     """Reward weights for the default NormalReward."""
 
-    w_action_pen: float = 6.0
-    lambda_throughput: float = 0.001
+    w_soc_pen: float = 10.0
     export_subsidy_eur_per_kwh: float = 0.079
     w_voltage_pen: float = 10.0
     w_line_pen: float = 10.0

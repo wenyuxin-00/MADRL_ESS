@@ -461,6 +461,30 @@ class SharedDataResult:
     reused: bool
 
 
+def build_shared_data_status_summary(
+    result: SharedDataResult,
+    *,
+    test_start_date: str | None = None,
+    test_end_date: str | None = None,
+) -> dict[str, object]:
+    if result.reused:
+        status = "reused_existing_shared_data"
+        message = "Reused existing shared MADRL data package."
+    else:
+        status = "generated_new_shared_data"
+        message = "Generated a new shared MADRL data package from available forecast artifacts."
+
+    return {
+        "shared_data_status": status,
+        "shared_data_message": message,
+        "shared_data_dir": str(result.shared_data_dir),
+        "shared_data_signature": str(result.signature_hash),
+        "shared_data_reused": bool(result.reused),
+        "test_start_date": test_start_date,
+        "test_end_date": test_end_date,
+    }
+
+
 class PrecomputedObservationStore:
     """Read per-episode precomputed observations from a split directory."""
 

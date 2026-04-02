@@ -75,6 +75,7 @@ def _apply_train_controls(cfg, train_controls: dict[str, Any]) -> None:
         "use_noise_decay",
         "show_progress",
         "progress_postfix_interval",
+        "progress_episode_interval",
         "progress_write_interval_seconds",
     )
     for field_name in field_names:
@@ -137,10 +138,27 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
 
 def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
     controls = dict(reward_controls or {})
+    _DEPRECATED_REWARD_KEYS = {"lambda_throughput"}
+    _KNOWN_REWARD_KEYS = {
+        "export_subsidy_eur_per_kwh",
+        "w_soc_pen",
+        "w_action_pen",
+        "w_voltage_pen",
+        "w_line_pen",
+        "w_trafo_pen",
+    }
+    unknown_keys = set(controls.keys()) - _KNOWN_REWARD_KEYS - _DEPRECATED_REWARD_KEYS
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown reward_controls key(s): {sorted(unknown_keys)}. "
+            f"Supported keys: {sorted(_KNOWN_REWARD_KEYS)}."
+        )
+    if "w_soc_pen" in controls:
+        cfg.reward.w_soc_pen = float(controls["w_soc_pen"])
+    elif "w_action_pen" in controls:
+        cfg.reward.w_soc_pen = float(controls["w_action_pen"])
     numeric_fields = (
         "export_subsidy_eur_per_kwh",
-        "lambda_throughput",
-        "w_action_pen",
         "w_voltage_pen",
         "w_line_pen",
         "w_trafo_pen",

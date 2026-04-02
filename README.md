@@ -56,8 +56,7 @@ cfg.data.train_year == 2019
 cfg.data.test_year == 2020
 cfg.data.load_components == ["household", "heatpump"]
 cfg.data.pv_reference == "south"
-cfg.reward.w_action_pen == 6.0
-cfg.reward.lambda_throughput == 0.001
+cfg.reward.w_soc_pen == 10.0
 cfg.reward.w_voltage_pen == 10.0
 cfg.reward.w_trafo_pen == 10.0
 cfg.obs.local_features == ["calendar_time", "soc"]

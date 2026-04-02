@@ -412,8 +412,7 @@ def _extract_compare_signature(bundle: Mapping[str, object]) -> dict[str, object
         "prediction_mode": str(data_controls.get("prediction_mode", "perfect")),
         "seed": int(experiment_controls.get("seed", 0)),
         "export_subsidy_eur_per_kwh": float(reward_controls.get("export_subsidy_eur_per_kwh", 0.079)),
-        "lambda_throughput": float(reward_controls.get("lambda_throughput", 0.0)),
-        "w_action_pen": float(reward_controls.get("w_action_pen", 0.0)),
+        "w_soc_pen": float(reward_controls.get("w_soc_pen", reward_controls.get("w_action_pen", 0.0))),
         "agent_profiles": list(data_controls.get("agent_profiles", [])),
         "agent_bus_ids": list(data_controls.get("agent_bus_ids", [])),
         "load_scale": list(data_controls.get("load_scale", [])),
@@ -638,7 +637,7 @@ def collect_controller_rollout(
                 info, action_penalty = merge_action_info_into_step_info(
                     info,
                     action_info,
-                    action_pen_weight=float(cfg.reward.w_action_pen),
+                    soc_pen_weight=float(cfg.reward.w_soc_pen),
                     apply_action_penalty=apply_action_penalty,
                 )
                 reward_array = reward_array - np.asarray(action_penalty, dtype=np.float32)
@@ -704,12 +703,16 @@ def collect_controller_rollout(
                     info.get("pv_action_exec", info.get("pv_action", np.ones(env.n, dtype=np.float32))),
                     dtype=np.float32,
                 )
-                action_penalty_unweighted = np.asarray(
-                    info.get("action_penalty_unweighted", np.zeros(env.n, dtype=np.float32)),
+                soc_penalty_unweighted = np.asarray(
+                    info.get("soc_penalty_unweighted", info.get("action_penalty_unweighted", np.zeros(env.n, dtype=np.float32))),
                     dtype=np.float32,
                 )
-                action_penalty = np.asarray(info.get("r_action_pen", np.zeros(env.n, dtype=np.float32)), dtype=np.float32)
+                soc_penalty = np.asarray(info.get("r_soc_pen", info.get("r_action_pen", np.zeros(env.n, dtype=np.float32))), dtype=np.float32)
                 battery_power = np.asarray(info["e_bat"], dtype=np.float32)
+                battery_power_req = np.asarray(
+                    info.get("e_bat_req", battery_power),
+                    dtype=np.float32,
+                )
                 battery_charge = np.clip(battery_power, 0.0, None).astype(np.float32)
                 battery_discharge = np.maximum(-battery_power, 0.0).astype(np.float32)
                 export_subsidy_per_agent = _export_subsidy_per_agent(
@@ -732,6 +735,7 @@ def collect_controller_rollout(
                 objective_per_agent = (
                     purchase_cost_per_agent
                     - export_subsidy_per_agent
+                    + soc_penalty
                     + voltage_penalty_per_agent
                     + line_penalty_per_agent
                     + trafo_penalty_per_agent
@@ -739,6 +743,7 @@ def collect_controller_rollout(
                 voltage_penalty_total = _mean_component_total(info, "r_safe_v", env.n)
                 line_penalty_total = _mean_component_total(info, "r_safe_line", env.n)
                 trafo_penalty_total = _mean_component_total(info, "r_safe_trafo", env.n)
+                soc_penalty_total = float(np.sum(soc_penalty))
                 purchase_cost_total = float(np.sum(purchase_cost_per_agent))
                 export_subsidy_total = float(np.sum(export_subsidy_per_agent))
                 step_rows.append(
@@ -762,12 +767,14 @@ def collect_controller_rollout(
                         "battery_discharge_total": float(np.sum(battery_discharge)),
                         "purchase_cost_total": purchase_cost_total,
                         "export_subsidy_total": export_subsidy_total,
+                        "soc_penalty_total": soc_penalty_total,
                         "voltage_penalty_total": voltage_penalty_total,
                         "line_penalty_total": line_penalty_total,
                         "trafo_penalty_total": trafo_penalty_total,
                         "objective_total": (
                             purchase_cost_total
                             - export_subsidy_total
+                            + soc_penalty_total
                             + voltage_penalty_total
                             + line_penalty_total
                             + trafo_penalty_total
@@ -777,7 +784,7 @@ def collect_controller_rollout(
                             | (np.asarray(info.get("vm_pu", []), dtype=np.float32) > float(cfg.grid.v_max_pu))).sum()
                         ),
                         "controller_action_gap_total": float(np.sum(controller_action_gap)),
-                        "action_penalty_total": float(np.sum(action_penalty)),
+                        "soc_penalty_step_total": soc_penalty_total,
                     }
                 )
 
@@ -804,13 +811,14 @@ def collect_controller_rollout(
                             "grid_import_kw": float(grid_import[agent_idx]),
                             "grid_export_kw": float(grid_export[agent_idx]),
                             "e_bat": float(battery_power[agent_idx]),
+                            "e_bat_req": float(battery_power_req[agent_idx]),
                             "battery_action_req": float(battery_action_req[agent_idx]),
                             "battery_action_exec": float(battery_action_exec[agent_idx]),
                             "pv_action_req": float(pv_action_req[agent_idx]),
                             "pv_action_exec": float(pv_action_exec[agent_idx]),
                             "controller_action_gap": float(controller_action_gap[agent_idx]),
-                            "action_penalty_unweighted": float(action_penalty_unweighted[agent_idx]),
-                            "r_action_pen": float(action_penalty[agent_idx]),
+                            "soc_penalty_unweighted": float(soc_penalty_unweighted[agent_idx]),
+                            "r_soc_pen": float(soc_penalty[agent_idx]),
                             "r_safe_v": float(voltage_penalty_per_agent[agent_idx]),
                             "r_safe_line": float(line_penalty_per_agent[agent_idx]),
                             "r_safe_trafo": float(trafo_penalty_per_agent[agent_idx]),
@@ -944,6 +952,9 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         float(step_df["export_subsidy_total"].sum()) if "export_subsidy_total" in step_df.columns else 0.0
     )
     objective_total = float(step_df["objective_total"].sum()) if "objective_total" in step_df.columns else 0.0
+    soc_penalty_total = (
+        float(step_df["soc_penalty_total"].sum()) if "soc_penalty_total" in step_df.columns else 0.0
+    )
     voltage_penalty_total = (
         float(step_df["voltage_penalty_total"].sum()) if "voltage_penalty_total" in step_df.columns else 0.0
     )
@@ -988,6 +999,7 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         "purchase_cost_total": purchase_cost_total,
         "export_subsidy_total": export_subsidy_total,
         "objective_total": objective_total,
+        "soc_penalty_total": soc_penalty_total,
         "voltage_penalty_total": voltage_penalty_total,
         "trafo_penalty_total": trafo_penalty_total,
         "line_penalty_total": line_penalty_total,
@@ -1019,6 +1031,7 @@ def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
                 "purchase_cost_total",
                 "export_subsidy_total",
                 "objective_total",
+                "soc_penalty_total",
                 "voltage_penalty_total",
                 "trafo_penalty_total",
                 "line_penalty_total",

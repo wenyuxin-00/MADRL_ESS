@@ -50,7 +50,7 @@ def evaluate_controller(
             info, action_penalty = merge_action_info_into_step_info(
                 info,
                 getattr(controller, "last_action_info", None),
-                action_pen_weight=float(getattr(getattr(env, "cfg", object()), "reward", object()).w_action_pen)
+                soc_pen_weight=float(getattr(getattr(env, "cfg", object()), "reward", object()).w_soc_pen)
                 if hasattr(getattr(env, "cfg", None), "reward")
                 else 0.0,
                 apply_action_penalty=bool(getattr(controller, "apply_action_penalty", False)),

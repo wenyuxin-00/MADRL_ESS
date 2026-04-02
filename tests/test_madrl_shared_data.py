@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from scripts.utils.madrl_shared_data import build_shared_data_status_summary, ensure_madrl_shared_data
 from tests.support.helpers import make_smoke_config
 
 
@@ -57,3 +57,28 @@ def test_ensure_madrl_shared_data_changes_when_test_window_changes(tmp_path) -> 
 
     assert first.signature_hash != second.signature_hash
     assert first.shared_data_dir != second.shared_data_dir
+
+
+def test_build_shared_data_status_summary_reports_reuse_and_generation_states(tmp_path) -> None:
+    cfg = make_smoke_config(tmp_path / "case", algorithm="MATD3")
+
+    created = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+    reused = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+
+    created_summary = build_shared_data_status_summary(
+        created,
+        test_start_date="2020-01-01",
+        test_end_date="2020-01-02",
+    )
+    reused_summary = build_shared_data_status_summary(
+        reused,
+        test_start_date="2020-01-01",
+        test_end_date="2020-01-02",
+    )
+
+    assert created_summary["shared_data_status"] == "generated_new_shared_data"
+    assert created_summary["shared_data_reused"] is False
+    assert "Generated a new shared MADRL data package" in created_summary["shared_data_message"]
+    assert reused_summary["shared_data_status"] == "reused_existing_shared_data"
+    assert reused_summary["shared_data_reused"] is True
+    assert "Reused existing shared MADRL data package" in reused_summary["shared_data_message"]

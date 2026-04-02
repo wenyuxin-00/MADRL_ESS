@@ -226,7 +226,7 @@ def test_reset_returns_correct_obs_shape(grid_env) -> None:
 
 def test_default_battery_config_uses_fixed_defaults(grid_env) -> None:
     _, reset_info = grid_env.reset(episode_idx=0)
-    assert np.allclose(reset_info["p_max"], np.full((N_AGENTS,), 10.0, dtype=np.float32))
+    assert np.allclose(reset_info["p_max"], np.full((N_AGENTS,), 12.5, dtype=np.float32))
     assert np.allclose(reset_info["battery_capacity_kwh"], np.full((N_AGENTS,), 25.0, dtype=np.float32))
 
 
@@ -367,7 +367,7 @@ def test_episode_recorder_compatible(grid_env) -> None:
     assert "r_purchase_cost_sum" in history
     assert "r_export_subsidy_sum" in history
     assert "r_safe_line_sum" in history
-    assert "r_action_pen_sum" not in history
+    assert "r_soc_pen_sum" in history
     assert "r_safe_v_per_agent" in history
     assert "r_safe_trafo_per_agent" in history
     assert history["r_safe_trafo_per_agent"][0][0] == history["r_safe_trafo_per_agent"][2][0]

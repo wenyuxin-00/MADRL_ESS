@@ -47,8 +47,7 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]
     assert cfg.data.train_year == 2019
     assert cfg.data.test_year == 2020
-    assert cfg.reward.w_action_pen == 6.0
-    assert cfg.reward.lambda_throughput == 0.001
+    assert cfg.reward.w_soc_pen == 10.0
     assert cfg.reward.w_voltage_pen == 10.0
     assert cfg.reward.w_line_pen == 10.0
     assert cfg.reward.w_trafo_pen == 10.0

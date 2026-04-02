@@ -9,8 +9,7 @@ from envs.rewards import NormalReward
 
 def _make_cfg():
     class _Reward:
-        w_action_pen = 0.0
-        lambda_throughput = 0.0
+        w_soc_pen = 0.0
         export_subsidy_eur_per_kwh = 0.079
         w_voltage_pen = 10.0
         w_line_pen = 3.0
@@ -59,6 +58,7 @@ def test_component_meta_has_expected_keys() -> None:
     assert meta_keys == [
         "r_purchase_cost",
         "r_export_subsidy",
+        "r_soc_pen",
         "r_safe_v",
         "r_safe_line",
         "r_safe_trafo",

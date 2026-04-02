@@ -188,11 +188,13 @@ def _monitor_process_progress(
     *,
     progress_json_path: Path,
     summary_interval_s: float,
+    progress_episode_interval: int,
 ) -> dict[str, Any] | None:
     last_mtime_ns = -1
     last_print_time = 0.0
     last_summary = ""
     last_payload: dict[str, Any] | None = None
+    next_episode_report = max(int(progress_episode_interval), 1)
 
     while process.poll() is None:
         payload = _load_progress_payload(progress_json_path)
@@ -201,11 +203,25 @@ def _monitor_process_progress(
             stat = progress_json_path.stat()
             summary = _format_progress_summary(payload)
             now = time.monotonic()
-            if stat.st_mtime_ns != last_mtime_ns and (now - last_print_time >= summary_interval_s):
+            episodes_completed = int(payload.get("episodes_completed", 0))
+            status = str(payload.get("status", "running"))
+            should_print = False
+            if status != "running":
+                should_print = True
+            elif episodes_completed > 0 and episodes_completed >= next_episode_report:
+                should_print = True
+
+            if (
+                should_print
+                and stat.st_mtime_ns != last_mtime_ns
+                and (now - last_print_time >= summary_interval_s)
+            ):
                 print(summary)
                 last_summary = summary
                 last_mtime_ns = stat.st_mtime_ns
                 last_print_time = now
+                while next_episode_report <= episodes_completed:
+                    next_episode_report += max(int(progress_episode_interval), 1)
         time.sleep(0.5)
 
     payload = _load_progress_payload(progress_json_path)
@@ -270,6 +286,7 @@ def run_external_train_mainline(
                 process,
                 progress_json_path=Path(launch_info["progress_json_path"]),
                 summary_interval_s=float(summary_interval_s),
+                progress_episode_interval=int(train_controls.get("progress_episode_interval", 10)),
             )
         returncode = process.wait()
 
