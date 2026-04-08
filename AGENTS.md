@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **MADRL_ESS** (1888 symbols, 5483 relationships, 159 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **MADRL_ESS** (2033 symbols, 5877 relationships, 173 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -99,3 +99,12 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Working Style
+
+- Use first-principles reasoning. Start from the underlying problem and desired outcome, not just the requested implementation.
+- Do not assume the user has fully specified the right goal or the best path.
+- If the motivation, objective, or success criteria are unclear, pause and ask concise clarifying questions before acting.
+- If the goal is clear but the requested path is not the shortest, safest, or highest-leverage approach, say so explicitly and recommend a better alternative.
+- Prefer the simplest path that achieves the real goal with clear tradeoffs.
+- Be cautious about hidden assumptions, especially when the user sounds confident but key constraints are still missing.

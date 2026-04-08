@@ -15,10 +15,19 @@ from scripts.plots.rollout_plots import plot_voltage_and_net_load_dashboard
 from scripts.utils.grid_notebook_workflow import (
     RolloutResult,
     plot_power_balance_bars,
+    plot_power_balance_comparison,
     plot_rollout_comparison_dashboard,
     plot_rollout_dashboard,
     plot_test_voltage_profile,
 )
+
+
+def _bar_heights(axis, container_index: int) -> np.ndarray:
+    return np.asarray(
+        [patch.get_height() for patch in axis.containers[container_index].patches],
+        dtype=np.float32,
+    )
+
 
 def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(tmp_path):
     reward_summary = {
@@ -308,19 +317,21 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
 
 def test_power_balance_plot_renders_expected_stacks():
     timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    step_df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "load_total": [3.0, 3.2, 3.1],
+            "battery_charge_total": [0.4, 0.1, 0.0],
+            "pv_raw_total": [1.7, 1.3, 1.0],
+            "pv_effective_total": [1.5, 1.2, 1.0],
+            "pv_curtail_total": [0.2, 0.1, 0.0],
+            "grid_import_total": [1.4, 1.9, 1.8],
+            "grid_export_total": [0.0, 0.0, 0.0],
+            "battery_discharge_total": [0.5, 0.2, 0.3],
+        }
+    )
     rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "load_total": [3.0, 3.2, 3.1],
-                "battery_charge_total": [0.4, 0.1, 0.0],
-                "pv_effective_total": [1.5, 1.2, 1.0],
-                "pv_curtail_total": [0.2, 0.1, 0.0],
-                "grid_import_total": [1.2, 1.7, 1.9],
-                "grid_export_total": [0.0, 0.0, 0.0],
-                "battery_discharge_total": [0.0, 0.2, 0.3],
-            }
-        ),
+        step_df=step_df,
         agent_df=pd.DataFrame(),
         grid_df=pd.DataFrame(),
         summary=pd.DataFrame(),
@@ -328,8 +339,110 @@ def test_power_balance_plot_renders_expected_stacks():
     )
 
     figure = plot_power_balance_bars(rollout)
+    axis = figure.axes[0]
+
     assert len(figure.axes) == 1
-    assert len(figure.axes[0].patches) == 21
+    assert len(axis.patches) == 21
+    assert len(axis.containers) == 7
+    assert np.allclose(
+        step_df["load_total"] + step_df["battery_charge_total"] + step_df["grid_export_total"] + step_df["pv_curtail_total"],
+        step_df["pv_raw_total"] + step_df["grid_import_total"] + step_df["battery_discharge_total"],
+        atol=1e-4,
+    )
+    assert np.allclose(_bar_heights(axis, 3), step_df["pv_curtail_total"].to_numpy(dtype=np.float32), atol=1e-4)
+    assert np.allclose(_bar_heights(axis, 4), -step_df["pv_raw_total"].to_numpy(dtype=np.float32), atol=1e-4)
+
+    legend_labels = axis.get_legend_handles_labels()[1]
+    assert "Curtailment loss" in legend_labels
+    assert "PV raw" in legend_labels
+    plt.close(figure)
+
+
+def test_power_balance_plot_rebuilds_pv_raw_for_legacy_rollouts():
+    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    step_df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "load_total": [2.0, 2.3, 2.5],
+            "battery_charge_total": [0.3, 0.2, 0.1],
+            "pv_effective_total": [1.1, 1.3, 1.0],
+            "pv_curtail_total": [0.4, 0.2, 0.3],
+            "grid_import_total": [0.7, 0.8, 1.0],
+            "grid_export_total": [0.0, 0.0, 0.0],
+            "battery_discharge_total": [0.9, 0.4, 0.3],
+        }
+    )
+    rollout = RolloutResult(
+        step_df=step_df,
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Legacy DRL"},
+    )
+
+    figure = plot_power_balance_bars(rollout)
+    axis = figure.axes[0]
+    reconstructed_pv_raw = (
+        step_df["pv_effective_total"].to_numpy(dtype=np.float32)
+        + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+    )
+
+    assert np.allclose(_bar_heights(axis, 4), -reconstructed_pv_raw, atol=1e-4)
+    plt.close(figure)
+
+
+def test_power_balance_comparison_uses_same_strict_balance_logic():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    rollout_with_raw = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "load_total": [2.0, 2.4],
+                "battery_charge_total": [0.2, 0.1],
+                "pv_raw_total": [1.5, 1.3],
+                "pv_curtail_total": [0.1, 0.2],
+                "grid_import_total": [0.4, 1.0],
+                "grid_export_total": [0.0, 0.0],
+                "battery_discharge_total": [0.4, 0.0],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Raw"},
+    )
+    rollout_legacy = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "load_total": [2.1, 2.0],
+                "battery_charge_total": [0.1, 0.2],
+                "pv_effective_total": [1.0, 1.1],
+                "pv_curtail_total": [0.3, 0.2],
+                "grid_import_total": [0.6, 0.5],
+                "grid_export_total": [0.0, 0.0],
+                "battery_discharge_total": [0.9, 0.4],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Legacy"},
+    )
+
+    figure = plot_power_balance_comparison(rollout_with_raw, rollout_legacy)
+
+    assert len(figure.axes) == 2
+    first_labels = figure.axes[0].get_legend_handles_labels()[1]
+    assert "Curtailment loss" in first_labels
+    assert "PV raw" in first_labels
+
+    legacy_axis = figure.axes[1]
+    legacy_reconstructed_pv_raw = (
+        rollout_legacy.step_df["pv_effective_total"].to_numpy(dtype=np.float32)
+        + rollout_legacy.step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+    )
+    assert np.allclose(_bar_heights(legacy_axis, 4), -legacy_reconstructed_pv_raw, atol=1e-4)
     plt.close(figure)
 
 
