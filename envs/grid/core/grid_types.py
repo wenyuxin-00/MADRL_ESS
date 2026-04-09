@@ -31,6 +31,7 @@ class GridStepResult:
     n_trafos: int
 
     # Full-grid safety diagnostics used by the global reward.
+    trafo_p_signed_kw: np.ndarray = field(default_factory=_empty_f32)
     bus_v_excess: np.ndarray = field(default_factory=_empty_f32)
     line_excess: np.ndarray = field(default_factory=_empty_f32)
     trafo_excess: np.ndarray = field(default_factory=_empty_f32)

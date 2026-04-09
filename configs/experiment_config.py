@@ -50,7 +50,7 @@ class TrainConfig:
     max_train_steps: int | None = None
     num_envs: int = 1
     vec_env_type: str = "dummy"
-    batch_size: int = 4096
+    batch_size: int = 1024
     buffer_size: int = int(1e6)
     update_interval: int = 1
     updates_per_step: int = 1
@@ -99,8 +99,8 @@ class RewardConfig:
 
     w_soc_pen: float = 10.0
     export_subsidy_eur_per_kwh: float = 0.079
-    w_voltage_pen: float = 10.0
-    w_line_pen: float = 10.0
+    w_voltage_pen: float = 500.0
+    w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
 
 
@@ -250,7 +250,7 @@ class SafetyConfig:
 
     enabled: bool = False
     projector_mode: str = "joint_linearized"
-    projection_iters: int = 6
+    projection_iters: int = 3
     voltage_margin_pu: float = 0.005
     line_margin_pct: float = 5.0
     trafo_margin_pct: float = 5.0

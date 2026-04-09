@@ -28,6 +28,7 @@ def test_grid_step_result_import() -> None:
     assert result.converged
     assert result.agent_vm_pu.shape == (3,)
     assert result.trafo_loading_pct.shape == (2,)
+    assert result.trafo_p_signed_kw.shape == (0,)
     assert result.n_buses == 5
 
 
@@ -89,6 +90,7 @@ def test_grid_core_zero_injection(agent_deployments, grid_cfg) -> None:
     assert result.vm_pu.shape == (core.n_buses,)
     assert result.line_loading_pct.shape == (core.n_lines,)
     assert result.trafo_loading_pct.shape == (core.n_trafos,)
+    assert result.trafo_p_signed_kw.shape == (core.n_trafos,)
     assert result.agent_vm_pu.shape == (N_AGENTS,)
     assert result.v_violation.shape == (N_AGENTS,)
     assert np.all(result.vm_pu > 0.8)
@@ -109,6 +111,7 @@ def test_grid_core_shapes(agent_deployments, grid_cfg) -> None:
     assert result.va_degree.shape == (core.n_buses,)
     assert result.line_loading_pct.shape == (core.n_lines,)
     assert result.trafo_loading_pct.shape == (core.n_trafos,)
+    assert result.trafo_p_signed_kw.shape == (core.n_trafos,)
     assert result.p_mw_from.shape == (core.n_lines,)
     assert result.agent_vm_pu.shape == (N_AGENTS,)
     assert result.v_violation.shape == (N_AGENTS,)

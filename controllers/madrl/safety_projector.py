@@ -51,6 +51,10 @@ class ProjectionDiagnostics:
     mean_abs_delta_kw: float
     pre_violation: float
     post_violation: float
+    pre_trafo_import_violation_kw: float = 0.0
+    pre_trafo_export_violation_kw: float = 0.0
+    post_trafo_import_violation_kw: float = 0.0
+    post_trafo_export_violation_kw: float = 0.0
 
     def to_dict(self) -> dict[str, float | int | bool]:
         return {
@@ -62,11 +66,15 @@ class ProjectionDiagnostics:
             "mean_abs_delta_kw": float(self.mean_abs_delta_kw),
             "pre_violation": float(self.pre_violation),
             "post_violation": float(self.post_violation),
+            "pre_trafo_import_violation_kw": float(self.pre_trafo_import_violation_kw),
+            "pre_trafo_export_violation_kw": float(self.pre_trafo_export_violation_kw),
+            "post_trafo_import_violation_kw": float(self.post_trafo_import_violation_kw),
+            "post_trafo_export_violation_kw": float(self.post_trafo_export_violation_kw),
         }
 
 
 class JointGridSafetyProjector(nn.Module):
-    """Project joint battery actions into an approximate safe feasible set."""
+    """Project joint actions into a linearized safe set with signed trafo power constraints."""
 
     def __init__(
         self,
@@ -74,14 +82,15 @@ class JointGridSafetyProjector(nn.Module):
         n_agents: int,
         voltage_sensitivity: np.ndarray,
         line_loading_sensitivity: np.ndarray,
-        trafo_loading_sensitivity: np.ndarray,
+        trafo_power_sensitivity: np.ndarray,
         voltage_base: np.ndarray,
         line_loading_base: np.ndarray,
-        trafo_loading_base: np.ndarray,
+        trafo_power_base_kw: np.ndarray,
         voltage_min_pu: float,
         voltage_max_pu: float,
         line_limit_pct: float,
         trafo_limit_pct: float,
+        trafo_rating_kw: np.ndarray,
         efficiency: float,
         dt_hours: float,
         soc_min: float,
@@ -113,27 +122,37 @@ class JointGridSafetyProjector(nn.Module):
 
         voltage_sensitivity_t = torch.as_tensor(voltage_sensitivity, dtype=torch.float32)
         line_loading_sensitivity_t = torch.as_tensor(line_loading_sensitivity, dtype=torch.float32)
-        trafo_loading_sensitivity_t = torch.as_tensor(trafo_loading_sensitivity, dtype=torch.float32)
+        trafo_power_sensitivity_t = torch.as_tensor(trafo_power_sensitivity, dtype=torch.float32)
         self.register_buffer("voltage_sensitivity", voltage_sensitivity_t)
         self.register_buffer("line_loading_sensitivity", line_loading_sensitivity_t)
-        self.register_buffer("trafo_loading_sensitivity", trafo_loading_sensitivity_t)
+        self.register_buffer("trafo_power_sensitivity", trafo_power_sensitivity_t)
         self.register_buffer("voltage_base", torch.as_tensor(voltage_base, dtype=torch.float32))
         self.register_buffer("line_loading_base", torch.as_tensor(line_loading_base, dtype=torch.float32))
-        self.register_buffer("trafo_loading_base", torch.as_tensor(trafo_loading_base, dtype=torch.float32))
+        self.register_buffer("trafo_power_base_kw", torch.as_tensor(trafo_power_base_kw, dtype=torch.float32))
+
+        trafo_rating_kw_t = torch.as_tensor(trafo_rating_kw, dtype=torch.float32)
+        trafo_limit_kw_t = trafo_rating_kw_t * (self.trafo_limit_pct / 100.0)
+        # For the signed-power surrogate, trafo_margin_pct now reserves a fraction of
+        # the usable transformer power envelope instead of subtracting loading points.
+        trafo_usable_limit_kw_t = trafo_limit_kw_t * max(0.0, 1.0 - self.trafo_margin_pct / 100.0)
+        self.register_buffer("trafo_import_limit_kw", trafo_usable_limit_kw_t.clone())
+        self.register_buffer("trafo_export_limit_kw", trafo_usable_limit_kw_t.clone())
 
         self.register_buffer("voltage_rows_upper", voltage_sensitivity_t.clone())
         self.register_buffer("voltage_rows_lower", -voltage_sensitivity_t.clone())
         self.register_buffer("line_rows", line_loading_sensitivity_t.clone())
-        self.register_buffer("trafo_rows", trafo_loading_sensitivity_t.clone())
+        self.register_buffer("trafo_rows_import", trafo_power_sensitivity_t.clone())
+        self.register_buffer("trafo_rows_export", -trafo_power_sensitivity_t.clone())
         self.register_buffer("voltage_row_norm_sq", _row_norm_sq(voltage_sensitivity_t))
         self.register_buffer("line_row_norm_sq", _row_norm_sq(line_loading_sensitivity_t))
-        self.register_buffer("trafo_row_norm_sq", _row_norm_sq(trafo_loading_sensitivity_t))
+        self.register_buffer("trafo_row_norm_sq", _row_norm_sq(trafo_power_sensitivity_t))
 
         combined_rows = [voltage_sensitivity_t, -voltage_sensitivity_t]
         if line_loading_sensitivity_t.numel() > 0:
             combined_rows.append(line_loading_sensitivity_t)
-        if trafo_loading_sensitivity_t.numel() > 0:
-            combined_rows.append(trafo_loading_sensitivity_t)
+        if trafo_power_sensitivity_t.numel() > 0:
+            combined_rows.append(trafo_power_sensitivity_t)
+            combined_rows.append(-trafo_power_sensitivity_t)
         combined_constraint_rows = torch.cat(combined_rows, dim=0)
         self.register_buffer("combined_constraint_rows", combined_constraint_rows)
         self.register_buffer("combined_constraint_row_norm_sq", _row_norm_sq(combined_constraint_rows))
@@ -153,32 +172,50 @@ class JointGridSafetyProjector(nn.Module):
 
         net_voltage_sensitivity = np.zeros((grid_core.n_buses, n_agents), dtype=np.float32)
         net_line_loading_sensitivity = np.zeros((grid_core.n_lines, n_agents), dtype=np.float32)
-        net_trafo_loading_sensitivity = np.zeros((grid_core.n_trafos, n_agents), dtype=np.float32)
+        trafo_power_available = bool(
+            grid_core.n_trafos > 0
+            and hasattr(grid_core.net, "res_trafo")
+            and "p_hv_mw" in getattr(grid_core.net, "res_trafo").columns
+        )
+        if trafo_power_available:
+            net_trafo_power_sensitivity = np.zeros((grid_core.n_trafos, n_agents), dtype=np.float32)
+            trafo_power_base_kw = np.asarray(baseline.trafo_p_signed_kw, dtype=np.float32)
+            trafo_rating_kw = (
+                np.asarray(grid_core.net.trafo["sn_mva"].to_numpy(dtype=np.float32), dtype=np.float32) * 1000.0
+            )
+        else:
+            net_trafo_power_sensitivity = np.zeros((0, n_agents), dtype=np.float32)
+            trafo_power_base_kw = np.zeros(0, dtype=np.float32)
+            trafo_rating_kw = np.zeros(0, dtype=np.float32)
 
         for agent_id in range(n_agents):
             perturb = zero.copy()
             perturb[agent_id] = np.float32(delta_kw)
             grid_core.reset(zero, zero)
-            result = grid_core.step(perturb, zero)
+            result_plus = grid_core.step(perturb, zero)
+            grid_core.reset(zero, zero)
+            # We keep the existing one-sided voltage/line sensitivities, but the
+            # trafo surrogate now uses centered differences on signed p_hv_mw.
+            result_minus = grid_core.step(-perturb, zero)
             net_voltage_sensitivity[:, agent_id] = (
-                (np.asarray(result.vm_pu, dtype=np.float32) - np.asarray(baseline.vm_pu, dtype=np.float32))
+                (np.asarray(result_plus.vm_pu, dtype=np.float32) - np.asarray(baseline.vm_pu, dtype=np.float32))
                 / np.float32(delta_kw)
             )
             if grid_core.n_lines > 0:
                 net_line_loading_sensitivity[:, agent_id] = (
                     (
-                        np.asarray(result.line_loading_pct, dtype=np.float32)
+                        np.asarray(result_plus.line_loading_pct, dtype=np.float32)
                         - np.asarray(baseline.line_loading_pct, dtype=np.float32)
                     )
                     / np.float32(delta_kw)
                 )
-            if grid_core.n_trafos > 0:
-                net_trafo_loading_sensitivity[:, agent_id] = (
+            if trafo_power_available:
+                net_trafo_power_sensitivity[:, agent_id] = (
                     (
-                        np.asarray(result.trafo_loading_pct, dtype=np.float32)
-                        - np.asarray(baseline.trafo_loading_pct, dtype=np.float32)
+                        np.asarray(result_plus.trafo_p_signed_kw, dtype=np.float32)
+                        - np.asarray(result_minus.trafo_p_signed_kw, dtype=np.float32)
                     )
-                    / np.float32(delta_kw)
+                    / np.float32(2.0 * delta_kw)
                 )
 
         voltage_sensitivity = np.concatenate(
@@ -189,8 +226,8 @@ class JointGridSafetyProjector(nn.Module):
             [net_line_loading_sensitivity, net_line_loading_sensitivity],
             axis=1,
         )
-        trafo_loading_sensitivity = np.concatenate(
-            [net_trafo_loading_sensitivity, net_trafo_loading_sensitivity],
+        trafo_power_sensitivity = np.concatenate(
+            [net_trafo_power_sensitivity, net_trafo_power_sensitivity],
             axis=1,
         )
 
@@ -198,14 +235,15 @@ class JointGridSafetyProjector(nn.Module):
             n_agents=n_agents,
             voltage_sensitivity=voltage_sensitivity,
             line_loading_sensitivity=line_loading_sensitivity,
-            trafo_loading_sensitivity=trafo_loading_sensitivity,
+            trafo_power_sensitivity=trafo_power_sensitivity,
             voltage_base=np.asarray(baseline.vm_pu, dtype=np.float32),
             line_loading_base=np.asarray(baseline.line_loading_pct, dtype=np.float32),
-            trafo_loading_base=np.asarray(baseline.trafo_loading_pct, dtype=np.float32),
+            trafo_power_base_kw=trafo_power_base_kw,
             voltage_min_pu=float(cfg.grid.v_min_pu),
             voltage_max_pu=float(cfg.grid.v_max_pu),
             line_limit_pct=float(cfg.grid.line_max_loading_pct),
             trafo_limit_pct=float(cfg.grid.line_max_loading_pct),
+            trafo_rating_kw=trafo_rating_kw,
             efficiency=float(cfg.env.efficiency),
             dt_hours=float(cfg.env.dt),
             soc_min=float(cfg.env.soc_min),
@@ -281,13 +319,15 @@ class JointGridSafetyProjector(nn.Module):
         line_sensitivity = self._as_work_dtype(self.line_loading_sensitivity, dtype=dtype, device=device)[
             :, : self.n_agents
         ]
-        trafo_sensitivity = self._as_work_dtype(self.trafo_loading_sensitivity, dtype=dtype, device=device)[
+        trafo_sensitivity = self._as_work_dtype(self.trafo_power_sensitivity, dtype=dtype, device=device)[
             :, : self.n_agents
         ]
         voltage_base = self._as_work_dtype(self.voltage_base, dtype=dtype, device=device)
         line_base = self._as_work_dtype(self.line_loading_base, dtype=dtype, device=device)
-        trafo_base = self._as_work_dtype(self.trafo_loading_base, dtype=dtype, device=device)
+        trafo_base = self._as_work_dtype(self.trafo_power_base_kw, dtype=dtype, device=device)
 
+        # The trafo affine term is now modeled in signed-kW space:
+        # P_hat = P_base + S_P * (load - pv + battery + curtailment).
         voltage_affine = voltage_base.unsqueeze(0) + base_net_load_kw @ voltage_sensitivity.transpose(0, 1)
         line_affine = line_base.unsqueeze(0)
         if line_sensitivity.numel() > 0:
@@ -296,6 +336,32 @@ class JointGridSafetyProjector(nn.Module):
         if trafo_sensitivity.numel() > 0:
             trafo_affine = trafo_affine + base_net_load_kw @ trafo_sensitivity.transpose(0, 1)
         return voltage_affine, line_affine, trafo_affine
+
+    def _trafo_power_violation_terms(
+        self,
+        *,
+        x_kw: torch.Tensor,
+        trafo_affine: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = int(x_kw.shape[0])
+        zero = torch.zeros((batch_size,), dtype=dtype, device=device)
+        trafo_sensitivity = self._as_work_dtype(self.trafo_power_sensitivity, dtype=dtype, device=device)
+        if trafo_sensitivity.numel() == 0 or trafo_affine.shape[-1] == 0:
+            return zero, zero
+        trafo_import_limit_kw = self._as_work_dtype(self.trafo_import_limit_kw, dtype=dtype, device=device)
+        trafo_export_limit_kw = self._as_work_dtype(self.trafo_export_limit_kw, dtype=dtype, device=device)
+        trafo_power = trafo_affine + x_kw @ trafo_sensitivity.transpose(0, 1)
+        import_violation = torch.sum(
+            torch.clamp(trafo_power - trafo_import_limit_kw.unsqueeze(0), min=0.0),
+            dim=-1,
+        )
+        export_violation = torch.sum(
+            torch.clamp(-trafo_power - trafo_export_limit_kw.unsqueeze(0), min=0.0),
+            dim=-1,
+        )
+        return import_violation, export_violation
 
     def _approximate_violation(
         self,
@@ -309,7 +375,6 @@ class JointGridSafetyProjector(nn.Module):
     ) -> torch.Tensor:
         voltage_sensitivity = self._as_work_dtype(self.voltage_sensitivity, dtype=dtype, device=device)
         line_sensitivity = self._as_work_dtype(self.line_loading_sensitivity, dtype=dtype, device=device)
-        trafo_sensitivity = self._as_work_dtype(self.trafo_loading_sensitivity, dtype=dtype, device=device)
 
         voltage = voltage_affine + x_kw @ voltage_sensitivity.transpose(0, 1)
         voltage_high = torch.clamp(voltage - (self.voltage_max_pu - self.voltage_margin_pu), min=0.0)
@@ -323,13 +388,13 @@ class JointGridSafetyProjector(nn.Module):
                 dim=-1,
             )
 
-        trafo_violation = torch.zeros((x_kw.shape[0],), dtype=dtype, device=device)
-        if trafo_sensitivity.numel() > 0:
-            trafo_loading = trafo_affine + x_kw @ trafo_sensitivity.transpose(0, 1)
-            trafo_violation = torch.sum(
-                torch.clamp(trafo_loading - (self.trafo_limit_pct - self.trafo_margin_pct), min=0.0),
-                dim=-1,
-            )
+        trafo_import_violation, trafo_export_violation = self._trafo_power_violation_terms(
+            x_kw=x_kw,
+            trafo_affine=trafo_affine,
+            dtype=dtype,
+            device=device,
+        )
+        trafo_violation = trafo_import_violation + trafo_export_violation
 
         return torch.sum(voltage_high + voltage_low, dim=-1) + line_violation + trafo_violation
 
@@ -379,7 +444,8 @@ class JointGridSafetyProjector(nn.Module):
         voltage_low_limit: float,
         voltage_high_limit: float,
         line_limit: float,
-        trafo_limit: float,
+        trafo_import_limit_kw: torch.Tensor,
+        trafo_export_limit_kw: torch.Tensor,
     ) -> torch.Tensor:
         bounds = [
             voltage_high_limit - voltage_affine,
@@ -388,7 +454,8 @@ class JointGridSafetyProjector(nn.Module):
         if line_affine.shape[-1] > 0:
             bounds.append(line_limit - line_affine)
         if trafo_affine.shape[-1] > 0:
-            bounds.append(trafo_limit - trafo_affine)
+            bounds.append(trafo_import_limit_kw.unsqueeze(0) - trafo_affine)
+            bounds.append(trafo_export_limit_kw.unsqueeze(0) + trafo_affine)
         return torch.cat(bounds, dim=-1)
 
     @staticmethod
@@ -465,7 +532,8 @@ class JointGridSafetyProjector(nn.Module):
         voltage_rows_upper = self._as_work_dtype(self.voltage_rows_upper, dtype=work_dtype, device=device)
         voltage_rows_lower = self._as_work_dtype(self.voltage_rows_lower, dtype=work_dtype, device=device)
         line_rows = self._as_work_dtype(self.line_rows, dtype=work_dtype, device=device)
-        trafo_rows = self._as_work_dtype(self.trafo_rows, dtype=work_dtype, device=device)
+        trafo_rows_import = self._as_work_dtype(self.trafo_rows_import, dtype=work_dtype, device=device)
+        trafo_rows_export = self._as_work_dtype(self.trafo_rows_export, dtype=work_dtype, device=device)
         voltage_row_norm_sq = self._as_work_dtype(self.voltage_row_norm_sq, dtype=work_dtype, device=device)
         line_row_norm_sq = self._as_work_dtype(self.line_row_norm_sq, dtype=work_dtype, device=device)
         trafo_row_norm_sq = self._as_work_dtype(self.trafo_row_norm_sq, dtype=work_dtype, device=device)
@@ -483,7 +551,8 @@ class JointGridSafetyProjector(nn.Module):
         voltage_low_limit = self.voltage_min_pu + self.voltage_margin_pu
         voltage_high_limit = self.voltage_max_pu - self.voltage_margin_pu
         line_limit = self.line_limit_pct - self.line_margin_pct
-        trafo_limit = self.trafo_limit_pct - self.trafo_margin_pct
+        trafo_import_limit_kw = self._as_work_dtype(self.trafo_import_limit_kw, dtype=work_dtype, device=device)
+        trafo_export_limit_kw = self._as_work_dtype(self.trafo_export_limit_kw, dtype=work_dtype, device=device)
 
         for _ in range(self.projection_iters):
             x_kw = self._clamp_joint_action_kw(
@@ -501,7 +570,8 @@ class JointGridSafetyProjector(nn.Module):
                     voltage_low_limit=voltage_low_limit,
                     voltage_high_limit=voltage_high_limit,
                     line_limit=line_limit,
-                    trafo_limit=trafo_limit,
+                    trafo_import_limit_kw=trafo_import_limit_kw,
+                    trafo_export_limit_kw=trafo_export_limit_kw,
                 )
                 x_kw = self._project_rows_batched(
                     x_kw,
@@ -531,8 +601,14 @@ class JointGridSafetyProjector(nn.Module):
             )
             x_kw = self._project_rows_sequential(
                 x_kw,
-                trafo_rows,
-                trafo_limit - trafo_affine,
+                trafo_rows_import,
+                trafo_import_limit_kw.unsqueeze(0) - trafo_affine,
+                trafo_row_norm_sq,
+            )
+            x_kw = self._project_rows_sequential(
+                x_kw,
+                trafo_rows_export,
+                trafo_export_limit_kw.unsqueeze(0) + trafo_affine,
                 trafo_row_norm_sq,
             )
 
@@ -577,6 +653,21 @@ class JointGridSafetyProjector(nn.Module):
             dtype=work_dtype,
             device=device,
         )
+        pre_trafo_import_violation = torch.zeros_like(post_violation)
+        pre_trafo_export_violation = torch.zeros_like(post_violation)
+        if pre_violation is not None:
+            pre_trafo_import_violation, pre_trafo_export_violation = self._trafo_power_violation_terms(
+                x_kw=raw_kw,
+                trafo_affine=trafo_affine,
+                dtype=work_dtype,
+                device=device,
+            )
+        post_trafo_import_violation, post_trafo_export_violation = self._trafo_power_violation_terms(
+            x_kw=x_kw,
+            trafo_affine=trafo_affine,
+            dtype=work_dtype,
+            device=device,
+        )
         raw_action_slice = raw_actions[..., : projected_actions.shape[-1]].to(dtype=work_dtype)
         projected_action_slice = (
             projected_actions.unsqueeze(0).to(dtype=work_dtype)
@@ -595,6 +686,10 @@ class JointGridSafetyProjector(nn.Module):
             mean_abs_delta_kw=float(delta_kw.mean().item()),
             pre_violation=float(pre_violation.mean().item()) if pre_violation is not None else 0.0,
             post_violation=float(post_violation.mean().item()),
+            pre_trafo_import_violation_kw=float(pre_trafo_import_violation.mean().item()),
+            pre_trafo_export_violation_kw=float(pre_trafo_export_violation.mean().item()),
+            post_trafo_import_violation_kw=float(post_trafo_import_violation.mean().item()),
+            post_trafo_export_violation_kw=float(post_trafo_export_violation.mean().item()),
         )
         return projected_actions, diagnostics.to_dict()
 

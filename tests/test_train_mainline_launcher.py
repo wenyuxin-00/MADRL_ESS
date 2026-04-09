@@ -543,6 +543,10 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     assert result["safety_summary"]["actor_projection_calls"] >= 0
     assert result["safety_summary"]["projection_time_s"] >= 0.0
     assert result["safety_summary"]["projector_local_infeasible_count"] >= 0
+    assert result["safety_summary"]["mean_pre_trafo_import_violation_kw"] >= 0.0
+    assert result["safety_summary"]["mean_pre_trafo_export_violation_kw"] >= 0.0
+    assert result["safety_summary"]["mean_post_trafo_import_violation_kw"] >= 0.0
+    assert result["safety_summary"]["mean_post_trafo_export_violation_kw"] >= 0.0
     assert result["perf_summary"]["projection_time_s"] >= 0.0
     assert "target_projection_time_s" in result["perf_summary"]
     assert "actor_projection_time_s" in result["perf_summary"]

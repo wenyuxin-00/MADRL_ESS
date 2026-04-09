@@ -237,8 +237,13 @@ class GridCore:
 
         if self.n_trafos > 0 and hasattr(self.net, "res_trafo") and not self.net.res_trafo.empty:
             trafo_loading_pct = self.net.res_trafo["loading_percent"].to_numpy(dtype=np.float32)
+            if "p_hv_mw" in self.net.res_trafo.columns:
+                trafo_p_signed_kw = self.net.res_trafo["p_hv_mw"].to_numpy(dtype=np.float32) * 1000.0
+            else:
+                trafo_p_signed_kw = np.zeros(self.n_trafos, dtype=np.float32)
         else:
             trafo_loading_pct = np.zeros(self.n_trafos, dtype=np.float32)
+            trafo_p_signed_kw = np.zeros(self.n_trafos, dtype=np.float32)
 
         agent_vm_pu = np.array(
             [float(vm_pu[self._bus_id_to_pos[bus_id]]) for bus_id in self.agent_bus_ids],
@@ -284,6 +289,7 @@ class GridCore:
             n_buses=self.n_buses,
             n_lines=self.n_lines,
             n_trafos=self.n_trafos,
+            trafo_p_signed_kw=trafo_p_signed_kw.astype(np.float32, copy=False),
             bus_v_excess=bus_v_excess,
             line_excess=line_excess_arr,
             trafo_excess=trafo_excess_arr,
@@ -309,6 +315,7 @@ class GridCore:
             n_buses=self.n_buses,
             n_lines=self.n_lines,
             n_trafos=self.n_trafos,
+            trafo_p_signed_kw=np.zeros(self.n_trafos, dtype=np.float32),
             bus_v_excess=np.zeros(self.n_buses, dtype=np.float32),
             line_excess=np.zeros(self.n_lines, dtype=np.float32),
             trafo_excess=np.zeros(self.n_trafos, dtype=np.float32),

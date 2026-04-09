@@ -191,6 +191,10 @@ class TrainRunner:
         self._safety_mean_abs_delta_kw_weighted = 0.0
         self._safety_pre_violation_weighted = 0.0
         self._safety_post_violation_weighted = 0.0
+        self._safety_pre_trafo_import_violation_kw_weighted = 0.0
+        self._safety_pre_trafo_export_violation_kw_weighted = 0.0
+        self._safety_post_trafo_import_violation_kw_weighted = 0.0
+        self._safety_post_trafo_export_violation_kw_weighted = 0.0
         self._safety_max_abs_delta = 0.0
         self._safety_env_fallback_steps = 0
         self._safety_env_observations = 0
@@ -211,6 +215,18 @@ class TrainRunner:
         self._safety_mean_abs_delta_kw_weighted += float(diagnostics.get("mean_abs_delta_kw", 0.0)) * batch_size
         self._safety_pre_violation_weighted += float(diagnostics.get("pre_violation", 0.0)) * batch_size
         self._safety_post_violation_weighted += float(diagnostics.get("post_violation", 0.0)) * batch_size
+        self._safety_pre_trafo_import_violation_kw_weighted += float(
+            diagnostics.get("pre_trafo_import_violation_kw", 0.0)
+        ) * batch_size
+        self._safety_pre_trafo_export_violation_kw_weighted += float(
+            diagnostics.get("pre_trafo_export_violation_kw", 0.0)
+        ) * batch_size
+        self._safety_post_trafo_import_violation_kw_weighted += float(
+            diagnostics.get("post_trafo_import_violation_kw", 0.0)
+        ) * batch_size
+        self._safety_post_trafo_export_violation_kw_weighted += float(
+            diagnostics.get("post_trafo_export_violation_kw", 0.0)
+        ) * batch_size
         self._safety_max_abs_delta = max(
             self._safety_max_abs_delta,
             float(diagnostics.get("max_abs_delta", 0.0)),
@@ -278,6 +294,18 @@ class TrainRunner:
             "mean_abs_action_delta_kw": float(self._safety_mean_abs_delta_kw_weighted / diagnostic_denominator),
             "mean_pre_projection_violation": float(self._safety_pre_violation_weighted / diagnostic_denominator),
             "mean_post_projection_violation": float(self._safety_post_violation_weighted / diagnostic_denominator),
+            "mean_pre_trafo_import_violation_kw": float(
+                self._safety_pre_trafo_import_violation_kw_weighted / diagnostic_denominator
+            ),
+            "mean_pre_trafo_export_violation_kw": float(
+                self._safety_pre_trafo_export_violation_kw_weighted / diagnostic_denominator
+            ),
+            "mean_post_trafo_import_violation_kw": float(
+                self._safety_post_trafo_import_violation_kw_weighted / diagnostic_denominator
+            ),
+            "mean_post_trafo_export_violation_kw": float(
+                self._safety_post_trafo_export_violation_kw_weighted / diagnostic_denominator
+            ),
             "projection_time_s": projection_time_total,
             "rollout_projection_calls": int(self._safety_projection_calls_by_stage["rollout"]),
             "target_projection_calls": int(self._safety_projection_calls_by_stage["target"]),

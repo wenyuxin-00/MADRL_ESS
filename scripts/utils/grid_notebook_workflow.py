@@ -375,6 +375,30 @@ def _canonicalize_compare_value(value):
     return value
 
 
+def _extract_safety_summary(train_result: Mapping[str, object] | None) -> dict[str, object]:
+    payload = dict(train_result or {})
+    if isinstance(payload.get("safety_summary"), Mapping):
+        return dict(payload["safety_summary"])
+    nested_result = payload.get("train_result")
+    if isinstance(nested_result, Mapping) and isinstance(nested_result.get("safety_summary"), Mapping):
+        return dict(nested_result["safety_summary"])
+    return {}
+
+
+def _extract_trafo_penalty_weight(train_result: Mapping[str, object] | None) -> float | None:
+    payload = dict(train_result or {})
+    if isinstance(payload.get("experiment_controls"), Mapping):
+        reward_controls = dict(payload["experiment_controls"].get("reward_controls", {}))
+        if "w_trafo_pen" in reward_controls:
+            return float(reward_controls["w_trafo_pen"])
+    nested_result = payload.get("train_result")
+    if isinstance(nested_result, Mapping) and isinstance(nested_result.get("experiment_controls"), Mapping):
+        reward_controls = dict(nested_result["experiment_controls"].get("reward_controls", {}))
+        if "w_trafo_pen" in reward_controls:
+            return float(reward_controls["w_trafo_pen"])
+    return None
+
+
 def load_training_run_bundle(model_root) -> dict[str, object]:
     resolved_model_root = Path(model_root).resolve()
     meta_dir = resolved_model_root / "_meta"
@@ -604,6 +628,7 @@ def collect_controller_rollout(
     agent_bus_ids = [int(bus_id) for bus_id in getattr(env._grid_core, "agent_bus_ids", cfg.grid.agent_bus_ids)]
     agent_bus_set = set(agent_bus_ids)
     trafo_limit_kw = _approx_trafo_limit_kw(env)
+    loading_limit_pct = float(cfg.grid.line_max_loading_pct)
     try:
         for episode_idx in range(env.num_available_episodes):
             obs, reset_info = env.reset(episode_idx=episode_idx)
@@ -715,6 +740,16 @@ def collect_controller_rollout(
                 )
                 battery_charge = np.clip(battery_power, 0.0, None).astype(np.float32)
                 battery_discharge = np.maximum(-battery_power, 0.0).astype(np.float32)
+                battery_charge_req = np.clip(battery_power_req, 0.0, None).astype(np.float32)
+                battery_discharge_req = np.maximum(-battery_power_req, 0.0).astype(np.float32)
+                pv_curtail_req = np.asarray(
+                    info.get("pv_curtail_req", pv_curtail),
+                    dtype=np.float32,
+                )
+                battery_request_gap_kw = np.abs(battery_power_req - battery_power).astype(np.float32)
+                pv_curtail_request_gap_kw = np.abs(pv_curtail_req - pv_curtail).astype(np.float32)
+                line_loading_pct = np.asarray(info.get("line_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
+                trafo_loading_pct = np.asarray(info.get("trafo_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
                 export_subsidy_per_agent = _export_subsidy_per_agent(
                     info,
                     float(env.dt),
@@ -764,13 +799,34 @@ def collect_controller_rollout(
                         "grid_import_total": float(np.sum(grid_import)),
                         "grid_export_total": float(np.sum(grid_export)),
                         "battery_charge_total": float(np.sum(battery_charge)),
+                        "battery_charge_req_total": float(np.sum(battery_charge_req)),
                         "battery_discharge_total": float(np.sum(battery_discharge)),
+                        "battery_discharge_req_total": float(np.sum(battery_discharge_req)),
+                        "pv_curtail_req_total": float(np.sum(pv_curtail_req)),
+                        "battery_request_gap_kw_total": float(np.sum(battery_request_gap_kw)),
+                        "pv_curtail_request_gap_kw_total": float(np.sum(pv_curtail_request_gap_kw)),
+                        "projector_adjustment_kw_total": float(
+                            np.sum(battery_request_gap_kw) + np.sum(pv_curtail_request_gap_kw)
+                        ),
                         "purchase_cost_total": purchase_cost_total,
                         "export_subsidy_total": export_subsidy_total,
                         "soc_penalty_total": soc_penalty_total,
                         "voltage_penalty_total": voltage_penalty_total,
                         "line_penalty_total": line_penalty_total,
                         "trafo_penalty_total": trafo_penalty_total,
+                        "psi_v_raw": float(info.get("psi_v_raw", 0.0)),
+                        "psi_line_raw": float(info.get("psi_line_raw", 0.0)),
+                        "psi_trafo_raw": float(info.get("psi_trafo_raw", 0.0)),
+                        "line_loading_pct_max": float(np.max(line_loading_pct)) if line_loading_pct.size else 0.0,
+                        "trafo_loading_pct_max": float(np.max(trafo_loading_pct)) if trafo_loading_pct.size else 0.0,
+                        "line_violation": float(info.get("line_violation", info.get("l_violation", 0.0))),
+                        "trafo_violation": float(info.get("trafo_violation", 0.0)),
+                        "n_line_violations": int(
+                            info.get("n_line_violations", info.get("n_l_violations", int(np.any(line_loading_pct > loading_limit_pct))))
+                        ),
+                        "n_trafo_violations": int(
+                            info.get("n_trafo_violations", info.get("n_t_violations", int(np.any(trafo_loading_pct > loading_limit_pct))))
+                        ),
                         "objective_total": (
                             purchase_cost_total
                             - export_subsidy_total
@@ -803,6 +859,7 @@ def collect_controller_rollout(
                             "pv_raw": float(pv_raw[agent_idx]),
                             "pv_effective": float(pv_effective[agent_idx]),
                             "pv_curtail": float(pv_curtail[agent_idx]),
+                            "pv_curtail_req": float(pv_curtail_req[agent_idx]),
                             "pv_utilization": float(pv_utilization[agent_idx]),
                             "pv_pred": float(np.asarray(pv_pred, dtype=np.float32)[agent_idx]),
                             "base_net_load": float(base_net_load[agent_idx]),
@@ -817,6 +874,8 @@ def collect_controller_rollout(
                             "pv_action_req": float(pv_action_req[agent_idx]),
                             "pv_action_exec": float(pv_action_exec[agent_idx]),
                             "controller_action_gap": float(controller_action_gap[agent_idx]),
+                            "battery_request_gap_kw": float(battery_request_gap_kw[agent_idx]),
+                            "pv_curtail_request_gap_kw": float(pv_curtail_request_gap_kw[agent_idx]),
                             "soc_penalty_unweighted": float(soc_penalty_unweighted[agent_idx]),
                             "r_soc_pen": float(soc_penalty[agent_idx]),
                             "r_safe_v": float(voltage_penalty_per_agent[agent_idx]),
@@ -880,6 +939,8 @@ def collect_controller_rollout(
                 ),
                 "dt_hours": float(cfg.env.dt),
                 "trafo_limit_kw": trafo_limit_kw,
+                "loading_limit_pct": loading_limit_pct,
+                "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
             },
         )
@@ -939,6 +1000,299 @@ def compare_purchase_costs(*rollouts: RolloutResult) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values("purchase_cost_total").reset_index(drop=True)
+
+
+def _safe_ratio_series(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    numerator_series = numerator.astype(np.float32)
+    denominator_series = denominator.astype(np.float32)
+    safe_denominator = denominator_series.where(denominator_series.abs() > 1e-6, np.nan)
+    return numerator_series / safe_denominator
+
+
+def _build_trafo_cause_hint(row: pd.Series) -> str:
+    regime = str(row.get("dominant_regime", "mixed_or_balanced"))
+    raw_export = max(float(row.get("raw_export_total", 0.0)), 0.0)
+    raw_import = max(float(row.get("raw_import_total", 0.0)), 0.0)
+    grid_export = max(float(row.get("grid_export_total", 0.0)), 0.0)
+    grid_import = max(float(row.get("grid_import_total", 0.0)), 0.0)
+    battery_charge = max(float(row.get("battery_charge_total", 0.0)), 0.0)
+    battery_discharge = max(float(row.get("battery_discharge_total", 0.0)), 0.0)
+    curtailment_ratio = row.get("curtailment_ratio", np.nan)
+    projector_adjustment = row.get("projector_adjustment_kw_total", np.nan)
+
+    if regime == "reverse_flow_export":
+        stress_kw = max(raw_export, 1.0)
+        adjustment_ratio = float(projector_adjustment / stress_kw) if pd.notna(projector_adjustment) else np.nan
+        if pd.notna(projector_adjustment) and adjustment_ratio >= 0.20 and grid_export > 0.25 * raw_export:
+            return "PV reverse flow dominates; projection changed actions but residual export stayed high."
+        if (
+            (pd.isna(projector_adjustment) or adjustment_ratio < 0.05)
+            and (pd.isna(curtailment_ratio) or float(curtailment_ratio) < 0.10)
+            and battery_charge < 0.10 * stress_kw
+        ):
+            return "PV reverse flow dominates; projection barely added charging or curtailment."
+        return "PV reverse flow dominates; check reverse-flow linearization and available flexibility."
+
+    if regime == "grid_import_overload":
+        stress_kw = max(raw_import, 1.0)
+        adjustment_ratio = float(projector_adjustment / stress_kw) if pd.notna(projector_adjustment) else np.nan
+        if pd.notna(projector_adjustment) and adjustment_ratio >= 0.20 and grid_import > 0.25 * raw_import:
+            return "Load-driven import dominates; projection changed actions but residual import stayed high."
+        if (pd.isna(projector_adjustment) or adjustment_ratio < 0.05) and battery_discharge < 0.10 * stress_kw:
+            return "Load-driven import dominates; projection barely added discharge support."
+        return "Load-driven import dominates; likely limited discharge headroom or linearization error."
+
+    return "Transformer stress is mixed; inspect export/import swings and action gaps together."
+
+
+def _prepare_trafo_diagnostic_frame(
+    rollout: RolloutResult,
+    *,
+    train_result: Mapping[str, object] | None = None,
+) -> tuple[pd.DataFrame, str]:
+    step_df = rollout.step_df.copy()
+    if step_df.empty:
+        raise ValueError("Rollout is empty; no trafo diagnostics are available.")
+
+    required_columns = {
+        "episode_idx",
+        "step",
+        "timestamp",
+        "base_net_load_total",
+        "net_load_total",
+        "load_total",
+        "pv_curtail_total",
+        "grid_import_total",
+        "grid_export_total",
+        "battery_charge_total",
+        "battery_discharge_total",
+        "trafo_penalty_total",
+    }
+    missing = sorted(required_columns.difference(step_df.columns))
+    if missing:
+        raise ValueError(f"Rollout step_df is missing required trafo diagnostic columns: {missing}")
+
+    if "pv_raw_total" not in step_df.columns:
+        if "pv_effective_total" not in step_df.columns:
+            raise ValueError("Rollout step_df must contain either pv_raw_total or pv_effective_total.")
+        step_df["pv_raw_total"] = (
+            step_df["pv_effective_total"].to_numpy(dtype=np.float32)
+            + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+        )
+
+    if "psi_trafo_raw" not in step_df.columns:
+        trafo_weight = _extract_trafo_penalty_weight(train_result)
+        if trafo_weight is not None and abs(float(trafo_weight)) > 1e-6:
+            step_df["psi_trafo_raw"] = step_df["trafo_penalty_total"].astype(np.float32) / float(trafo_weight)
+
+    step_df["raw_export_total"] = np.clip(
+        -step_df["base_net_load_total"].to_numpy(dtype=np.float32),
+        0.0,
+        None,
+    )
+    step_df["raw_import_total"] = np.clip(
+        step_df["base_net_load_total"].to_numpy(dtype=np.float32),
+        0.0,
+        None,
+    )
+    step_df["net_load_shift_from_raw_kw"] = (
+        step_df["net_load_total"].astype(np.float32) - step_df["base_net_load_total"].astype(np.float32)
+    )
+    step_df["curtailment_ratio"] = _safe_ratio_series(step_df["pv_curtail_total"], step_df["pv_raw_total"])
+    step_df["charge_to_raw_export_ratio"] = _safe_ratio_series(step_df["battery_charge_total"], step_df["raw_export_total"])
+    step_df["discharge_to_raw_import_ratio"] = _safe_ratio_series(
+        step_df["battery_discharge_total"],
+        step_df["raw_import_total"],
+    )
+
+    reverse_flow_mask = (
+        (step_df["raw_export_total"] > step_df["raw_import_total"])
+        & (step_df["grid_export_total"] > 1e-6)
+        & (step_df["net_load_total"] < 0.0)
+    )
+    import_mask = (
+        (step_df["raw_import_total"] >= step_df["raw_export_total"])
+        & (step_df["grid_import_total"] > 1e-6)
+        & (step_df["net_load_total"] >= 0.0)
+    )
+    step_df["dominant_regime"] = np.select(
+        [reverse_flow_mask, import_mask],
+        ["reverse_flow_export", "grid_import_overload"],
+        default="mixed_or_balanced",
+    )
+
+    step_df["mitigation_toward_safe_direction_kw"] = np.where(
+        reverse_flow_mask,
+        step_df["pv_curtail_total"].astype(np.float32) + step_df["battery_charge_total"].astype(np.float32),
+        np.where(
+            import_mask,
+            step_df["battery_discharge_total"].astype(np.float32),
+            np.nan,
+        ),
+    )
+    step_df["mitigation_against_safe_direction_kw"] = np.where(
+        reverse_flow_mask,
+        step_df["battery_discharge_total"].astype(np.float32),
+        np.where(
+            import_mask,
+            step_df["battery_charge_total"].astype(np.float32) + step_df["pv_curtail_total"].astype(np.float32),
+            np.nan,
+        ),
+    )
+
+    loading_limit_pct = rollout.meta.get("trafo_loading_limit_pct", rollout.meta.get("loading_limit_pct", np.nan))
+    if "trafo_loading_pct_max" not in step_df.columns:
+        step_df["trafo_loading_pct_max"] = np.nan
+    if pd.notna(loading_limit_pct):
+        step_df["trafo_over_limit_pct"] = step_df["trafo_loading_pct_max"].astype(np.float32) - float(loading_limit_pct)
+    else:
+        step_df["trafo_over_limit_pct"] = np.nan
+
+    rank_metric = "psi_trafo_raw" if "psi_trafo_raw" in step_df.columns else "trafo_penalty_total"
+    step_df["rank_score"] = step_df[rank_metric].astype(np.float32)
+    step_df["cause_hint"] = step_df.apply(_build_trafo_cause_hint, axis=1)
+    ordered = step_df.sort_values(
+        ["rank_score", "episode_idx", "step"],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+    return ordered, rank_metric
+
+
+def build_trafo_diagnostic_table(
+    rollout: RolloutResult,
+    *,
+    train_result: Mapping[str, object] | None = None,
+    top_k: int = 12,
+) -> pd.DataFrame:
+    ordered, rank_metric = _prepare_trafo_diagnostic_frame(rollout, train_result=train_result)
+    top_n = max(1, int(top_k))
+    selected = ordered.head(top_n).copy()
+    selected["rank_metric"] = rank_metric
+
+    preferred_columns = [
+        "episode_idx",
+        "step",
+        "timestamp",
+        "rank_metric",
+        "rank_score",
+        "trafo_penalty_total",
+        "psi_trafo_raw",
+        "trafo_loading_pct_max",
+        "trafo_over_limit_pct",
+        "n_trafo_violations",
+        "dominant_regime",
+        "raw_export_total",
+        "raw_import_total",
+        "net_load_total",
+        "grid_export_total",
+        "grid_import_total",
+        "pv_raw_total",
+        "pv_curtail_total",
+        "curtailment_ratio",
+        "battery_charge_total",
+        "battery_discharge_total",
+        "mitigation_toward_safe_direction_kw",
+        "mitigation_against_safe_direction_kw",
+        "projector_adjustment_kw_total",
+        "battery_request_gap_kw_total",
+        "pv_curtail_request_gap_kw_total",
+        "controller_action_gap_total",
+        "voltage_penalty_total",
+        "line_penalty_total",
+        "cause_hint",
+    ]
+    existing_columns = [column for column in preferred_columns if column in selected.columns]
+    return selected.loc[:, existing_columns]
+
+
+def summarize_trafo_diagnostics(
+    rollout: RolloutResult,
+    *,
+    train_result: Mapping[str, object] | None = None,
+    top_k: int = 12,
+) -> pd.Series:
+    ordered, rank_metric = _prepare_trafo_diagnostic_frame(rollout, train_result=train_result)
+    top_n = max(1, int(top_k))
+    selected = ordered.head(top_n).copy()
+    if selected.empty:
+        raise ValueError("Rollout is empty; no trafo diagnostics are available.")
+
+    dominant_regime = (
+        str(selected["dominant_regime"].value_counts().idxmax())
+        if "dominant_regime" in selected.columns and not selected["dominant_regime"].empty
+        else "mixed_or_balanced"
+    )
+    safety_summary = _extract_safety_summary(train_result)
+    pre_violation = safety_summary.get("mean_pre_projection_violation", np.nan)
+    post_violation = safety_summary.get("mean_post_projection_violation", np.nan)
+    if pd.notna(pre_violation) and abs(float(pre_violation)) > 1e-6 and pd.notna(post_violation):
+        violation_reduction_pct = 100.0 * (1.0 - float(post_violation) / float(pre_violation))
+    else:
+        violation_reduction_pct = np.nan
+
+    projected_fraction = safety_summary.get("projected_fraction", np.nan)
+    mean_adjustment_kw = (
+        float(selected["projector_adjustment_kw_total"].mean())
+        if "projector_adjustment_kw_total" in selected.columns
+        else float("nan")
+    )
+    export_share = float((selected["dominant_regime"] == "reverse_flow_export").mean())
+    import_share = float((selected["dominant_regime"] == "grid_import_overload").mean())
+
+    if dominant_regime == "reverse_flow_export":
+        if pd.notna(projected_fraction) and float(projected_fraction) < 0.10:
+            diagnosis = "Top trafo steps are mostly reverse-flow/export driven, and the projector rarely changes the action."
+        elif pd.notna(violation_reduction_pct) and float(violation_reduction_pct) >= 50.0:
+            diagnosis = "Top trafo steps are mostly reverse-flow/export driven; the projector reduces linearized violation, but real trafo stress remains high."
+        elif pd.notna(mean_adjustment_kw) and float(mean_adjustment_kw) < 0.25:
+            diagnosis = "Top trafo steps are mostly reverse-flow/export driven, but the projector response stays small."
+        else:
+            diagnosis = "Top trafo steps are mostly reverse-flow/export driven; inspect reverse-flow sensitivity quality and flexibility limits."
+    elif dominant_regime == "grid_import_overload":
+        if pd.notna(projected_fraction) and float(projected_fraction) < 0.10:
+            diagnosis = "Top trafo steps are mostly import driven, and the projector rarely changes the action."
+        elif pd.notna(violation_reduction_pct) and float(violation_reduction_pct) >= 50.0:
+            diagnosis = "Top trafo steps are mostly import driven; the projector reduces linearized violation, but real trafo stress remains high."
+        else:
+            diagnosis = "Top trafo steps are mostly import driven; inspect discharge headroom and linearization quality."
+    else:
+        diagnosis = "Top trafo steps mix export and import stress; inspect the detailed rows for regime switching."
+
+    summary = {
+        "controller": str(rollout.meta.get("controller", "unknown")),
+        "rank_metric": rank_metric,
+        "analyzed_steps": int(len(ordered)),
+        "top_k_steps": int(len(selected)),
+        "steps_with_trafo_penalty": int((ordered["trafo_penalty_total"] > 0.0).sum()),
+        "trafo_penalty_total": float(ordered["trafo_penalty_total"].sum()),
+        "top_k_mean_trafo_penalty": float(selected["trafo_penalty_total"].mean()),
+        "top_k_max_trafo_penalty": float(selected["trafo_penalty_total"].max()),
+        "dominant_regime_top_k": dominant_regime,
+        "reverse_flow_export_share_top_k": export_share,
+        "grid_import_share_top_k": import_share,
+        "top_k_mean_raw_export_kw": float(selected["raw_export_total"].mean()),
+        "top_k_mean_raw_import_kw": float(selected["raw_import_total"].mean()),
+        "top_k_mean_grid_export_kw": float(selected["grid_export_total"].mean()),
+        "top_k_mean_grid_import_kw": float(selected["grid_import_total"].mean()),
+        "top_k_mean_pv_curtail_total": float(selected["pv_curtail_total"].mean()),
+        "top_k_mean_battery_charge_total": float(selected["battery_charge_total"].mean()),
+        "top_k_mean_battery_discharge_total": float(selected["battery_discharge_total"].mean()),
+        "top_k_mean_projector_adjustment_kw_total": mean_adjustment_kw,
+        "top_k_mean_trafo_loading_pct_max": (
+            float(selected["trafo_loading_pct_max"].mean())
+            if "trafo_loading_pct_max" in selected.columns
+            else float("nan")
+        ),
+        "projector_enabled": bool(safety_summary.get("enabled", False)) if safety_summary else False,
+        "projected_fraction": float(projected_fraction) if pd.notna(projected_fraction) else float("nan"),
+        "mean_pre_projection_violation": float(pre_violation) if pd.notna(pre_violation) else float("nan"),
+        "mean_post_projection_violation": float(post_violation) if pd.notna(post_violation) else float("nan"),
+        "projector_violation_reduction_pct": float(violation_reduction_pct)
+        if pd.notna(violation_reduction_pct)
+        else float("nan"),
+        "diagnosis": diagnosis,
+    }
+    return pd.Series(summary)
 
 
 def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
@@ -1271,7 +1625,6 @@ def plot_power_balance_bars(
     required_columns = {
         "load_total",
         "battery_charge_total",
-        "pv_effective_total",
         "pv_curtail_total",
         "grid_import_total",
         "grid_export_total",
@@ -1280,6 +1633,13 @@ def plot_power_balance_bars(
     missing = sorted(required_columns.difference(step_df.columns))
     if missing:
         raise ValueError(f"Rollout step_df is missing required power-balance columns: {missing}")
+    if "pv_raw_total" not in step_df.columns:
+        if "pv_effective_total" not in step_df.columns:
+            raise ValueError("Rollout step_df must contain either pv_raw_total or pv_effective_total.")
+        step_df["pv_raw_total"] = (
+            step_df["pv_effective_total"].to_numpy(dtype=np.float32)
+            + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+        )
 
     figure, axis = plt.subplots(1, 1, figsize=figsize)
     timestamps = step_df["timestamp"]
@@ -1289,9 +1649,10 @@ def plot_power_balance_bars(
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
         ("grid_export_total", "Grid export", "#f59e0b"),
+        ("pv_curtail_total", "Curtailment loss", "#fca5a5"),
     ]
     negative_specs = [
-        ("pv_effective_total", "PV", "#16a34a"),
+        ("pv_raw_total", "PV raw", "#16a34a"),
         ("grid_import_total", "Grid import", "#2563eb"),
         ("battery_discharge_total", "Discharge", "#7c3aed"),
     ]
@@ -1299,7 +1660,17 @@ def plot_power_balance_bars(
     positive_bottom = np.zeros(len(step_df), dtype=np.float32)
     for column, label, color in positive_specs:
         values = step_df[column].to_numpy(dtype=np.float32)
-        axis.bar(timestamps, values, width=width, bottom=positive_bottom, color=color, alpha=0.78, label=label)
+        extra_kwargs = {"hatch": "//", "edgecolor": "#dc2626", "linewidth": 1.0} if column == "pv_curtail_total" else {}
+        axis.bar(
+            timestamps,
+            values,
+            width=width,
+            bottom=positive_bottom,
+            color=color,
+            alpha=0.78,
+            label=label,
+            **extra_kwargs,
+        )
         positive_bottom = positive_bottom + values
 
     negative_bottom = np.zeros(len(step_df), dtype=np.float32)
@@ -1308,24 +1679,12 @@ def plot_power_balance_bars(
         axis.bar(timestamps, -values, width=width, bottom=negative_bottom, color=color, alpha=0.78, label=label)
         negative_bottom = negative_bottom - values
 
-    curtailment = step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
-    axis.bar(
-        timestamps,
-        curtailment,
-        width=width,
-        color="none",
-        edgecolor="#dc2626",
-        linewidth=1.0,
-        hatch="//",
-        label="Curtailment loss",
-    )
-
     axis.axhline(0.0, color="#111827", linewidth=1.0)
     axis.set_title(f"Power Balance - {rollout.meta['controller']}")
     axis.set_ylabel("kW")
     axis.set_xlabel("Timestamp")
     axis.grid(True, axis="y", alpha=0.25)
-    axis.legend(loc="upper right", ncol=3)
+    axis.legend(loc="upper right", ncol=4)
     figure.tight_layout()
     return figure
 
@@ -1590,9 +1949,10 @@ def plot_power_balance_comparison(
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
         ("grid_export_total", "Grid export", "#f59e0b"),
+        ("pv_curtail_total", "Curtailment loss", "#fca5a5"),
     ]
     negative_specs = [
-        ("pv_effective_total", "PV", "#16a34a"),
+        ("pv_raw_total", "PV raw", "#16a34a"),
         ("grid_import_total", "Grid import", "#2563eb"),
         ("battery_discharge_total", "Discharge", "#7c3aed"),
     ]
@@ -1601,10 +1961,33 @@ def plot_power_balance_comparison(
         step_df = rollout.step_df.copy()
         if step_df.empty:
             raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
+        required_columns = {
+            "load_total",
+            "battery_charge_total",
+            "pv_curtail_total",
+            "grid_import_total",
+            "grid_export_total",
+            "battery_discharge_total",
+        }
+        missing = sorted(required_columns.difference(step_df.columns))
+        if missing:
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing required power-balance columns: {missing}"
+            )
+        if "pv_raw_total" not in step_df.columns:
+            if "pv_effective_total" not in step_df.columns:
+                raise ValueError(
+                    f"Rollout '{rollout.meta.get('controller', 'unknown')}' must contain either pv_raw_total or pv_effective_total."
+                )
+            step_df["pv_raw_total"] = (
+                step_df["pv_effective_total"].to_numpy(dtype=np.float32)
+                + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
+            )
 
         positive_bottom = np.zeros(len(step_df), dtype=np.float32)
         for column, label, color in positive_specs:
             values = step_df[column].to_numpy(dtype=np.float32)
+            extra_kwargs = {"hatch": "//", "edgecolor": "#dc2626", "linewidth": 1.0} if column == "pv_curtail_total" else {}
             axis.bar(
                 step_df["timestamp"],
                 values,
@@ -1613,6 +1996,7 @@ def plot_power_balance_comparison(
                 color=color,
                 alpha=0.78,
                 label=label if axis_idx == 0 else None,
+                **extra_kwargs,
             )
             positive_bottom = positive_bottom + values
 
@@ -1629,17 +2013,6 @@ def plot_power_balance_comparison(
                 label=label if axis_idx == 0 else None,
             )
             negative_bottom = negative_bottom - values
-
-        axis.bar(
-            step_df["timestamp"],
-            step_df["pv_curtail_total"].to_numpy(dtype=np.float32),
-            width=width,
-            color="none",
-            edgecolor="#dc2626",
-            linewidth=1.0,
-            hatch="//",
-            label="Curtailment loss" if axis_idx == 0 else None,
-        )
         axis.axhline(0.0, color="#111827", linewidth=1.0)
         axis.set_ylabel("kW")
         axis.set_title(str(rollout.meta["controller"]))
@@ -1716,6 +2089,7 @@ __all__ = [
     "collect_controller_rollout",
     "compare_purchase_costs",
     "compare_rollout_metrics",
+    "build_trafo_diagnostic_table",
     "ensure_forecast_ready",
     "normalize_date_input",
     "normalize_prediction_mode",
@@ -1733,6 +2107,7 @@ __all__ = [
     "resolve_evaluation_mode",
     "resolve_forecast_backend",
     "resolve_prediction_mode_from_forecast_backend",
+    "summarize_trafo_diagnostics",
     "summarize_rollout_metrics",
     "validate_compare_model_bundles",
 ]

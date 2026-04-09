@@ -43,7 +43,10 @@
       "Bash(find /c/Users/10856/Desktop/GithubProject/MADRL_ESS -name \"*.py\" -type f -exec grep -l \"observation_cache_root\\\\|observation_cache_batch_size\\\\|refresh_observation_cache\\\\|forecast_data_source\\\\|CachedObservationBuilder\\\\|observation_cache_dir\\\\|precomputed_observation_cache\\\\|madrl_observation_cache_lab\\\\|forecast_madrl_handoff\\\\|run_mainline_ab\\\\|madrl_perf_lab\" {} \\\\;)",
       "Bash(python -m pytest tests/test_normal_reward.py tests/test_registries.py tests/test_evaluation_plots.py tests/test_madrl_shared_data.py -x -v)",
       "Bash(pip show:*)",
-      "Bash(python -c \"import pytest; pytest.main\\(['-x', '-v', 'tests/test_normal_reward.py', 'tests/test_registries.py', 'tests/test_evaluation_plots.py']\\)\")"
+      "Bash(python -c \"import pytest; pytest.main\\(['-x', '-v', 'tests/test_normal_reward.py', 'tests/test_registries.py', 'tests/test_evaluation_plots.py']\\)\")",
+      "Bash(grep -n \"_actor_call\\\\|_actor_target_call\\\\|_critic_call\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS/controllers/madrl/*.py)",
+      "Bash(python -c ':*)",
+      "Bash(python -m pytest tests/test_normal_reward.py -v)"
     ]
   }
 }

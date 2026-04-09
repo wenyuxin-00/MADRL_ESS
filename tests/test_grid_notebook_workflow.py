@@ -13,6 +13,7 @@ from scripts.utils.grid_notebook_workflow import (
     PERFECT_PREDICTION_MODE,
     RolloutResult,
     apply_notebook_experiment_settings,
+    build_trafo_diagnostic_table,
     compare_rollout_metrics,
     collect_mpc_rollout,
     collect_controller_rollout,
@@ -25,6 +26,7 @@ from scripts.utils.grid_notebook_workflow import (
     plot_voltage_profile_comparison,
     resolve_evaluation_mode,
     resolve_forecast_backend,
+    summarize_trafo_diagnostics,
     validate_compare_model_bundles,
 )
 from scripts.utils.forecast_shared_preset import get_managed_lstm_forecast_controls
@@ -327,6 +329,12 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         "pv_curtail_total",
         "grid_import_total",
         "grid_export_total",
+        "battery_request_gap_kw_total",
+        "pv_curtail_request_gap_kw_total",
+        "projector_adjustment_kw_total",
+        "psi_trafo_raw",
+        "trafo_loading_pct_max",
+        "n_trafo_violations",
     }.issubset(rollout.step_df.columns)
     assert {
         "base_net_load",
@@ -342,11 +350,15 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         "battery_action_exec",
         "pv_action_req",
         "pv_action_exec",
+        "pv_curtail_req",
+        "battery_request_gap_kw",
+        "pv_curtail_request_gap_kw",
         "controller_action_gap",
     }.issubset(rollout.agent_df.columns)
     assert rollout.meta["agent_bus_ids"] == cfg.grid.agent_bus_ids
     assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
     assert rollout.meta["v_max_pu"] == cfg.grid.v_max_pu
+    assert rollout.meta["trafo_loading_limit_pct"] == cfg.grid.line_max_loading_pct
 
     aggregated = (
         rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["base_net_load", "net_load"]]
@@ -622,6 +634,130 @@ def test_plot_power_balance_bars_accepts_rollout_with_balance_columns():
 
     figure = plot_power_balance_bars(rollout)
     assert len(figure.axes) == 1
+
+
+def test_build_trafo_diagnostic_table_highlights_reverse_flow_root_cause():
+    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "episode_idx": [0, 0, 0],
+                "step": [0, 1, 2],
+                "timestamp": timestamps,
+                "base_net_load_total": [-7.0, -6.0, 5.0],
+                "net_load_total": [-3.5, -5.5, 3.0],
+                "load_total": [4.0, 4.0, 8.0],
+                "pv_raw_total": [11.0, 10.0, 1.0],
+                "pv_curtail_total": [2.0, 0.2, 0.0],
+                "grid_import_total": [0.0, 0.0, 3.0],
+                "grid_export_total": [3.5, 5.5, 0.0],
+                "battery_charge_total": [1.5, 0.1, 0.0],
+                "battery_discharge_total": [0.0, 0.0, 2.0],
+                "trafo_penalty_total": [4.0, 6.0, 1.5],
+                "psi_trafo_raw": [0.4, 0.6, 0.15],
+                "trafo_loading_pct_max": [120.0, 128.0, 112.0],
+                "n_trafo_violations": [1, 1, 1],
+                "projector_adjustment_kw_total": [3.0, 0.1, 2.5],
+                "battery_request_gap_kw_total": [1.5, 0.05, 1.5],
+                "pv_curtail_request_gap_kw_total": [1.5, 0.05, 1.0],
+                "controller_action_gap_total": [0.8, 0.02, 0.5],
+                "voltage_penalty_total": [0.1, 0.1, 0.0],
+                "line_penalty_total": [0.0, 0.0, 0.2],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "DRL (forecast_eval)", "trafo_loading_limit_pct": 100.0},
+    )
+
+    diagnostic_df = build_trafo_diagnostic_table(rollout, top_k=2)
+
+    assert list(diagnostic_df["step"]) == [1, 0]
+    assert diagnostic_df.loc[0, "dominant_regime"] == "reverse_flow_export"
+    assert "projection barely added charging or curtailment" in diagnostic_df.loc[0, "cause_hint"]
+    assert diagnostic_df.loc[1, "projector_adjustment_kw_total"] == pytest.approx(3.0)
+
+
+def test_build_trafo_diagnostic_table_backfills_psi_from_train_result_weight():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "episode_idx": [0, 0],
+                "step": [0, 1],
+                "timestamp": timestamps,
+                "base_net_load_total": [-4.0, -2.0],
+                "net_load_total": [-1.0, -0.5],
+                "load_total": [3.0, 3.0],
+                "pv_raw_total": [7.0, 5.0],
+                "pv_curtail_total": [1.0, 0.5],
+                "grid_import_total": [0.0, 0.0],
+                "grid_export_total": [1.0, 0.5],
+                "battery_charge_total": [2.0, 1.0],
+                "battery_discharge_total": [0.0, 0.0],
+                "trafo_penalty_total": [4.0, 2.0],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "DRL (forecast_eval)"},
+    )
+    train_result = {
+        "experiment_controls": {"reward_controls": {"w_trafo_pen": 10.0}},
+        "safety_summary": {"enabled": True},
+    }
+
+    diagnostic_df = build_trafo_diagnostic_table(rollout, train_result=train_result, top_k=2)
+
+    assert diagnostic_df.loc[0, "rank_metric"] == "psi_trafo_raw"
+    assert diagnostic_df.loc[0, "psi_trafo_raw"] == pytest.approx(0.4)
+    assert diagnostic_df.loc[1, "psi_trafo_raw"] == pytest.approx(0.2)
+
+
+def test_summarize_trafo_diagnostics_reports_projection_reduction():
+    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "episode_idx": [0, 0, 0],
+                "step": [0, 1, 2],
+                "timestamp": timestamps,
+                "base_net_load_total": [-7.0, -6.0, 5.0],
+                "net_load_total": [-3.5, -5.5, 3.0],
+                "load_total": [4.0, 4.0, 8.0],
+                "pv_raw_total": [11.0, 10.0, 1.0],
+                "pv_curtail_total": [2.0, 0.2, 0.0],
+                "grid_import_total": [0.0, 0.0, 3.0],
+                "grid_export_total": [3.5, 5.5, 0.0],
+                "battery_charge_total": [1.5, 0.1, 0.0],
+                "battery_discharge_total": [0.0, 0.0, 2.0],
+                "trafo_penalty_total": [4.0, 6.0, 1.5],
+                "psi_trafo_raw": [0.4, 0.6, 0.15],
+                "projector_adjustment_kw_total": [3.0, 0.1, 2.5],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "DRL (forecast_eval)"},
+    )
+    train_result = {
+        "safety_summary": {
+            "enabled": True,
+            "projected_fraction": 0.72,
+            "mean_pre_projection_violation": 0.8,
+            "mean_post_projection_violation": 0.2,
+        }
+    }
+
+    summary = summarize_trafo_diagnostics(rollout, train_result=train_result, top_k=3)
+
+    assert summary["dominant_regime_top_k"] == "reverse_flow_export"
+    assert summary["projected_fraction"] == pytest.approx(0.72)
+    assert summary["projector_violation_reduction_pct"] == pytest.approx(75.0)
+    assert "reverse-flow/export driven" in summary["diagnosis"]
 
 
 def test_multi_rollout_compare_helpers_render_expected_row_counts():
