@@ -50,6 +50,7 @@ class TrainConfig:
     max_train_steps: int | None = None
     num_envs: int = 1
     vec_env_type: str = "dummy"
+    parallel_episode_sampling: str = "unique_active"
     batch_size: int = 1024
     buffer_size: int = int(1e6)
     update_interval: int = 1

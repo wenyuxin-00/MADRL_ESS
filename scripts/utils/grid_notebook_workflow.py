@@ -459,6 +459,7 @@ def _extract_compare_signature(bundle: Mapping[str, object]) -> dict[str, object
                 "max_train_steps",
                 "num_envs",
                 "vec_env_type",
+                "parallel_episode_sampling",
                 "batch_size",
                 "buffer_size",
                 "update_interval",

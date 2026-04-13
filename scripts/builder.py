@@ -128,18 +128,23 @@ def build_env(
     return env
 
 
-def _build_dummy_train_vec_env(cfg: Any) -> Any:
+def _build_dummy_train_vec_env(cfg: Any, *, seed: int | None = None) -> Any:
     train_dataset = build_dataset(cfg, mode="train")
 
     def make_train_env():
         return build_env(cfg, mode="train", dataset=train_dataset)
 
-    return DummyVecEnv(cfg.train.num_envs, make_train_env)
+    return DummyVecEnv(
+        cfg.train.num_envs,
+        make_train_env,
+        seed=seed,
+        parallel_episode_sampling=str(getattr(cfg.train, "parallel_episode_sampling", "unique_active")),
+    )
 
 
 def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
     if cfg.train.vec_env_type == "dummy":
-        return _build_dummy_train_vec_env(cfg)
+        return _build_dummy_train_vec_env(cfg, seed=seed)
 
     if cfg.train.vec_env_type == "subproc":
         supported, reason = _subproc_vec_env_is_supported_in_current_process()
@@ -150,7 +155,7 @@ def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
                 RuntimeWarning,
                 stacklevel=2,
             )
-            return _build_dummy_train_vec_env(cfg)
+            return _build_dummy_train_vec_env(cfg, seed=seed)
         return SubprocVecEnv(cfg.train.num_envs, cfg, mode="train", seed=seed)
 
     raise ValueError(
