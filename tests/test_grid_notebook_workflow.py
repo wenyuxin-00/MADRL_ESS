@@ -17,9 +17,12 @@ from scripts.utils.grid_notebook_workflow import (
     compare_rollout_metrics,
     collect_mpc_rollout,
     collect_controller_rollout,
+    collect_global_full_horizon_rollout,
+    collect_global_mpc_rollout,
     load_training_run_bundle,
     normalize_date_input,
     plot_net_load_comparison,
+    plot_global_misocp_validation,
     plot_power_balance_bars,
     plot_power_balance_comparison,
     plot_rollout_comparison_dashboard,
@@ -429,8 +432,9 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
 
     recorded_modes: list[str] = []
 
-    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, action_fn=None):
+    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
         assert controller is None
+        assert controller_builder is None
         assert action_fn is not None
         recorded_modes.append(str(local_cfg.forecast.type))
 
@@ -490,6 +494,148 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
     assert perfect_rollout.meta["controller"] == "MPC (oracle_eval)"
     assert normal_rollout.meta["controller"] == "MPC (forecast_eval)"
     assert recorded_modes == ["perfect", "lstm"]
+
+
+def test_collect_global_mpc_rollout_uses_controller_builder(tmp_path, monkeypatch):
+    case_dir = make_case_dir(tmp_path, "grid_rollout_global_mpc")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    recorded_modes: list[str] = []
+
+    class _DummyController:
+        apply_action_penalty = False
+
+        def __init__(self, env, local_cfg):
+            self.env = env
+            self.cfg = local_cfg
+
+        def reset(self):
+            return None
+
+        def act(self, obs, deterministic=True):
+            del obs, deterministic
+            return [np.array([0.0, 1.0], dtype=np.float32) for _ in range(self.env.n)]
+
+    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
+        assert controller is None
+        assert action_fn is None
+        assert controller_builder is not None
+        recorded_modes.append(str(local_cfg.forecast.type))
+
+        class _DummyEnv:
+            n = 2
+
+        built = controller_builder(_DummyEnv())
+        assert isinstance(built, _DummyController)
+        assert built.cfg is local_cfg
+
+        return RolloutResult(
+            step_df=pd.DataFrame(
+                {
+                    "misocp_fallback": [0.0],
+                    "timestamp": [pd.Timestamp("2020-01-01 00:00:00")],
+                }
+            ),
+            agent_df=pd.DataFrame(),
+            grid_df=pd.DataFrame(),
+            summary=pd.DataFrame(),
+            meta={
+                "controller": label,
+                "controller_diagnostic_log": [
+                    {
+                        "controller": label,
+                        "episode_idx": 0,
+                        "step": 0,
+                        "timestamp": pd.Timestamp("2020-01-01 00:00:00"),
+                        "misocp_fallback": 0.0,
+                        "misocp_time_limit_feasible": 0.0,
+                        "solve_time_sec": 0.1,
+                        "root_p_kw": 1.0,
+                        "pp_root_p_kw": 1.0,
+                        "misocp_vm_pu": np.array([1.0, 0.9995], dtype=np.float32),
+                        "pp_vm_pu": np.array([1.0, 0.9994], dtype=np.float32),
+                        "misocp_line_loading_pct": np.array([10.0], dtype=np.float32),
+                        "pp_line_loading_pct": np.array([10.1], dtype=np.float32),
+                        "misocp_trafo_loading_pct": np.array([12.0], dtype=np.float32),
+                        "pp_trafo_loading_pct": np.array([12.1], dtype=np.float32),
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        "scripts.utils.grid_notebook_workflow.collect_controller_rollout",
+        _fake_collect_controller_rollout,
+    )
+    monkeypatch.setattr("controllers.mpc.GlobalSOCPMPCController", _DummyController)
+
+    perfect_rollout = collect_global_mpc_rollout(
+        cfg,
+        prediction_mode="perfect",
+        label="Global SOCP-MPC + Perfect Forecast",
+    )
+
+    assert perfect_rollout.meta["controller"] == "Global SOCP-MPC + Perfect Forecast"
+    assert recorded_modes == ["perfect"]
+    assert "misocp_validation_df" in perfect_rollout.meta
+    assert isinstance(perfect_rollout.meta["misocp_validation_df"], pd.DataFrame)
+
+    with pytest.raises(ValueError, match="prediction_mode='perfect'"):
+        collect_global_mpc_rollout(
+            cfg,
+            prediction_mode="normal",
+            label="Global SOCP-MPC + LSTM Forecast",
+        )
+
+
+def test_collect_global_full_horizon_rollout_reports_continuous_soc_mode(tmp_path):
+    pytest.importorskip("gurobipy")
+    case_dir = make_case_dir(tmp_path, "grid_rollout_global_oracle")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    rollout = collect_global_full_horizon_rollout(
+        cfg,
+        label="Global MISOCP Oracle (continuous SoC)",
+        time_limit_sec=30.0,
+    )
+
+    assert rollout.meta["controller"] == "Global MISOCP Oracle (continuous SoC)"
+    assert rollout.meta["soc_mode"] == "continuous"
+    assert rollout.meta["solve_mode"] in {"single_window", "chunked_window"}
+    assert "is_near_optimal" in rollout.meta
+    assert "misocp_validation_df" in rollout.meta
+    assert isinstance(rollout.meta["misocp_validation_df"], pd.DataFrame)
+    assert not rollout.step_df.empty
+    assert not rollout.agent_df.empty
+    assert not rollout.grid_df.empty
+
+
+def test_plot_global_misocp_validation_builds_figure():
+    validation_df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+            "max_vm_abs_err_pu": [0.0002, 0.0003],
+            "max_line_loading_abs_err_pct": [0.1, 0.2],
+            "trafo_loading_abs_err_pct": [0.2, 0.3],
+            "root_p_abs_err_kw": [0.01, 0.02],
+            "within_tolerance": [True, True],
+        }
+    )
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Global SOCP-MPC + Perfect Forecast",
+            "misocp_validation_df": validation_df,
+            "misocp_health_warning": "",
+        },
+    )
+
+    figure = plot_global_misocp_validation(rollout)
+
+    assert len(figure.axes) == 4
 
 
 def test_compare_rollout_metrics_returns_expected_columns():
@@ -576,6 +722,7 @@ def test_compare_rollout_metrics_returns_expected_columns():
     ]
     assert {
         "controller",
+        "soc_mode",
         "purchase_cost_total",
         "export_subsidy_total",
         "objective_total",
@@ -771,6 +918,15 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
                     "base_net_load_total": [2.0 + offset, 2.1 + offset],
                     "base_net_load_effective_total": [1.8 + offset, 1.9 + offset],
                     "net_load_total": [1.7 + offset, 1.8 + offset],
+                    "agent_raw_net_load_kw": [2.0 + offset, 2.1 + offset],
+                    "agent_effective_net_load_kw": [1.8 + offset, 1.9 + offset],
+                    "agent_post_action_net_load_kw": [1.7 + offset, 1.8 + offset],
+                    "fixed_load_kw": [0.5, 0.5],
+                    "fixed_generation_kw": [0.1, 0.1],
+                    "feeder_raw_net_load_kw": [2.4 + offset, 2.5 + offset],
+                    "feeder_effective_net_load_kw": [2.2 + offset, 2.3 + offset],
+                    "feeder_post_action_net_load_kw": [2.1 + offset, 2.2 + offset],
+                    "root_net_exchange_kw": [2.0 + offset, 2.15 + offset],
                     "load_total": [2.4 + offset, 2.5 + offset],
                     "battery_charge_total": [0.3, 0.1],
                     "pv_effective_total": [1.1, 1.0],
@@ -808,7 +964,7 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
     power_fig = plot_power_balance_comparison(*rollouts)
 
     assert len(voltage_fig.axes) == 3
-    assert len(net_load_fig.axes) == 3
+    assert len(net_load_fig.axes) == 6
     assert len(power_fig.axes) == 3
 
 

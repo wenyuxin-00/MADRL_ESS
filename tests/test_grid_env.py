@@ -79,6 +79,7 @@ class FakeGridCore:
             psi_v_raw=psi_v_raw,
             psi_line_raw=psi_line_raw,
             psi_trafo_raw=psi_trafo_raw,
+            trafo_p_signed_kw=np.asarray([12.5, -1.5], dtype=np.float32),
         )
 
 
@@ -276,6 +277,8 @@ def test_info_contains_required_fields(grid_env) -> None:
 
     required = [
         "price",
+        "wholesale_price",
+        "import_price",
         "e_bat_req",
         "e_bat",
         "pv_raw",
@@ -292,6 +295,7 @@ def test_info_contains_required_fields(grid_env) -> None:
         "agent_vm_pu",
         "line_loading_pct",
         "trafo_loading_pct",
+        "trafo_p_signed_kw",
         "v_violation",
         "line_violation",
         "trafo_violation",
@@ -306,6 +310,22 @@ def test_info_contains_required_fields(grid_env) -> None:
     ]
     for key in required:
         assert key in info, f"Missing required info key: '{key}'"
+    assert info["price"] == pytest.approx(info["import_price"])
+    assert info["import_price"] == pytest.approx(
+        info["wholesale_price"] + grid_env.import_price_adder_eur_per_kwh
+    )
+    assert np.allclose(np.asarray(info["trafo_p_signed_kw"], dtype=np.float32), np.asarray([12.5, -1.5], dtype=np.float32))
+
+
+def test_price_signal_remains_wholesale_but_cost_price_is_adjusted(grid_env) -> None:
+    grid_env.reset(episode_idx=0)
+    raw_price = float(grid_env.get_signal_step("price", 0))
+
+    _, _, _, _, info = grid_env.step(_zero_actions())
+
+    assert grid_env.ep_price[0] == pytest.approx(raw_price)
+    assert info["wholesale_price"] == pytest.approx(raw_price)
+    assert info["price"] == pytest.approx(raw_price + grid_env.import_price_adder_eur_per_kwh)
 
 
 def test_info_contains_reward_component_keys(grid_env) -> None:

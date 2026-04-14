@@ -29,6 +29,19 @@ def _bar_heights(axis, container_index: int) -> np.ndarray:
     )
 
 
+def _collection_lower_boundary(axis, collection_index: int, x_values) -> np.ndarray:
+    path = axis.collections[collection_index].get_paths()[0]
+    vertices = np.asarray(path.vertices, dtype=np.float32)
+    x_numeric = matplotlib.dates.date2num(pd.Index(x_values).to_pydatetime()).astype(np.float32)
+    return np.asarray(
+        [
+            np.min(vertices[np.isclose(vertices[:, 0], x_coord, atol=1e-6), 1])
+            for x_coord in x_numeric
+        ],
+        dtype=np.float32,
+    )
+
+
 def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(tmp_path):
     reward_summary = {
         "episodes": [1],
@@ -436,13 +449,19 @@ def test_power_balance_comparison_uses_same_strict_balance_logic():
     first_labels = figure.axes[0].get_legend_handles_labels()[1]
     assert "Curtailment loss" in first_labels
     assert "PV raw" in first_labels
+    assert len(figure.axes[0].collections) == 7
 
     legacy_axis = figure.axes[1]
     legacy_reconstructed_pv_raw = (
         rollout_legacy.step_df["pv_effective_total"].to_numpy(dtype=np.float32)
         + rollout_legacy.step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
     )
-    assert np.allclose(_bar_heights(legacy_axis, 4), -legacy_reconstructed_pv_raw, atol=1e-4)
+    assert len(legacy_axis.collections) == 7
+    assert np.allclose(
+        _collection_lower_boundary(legacy_axis, 4, timestamps),
+        -legacy_reconstructed_pv_raw,
+        atol=1e-4,
+    )
     plt.close(figure)
 
 

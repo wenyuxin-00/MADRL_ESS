@@ -26,8 +26,8 @@ class DataConfig:
     load_components: list[str] = field(default_factory=lambda: ["household", "heatpump"])
     pv_reference: str = "south"
     pv_capacity_kw: list[float] = field(default_factory=list)
-    load_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
-    pv_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
+    load_scale: list[float] = field(default_factory=lambda: [5.5, 5.5, 5.5, 5.5, 5.5])
+    pv_scale: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 5.0, 5.0])
 
     def resolved_load_scale(self, n_agents: int) -> list[float]:
         values = list(self.load_scale)
@@ -84,7 +84,7 @@ class EnvConfig:
     num_agents: int = 5
     episode_limit: int = 96 * 2
     future_horizon: int = 24
-    battery_capacity: float | list[float] = field(default_factory=lambda: [25.0] * 5)
+    battery_capacity: float | list[float] = field(default_factory=lambda: [40.0] * 5)
     max_charge_rate: float = 0.5
     efficiency: float = 0.95
     init_soc: float = 0.5
@@ -100,9 +100,17 @@ class RewardConfig:
 
     w_soc_pen: float = 10.0
     export_subsidy_eur_per_kwh: float = 0.079
+    import_price_adder_eur_per_kwh: float = 0.20
     w_voltage_pen: float = 500.0
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
+
+
+@dataclass
+class MpcConfig:
+    """Solver-side regularization knobs for offline MISOCP analysis."""
+
+    branch_current_tiebreaker_eur_per_pu_step: float = 1e-6
 
 
 @dataclass
@@ -265,6 +273,7 @@ class ExperimentConfig:
 
     env: EnvConfig = field(default_factory=EnvConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    mpc: MpcConfig = field(default_factory=MpcConfig)
     obs: ObsConfig = field(default_factory=ObsConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     algo: AlgoConfig = field(default_factory=AlgoConfig)

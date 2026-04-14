@@ -342,7 +342,7 @@ def _mean_component_total(info: dict[str, object], component_key: str, n_agents:
     return float(np.mean(values))
 
 
-def _approx_trafo_limit_kw(env) -> float | None:
+def _approx_trafo_limit_kw(env, *, loading_limit_pct: float | None = None) -> float | None:
     net = getattr(getattr(env, "_grid_core", None), "net", None)
     trafo_table = getattr(net, "trafo", None)
     if trafo_table is None or len(trafo_table) == 0:
@@ -353,9 +353,35 @@ def _approx_trafo_limit_kw(env) -> float | None:
         sn_mva = np.asarray(trafo_table["sn_mva"], dtype=np.float64).reshape(-1)
         if sn_mva.size == 0:
             return None
-        return float(np.sum(sn_mva) * 1000.0)
+        limit_scale = float(
+            (getattr(getattr(env, "_grid_cfg", None), "line_max_loading_pct", 100.0) if loading_limit_pct is None else loading_limit_pct)
+        ) / 100.0
+        return float(np.sum(sn_mva) * max(limit_scale, 0.0) * 1000.0)
     except Exception:
         return None
+
+
+def _fixed_feeder_components_kw(env) -> tuple[float, float]:
+    net = getattr(getattr(env, "_grid_core", None), "net", None)
+    if net is None:
+        return 0.0, 0.0
+    agent_bus_set = set(int(bus_id) for bus_id in getattr(getattr(env, "_grid_core", None), "agent_bus_ids", []))
+    fixed_load_kw = 0.0
+    fixed_generation_kw = 0.0
+    try:
+        load_table = getattr(net, "load", None)
+        if load_table is not None and not load_table.empty and "bus" in load_table and "p_mw" in load_table:
+            fixed_load_kw += float(
+                np.asarray(load_table.loc[~load_table["bus"].isin(agent_bus_set), "p_mw"], dtype=np.float64).sum() * 1000.0
+            )
+        sgen_table = getattr(net, "sgen", None)
+        if sgen_table is not None and not sgen_table.empty and "bus" in sgen_table and "p_mw" in sgen_table:
+            fixed_generation_kw += float(
+                np.asarray(sgen_table.loc[~sgen_table["bus"].isin(agent_bus_set), "p_mw"], dtype=np.float64).sum() * 1000.0
+            )
+    except Exception:
+        return 0.0, 0.0
+    return max(fixed_load_kw, 0.0), max(fixed_generation_kw, 0.0)
 
 
 def _load_json_payload(path: Path) -> dict[str, object]:
@@ -596,6 +622,38 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
     return actions, action_info
 
 
+def _clip_global_oracle_battery_power_kw(env, battery_power_kw: np.ndarray) -> np.ndarray:
+    battery_power_kw = np.asarray(battery_power_kw, dtype=np.float32)
+    e_t = np.asarray(env.soc, dtype=np.float32) * np.asarray(env.agent_c_bat, dtype=np.float32)
+    e_min = float(env.soc_min) * np.asarray(env.agent_c_bat, dtype=np.float32)
+    e_max = float(env.soc_max) * np.asarray(env.agent_c_bat, dtype=np.float32)
+    p_max = np.asarray(env.agent_p_max, dtype=np.float32)
+    eff = max(float(env.eff), 1e-6)
+    p_max_charge = np.minimum(p_max, np.maximum(0.0, (e_max - e_t) / (eff * float(env.dt))))
+    p_max_discharge = np.minimum(p_max, np.maximum(0.0, (e_t - e_min) * eff / float(env.dt)))
+    return np.clip(battery_power_kw, -p_max_discharge, p_max_charge).astype(np.float32)
+
+
+def _assemble_global_oracle_actions(
+    env,
+    battery_power_kw: np.ndarray,
+    pv_curtail_kw: np.ndarray,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    clipped_battery_kw = _clip_global_oracle_battery_power_kw(env, battery_power_kw)
+    pv_raw_kw = np.maximum(np.asarray(env.get_signal_step("pv"), dtype=np.float32), 0.0)
+    clipped_curtail_kw = np.minimum(np.maximum(np.asarray(pv_curtail_kw, dtype=np.float32), 0.0), pv_raw_kw)
+    p_max_kw = np.maximum(np.asarray(env.agent_p_max, dtype=np.float32), 1e-6)
+
+    battery_action = np.clip(clipped_battery_kw / p_max_kw, -1.0, 1.0).astype(np.float32)
+    pv_utilization = np.ones_like(pv_raw_kw, dtype=np.float32)
+    valid_mask = pv_raw_kw > 1e-6
+    pv_utilization[valid_mask] = 1.0 - (clipped_curtail_kw[valid_mask] / pv_raw_kw[valid_mask])
+    pv_action = np.clip(2.0 * pv_utilization - 1.0, -1.0, 1.0).astype(np.float32)
+
+    action_array = np.stack([battery_action, pv_action], axis=-1).astype(np.float32)
+    return [action_array[agent_idx].copy() for agent_idx in range(env.n)], action_array
+
+
 @dataclass
 class RolloutResult:
     step_df: pd.DataFrame
@@ -610,10 +668,12 @@ def collect_controller_rollout(
     *,
     label: str,
     controller=None,
+    controller_builder=None,
     action_fn=None,
 ) -> RolloutResult:
-    if (controller is None) == (action_fn is None):
-        raise ValueError("Provide exactly one of controller or action_fn.")
+    provided = int(controller is not None) + int(controller_builder is not None) + int(action_fn is not None)
+    if provided != 1:
+        raise ValueError("Provide exactly one of controller, controller_builder, or action_fn.")
 
     from scripts.builder import build_env
 
@@ -625,17 +685,20 @@ def collect_controller_rollout(
     step_rows: list[dict[str, object]] = []
     agent_rows: list[dict[str, object]] = []
     grid_rows: list[dict[str, object]] = []
+    diagnostic_rows: list[dict[str, object]] = []
     bus_ids = [int(bus_id) for bus_id in env._grid_core.net.bus.index.tolist()]
     agent_bus_ids = [int(bus_id) for bus_id in getattr(env._grid_core, "agent_bus_ids", cfg.grid.agent_bus_ids)]
     agent_bus_set = set(agent_bus_ids)
-    trafo_limit_kw = _approx_trafo_limit_kw(env)
     loading_limit_pct = float(cfg.grid.line_max_loading_pct)
+    fixed_load_kw, fixed_generation_kw = _fixed_feeder_components_kw(env)
+    trafo_limit_kw = _approx_trafo_limit_kw(env, loading_limit_pct=loading_limit_pct)
     try:
+        active_controller = controller_builder(env) if controller_builder is not None else controller
         for episode_idx in range(env.num_available_episodes):
             obs, reset_info = env.reset(episode_idx=episode_idx)
             raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
-            if controller is not None:
-                controller.reset()
+            if active_controller is not None:
+                active_controller.reset()
             previous_raw_obs = None
             done = False
             step_in_episode = 0
@@ -646,9 +709,9 @@ def collect_controller_rollout(
                 pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
                 timestamp = _step_timestamp(reset_info, step_in_episode)
 
-                if controller is not None:
-                    actions = controller.act(obs, deterministic=True)
-                    action_info = getattr(controller, "last_action_info", None)
+                if active_controller is not None:
+                    actions = active_controller.act(obs, deterministic=True)
+                    action_info = getattr(active_controller, "last_action_info", None)
                 else:
                     action_result = action_fn(env, raw_obs)
                     if isinstance(action_result, tuple) and len(action_result) == 2:
@@ -659,7 +722,7 @@ def collect_controller_rollout(
 
                 next_obs, reward, terminated, truncated, info = env.step(actions)
                 reward_array = np.asarray(reward, dtype=np.float32).reshape(-1)
-                apply_action_penalty = bool(getattr(controller, "apply_action_penalty", False))
+                apply_action_penalty = bool(getattr(active_controller, "apply_action_penalty", False))
                 info, action_penalty = merge_action_info_into_step_info(
                     info,
                     action_info,
@@ -751,6 +814,14 @@ def collect_controller_rollout(
                 pv_curtail_request_gap_kw = np.abs(pv_curtail_req - pv_curtail).astype(np.float32)
                 line_loading_pct = np.asarray(info.get("line_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
                 trafo_loading_pct = np.asarray(info.get("trafo_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
+                misocp_fallback = float(info.get("misocp_fallback", 0.0))
+                misocp_time_limit_feasible = float(info.get("misocp_time_limit_feasible", 0.0))
+                solve_time_sec = float(info.get("solve_time_sec", np.nan))
+                root_import_kw = float(info.get("root_import_kw", np.nan))
+                root_export_kw = float(info.get("root_export_kw", np.nan))
+                simultaneous_charge_discharge_kw_total = float(info.get("simultaneous_charge_discharge_kw_total", 0.0))
+                simultaneous_agent_count = int(float(info.get("simultaneous_agent_count", 0.0)))
+                simultaneous_step_flag = float(info.get("simultaneous_step_flag", 0.0))
                 export_subsidy_per_agent = _export_subsidy_per_agent(
                     info,
                     float(env.dt),
@@ -782,6 +853,15 @@ def collect_controller_rollout(
                 soc_penalty_total = float(np.sum(soc_penalty))
                 purchase_cost_total = float(np.sum(purchase_cost_per_agent))
                 export_subsidy_total = float(np.sum(export_subsidy_per_agent))
+                pp_root_p_kw = float(
+                    np.asarray(info.get("trafo_p_signed_kw", np.zeros(1, dtype=np.float32)), dtype=np.float32).reshape(-1).sum()
+                )
+                agent_raw_net_load_kw = float(np.sum(base_net_load))
+                agent_effective_net_load_kw = float(np.sum(base_net_load_effective))
+                agent_post_action_net_load_kw = float(np.sum(net_load))
+                feeder_raw_net_load_kw = float(agent_raw_net_load_kw + fixed_load_kw - fixed_generation_kw)
+                feeder_effective_net_load_kw = float(agent_effective_net_load_kw + fixed_load_kw - fixed_generation_kw)
+                feeder_post_action_net_load_kw = float(agent_post_action_net_load_kw + fixed_load_kw - fixed_generation_kw)
                 step_rows.append(
                     {
                         "controller": label,
@@ -842,8 +922,32 @@ def collect_controller_rollout(
                         ),
                         "controller_action_gap_total": float(np.sum(controller_action_gap)),
                         "soc_penalty_step_total": soc_penalty_total,
+                        "misocp_fallback": misocp_fallback,
+                        "misocp_time_limit_feasible": misocp_time_limit_feasible,
+                        "solve_time_sec": solve_time_sec,
+                        "root_import_kw": root_import_kw,
+                        "root_export_kw": root_export_kw,
+                        "simultaneous_charge_discharge_kw_total": simultaneous_charge_discharge_kw_total,
+                        "simultaneous_agent_count": simultaneous_agent_count,
+                        "simultaneous_step_flag": simultaneous_step_flag,
+                        "trafo_limit_reference_kw": trafo_limit_kw,
                     }
                 )
+
+                last_diagnostic = getattr(active_controller, "last_diagnostic", None) if active_controller is not None else None
+                if isinstance(last_diagnostic, dict) and last_diagnostic:
+                    diagnostic_row = dict(last_diagnostic)
+                    diagnostic_row["controller"] = label
+                    diagnostic_row["episode_idx"] = episode_idx
+                    diagnostic_row["step"] = step_in_episode
+                    diagnostic_row["timestamp"] = timestamp
+                    diagnostic_row["pp_vm_pu"] = np.asarray(info.get("vm_pu", np.zeros(0, dtype=np.float32)), dtype=np.float32).copy()
+                    diagnostic_row["pp_line_loading_pct"] = line_loading_pct.copy()
+                    diagnostic_row["pp_trafo_loading_pct"] = trafo_loading_pct.copy()
+                    diagnostic_row["pp_root_p_kw"] = float(
+                        np.asarray(info.get("trafo_p_signed_kw", np.zeros(1, dtype=np.float32)), dtype=np.float32).reshape(-1)[0]
+                    )
+                    diagnostic_rows.append(diagnostic_row)
 
                 for agent_idx, profile in enumerate(cfg.data.agent_profiles):
                     agent_rows.append(
@@ -940,9 +1044,12 @@ def collect_controller_rollout(
                 ),
                 "dt_hours": float(cfg.env.dt),
                 "trafo_limit_kw": trafo_limit_kw,
+                "trafo_limit_note": "Transformer apparent-power limit shown as an active-power-view reference; not a strict P bound when Q != 0.",
                 "loading_limit_pct": loading_limit_pct,
                 "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
+                "controller_diagnostic_log": diagnostic_rows,
+                "soc_mode": "reset",
             },
         )
     finally:
@@ -988,6 +1095,662 @@ def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) 
         label=rollout_label,
         action_fn=_mpc_policy,
     )
+
+
+def collect_global_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) -> RolloutResult:
+    from controllers.mpc import GlobalSOCPMPCController
+
+    resolved_mode = normalize_prediction_mode(prediction_mode)
+    if resolved_mode != PERFECT_PREDICTION_MODE:
+        raise ValueError("Global SOCP-MPC currently supports only prediction_mode='perfect'.")
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode=prediction_mode)
+    rollout_label = label or f"Global SOCP-MPC ({resolve_evaluation_mode(resolved_mode)})"
+    rollout = collect_controller_rollout(
+        comparison_cfg,
+        label=rollout_label,
+        controller_builder=lambda env: GlobalSOCPMPCController(env, comparison_cfg),
+    )
+    return _attach_misocp_validation_meta(rollout)
+
+
+def collect_global_full_horizon_rollout(
+    cfg,
+    *,
+    label: str | None = None,
+    time_limit_sec: float = 600.0,
+) -> RolloutResult:
+    from controllers.mpc.global_socp_mpc import (
+        GurobiSolveConfig,
+        GlobalMISOCPProblem,
+        _FULL_HORIZON_TIME_LIMIT_SEC,
+        _SIMULTANEOUS_THRESHOLD_RATIO,
+        default_primary_solve_config,
+        default_retry_solve_config,
+    )
+    from scripts.builder import build_env
+
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode=PERFECT_PREDICTION_MODE)
+    rollout_label = str(label) if label is not None else ""
+    resolved_time_limit = float(time_limit_sec if time_limit_sec is not None else _FULL_HORIZON_TIME_LIMIT_SEC)
+
+    if cache_only_forecast_enabled(comparison_cfg):
+        comparison_cfg.runtime.forecast_ready = None
+    else:
+        comparison_cfg.runtime.forecast_ready = ensure_forecast_ready(comparison_cfg)
+
+    env = build_env(comparison_cfg, mode="test")
+    step_rows: list[dict[str, object]] = []
+    agent_rows: list[dict[str, object]] = []
+    grid_rows: list[dict[str, object]] = []
+    diagnostic_rows: list[dict[str, object]] = []
+    bus_ids = [int(bus_id) for bus_id in env._grid_core.net.bus.index.tolist()]
+    agent_bus_ids = [int(bus_id) for bus_id in getattr(env._grid_core, "agent_bus_ids", comparison_cfg.grid.agent_bus_ids)]
+    agent_bus_set = set(agent_bus_ids)
+    loading_limit_pct = float(comparison_cfg.grid.line_max_loading_pct)
+    fixed_load_kw, fixed_generation_kw = _fixed_feeder_components_kw(env)
+    trafo_limit_kw = _approx_trafo_limit_kw(env, loading_limit_pct=loading_limit_pct)
+
+    try:
+        problem = GlobalMISOCPProblem.from_env(env, comparison_cfg)
+        full_input = problem.build_full_horizon_input(env)
+        export_subsidy = float(
+            getattr(comparison_cfg.reward, "export_subsidy_eur_per_kwh", problem.export_subsidy_default)
+        )
+        primary_config = default_primary_solve_config()
+        primary_config = GurobiSolveConfig(
+            time_limit_sec=resolved_time_limit,
+            mip_gap=float(primary_config.mip_gap),
+            threads=primary_config.threads,
+            presolve=primary_config.presolve,
+            cuts=primary_config.cuts,
+            heuristics=primary_config.heuristics,
+            mip_focus=primary_config.mip_focus,
+        )
+        retry_config = default_retry_solve_config(primary_config)
+        result = problem.solve_adaptive_full_horizon(
+            full_input,
+            export_subsidy=export_subsidy,
+            verbose=False,
+            primary_window_steps=int(full_input.horizon_steps),
+            fallback_window_steps=96,
+            solve_config=primary_config,
+            retry_solve_config=retry_config,
+            export_debug=True,
+            debug_tag="adaptive_global_misocp",
+        )
+        solve_mode = str(result.solve_mode)
+        if not result.has_solution:
+            raise RuntimeError(
+                "Global MISOCP failed to produce a feasible incumbent in both single_window and chunked_window modes. "
+                f"Final status={result.status_label!r}, debug_artifacts={result.debug_artifacts}."
+            )
+        if not rollout_label:
+            rollout_label = (
+                "Global MISOCP (chunked, near-optimal)"
+                if solve_mode == "chunked_window"
+                else "Global MISOCP (single_window)"
+            )
+
+        carried_soc = np.asarray(full_input.soc_init, dtype=np.float32).copy()
+        threshold_kw = (_SIMULTANEOUS_THRESHOLD_RATIO * np.asarray(env.agent_p_max, dtype=np.float32)).astype(np.float32)
+
+        for episode_list_idx, episode_idx in enumerate(full_input.episode_indices.tolist()):
+            obs, reset_info = env.reset(episode_idx=int(episode_idx))
+            if episode_list_idx > 0:
+                env.soc = carried_soc.copy()
+                obs = env.obs_builder.build(env)
+            raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
+            previous_raw_obs = None
+            episode_offset = int(full_input.episode_offsets[episode_list_idx])
+            episode_length = int(full_input.episode_lengths[episode_list_idx])
+
+            for step_in_episode in range(episode_length):
+                global_step = episode_offset + step_in_episode
+                timestamp = _step_timestamp(reset_info, step_in_episode)
+                price_pred = _aligned_prediction(previous_raw_obs, raw_obs, "price_seq")
+                load_pred = _aligned_prediction(previous_raw_obs, raw_obs, "load_seq")
+                pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
+
+                battery_power_kw = (
+                    (
+                        np.asarray(result.battery_charge_mw[:, global_step], dtype=np.float32)
+                        - np.asarray(result.battery_discharge_mw[:, global_step], dtype=np.float32)
+                    )
+                    * 1000.0
+                ).astype(np.float32)
+                pv_curtail_kw = (
+                    np.asarray(result.pv_curtail_mw[:, global_step], dtype=np.float32) * 1000.0
+                ).astype(np.float32)
+                actions, action_array = _assemble_global_oracle_actions(env, battery_power_kw, pv_curtail_kw)
+
+                action_info = compute_action_gap_metrics_numpy(
+                    build_safety_local_numpy(
+                        soc=np.asarray(env.soc, dtype=np.float32),
+                        load_raw=np.asarray(env.get_signal_step("load"), dtype=np.float32),
+                        pv_raw=np.asarray(env.get_signal_step("pv"), dtype=np.float32),
+                        battery_capacity_kwh=np.asarray(env.agent_c_bat, dtype=np.float32),
+                        p_max_kw=np.asarray(env.agent_p_max, dtype=np.float32),
+                    ),
+                    action_array,
+                    action_array,
+                )
+                simultaneous_kw = np.asarray(result.simultaneous_charge_discharge_kw[:, global_step], dtype=np.float32)
+                simultaneous_mask = simultaneous_kw > threshold_kw
+                action_info.update(
+                    {
+                        "misocp_fallback": np.asarray(0.0, dtype=np.float32),
+                        "misocp_time_limit_feasible": np.asarray(float(result.time_limit_feasible), dtype=np.float32),
+                        "solve_time_sec": np.asarray(float(result.solve_time_sec), dtype=np.float32),
+                        "root_import_kw": np.asarray(float(result.root_import_mw[global_step] * 1000.0), dtype=np.float32),
+                        "root_export_kw": np.asarray(float(result.root_export_mw[global_step] * 1000.0), dtype=np.float32),
+                        "simultaneous_charge_discharge_kw_total": np.asarray(float(np.sum(simultaneous_kw)), dtype=np.float32),
+                        "simultaneous_agent_count": np.asarray(float(np.sum(simultaneous_mask)), dtype=np.float32),
+                        "simultaneous_step_flag": np.asarray(float(np.any(simultaneous_mask)), dtype=np.float32),
+                    }
+                )
+
+                next_obs, reward, terminated, truncated, info = env.step(actions)
+                reward_array = np.asarray(reward, dtype=np.float32).reshape(-1)
+                info, action_penalty = merge_action_info_into_step_info(
+                    info,
+                    action_info,
+                    soc_pen_weight=float(comparison_cfg.reward.w_soc_pen),
+                    apply_action_penalty=False,
+                )
+                reward_array = reward_array - np.asarray(action_penalty, dtype=np.float32)
+                info["reward"] = reward_array.astype(np.float32)
+                del terminated, truncated
+                raw_next_obs = (
+                    env.obs_builder.build_raw(env)
+                    if hasattr(env.obs_builder, "build_raw") and not bool(info.get("episode_done", False))
+                    else next_obs
+                )
+
+                purchase_cost_per_agent = _purchase_cost_per_agent(info, float(env.dt))
+                base_net_load = np.asarray(
+                    info.get(
+                        "base_net_load",
+                        np.asarray(info["load"], dtype=np.float32) - np.asarray(info["pv"], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                base_net_load_effective = np.asarray(
+                    info.get("base_net_load_effective", base_net_load),
+                    dtype=np.float32,
+                )
+                net_load = np.asarray(
+                    info.get(
+                        "net_load",
+                        base_net_load_effective + np.asarray(info["e_bat"], dtype=np.float32),
+                    ),
+                    dtype=np.float32,
+                )
+                pv_raw = np.asarray(info.get("pv_raw", info["pv"]), dtype=np.float32)
+                pv_effective = np.asarray(info.get("pv_effective", pv_raw), dtype=np.float32)
+                pv_curtail = np.asarray(info.get("pv_curtail", pv_raw - pv_effective), dtype=np.float32)
+                pv_utilization = np.asarray(
+                    info.get("pv_utilization", np.ones_like(pv_raw, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                grid_import = np.asarray(
+                    info.get("grid_import_kw", np.maximum(net_load, 0.0)),
+                    dtype=np.float32,
+                )
+                grid_export = np.asarray(
+                    info.get("grid_export_kw", np.maximum(-net_load, 0.0)),
+                    dtype=np.float32,
+                )
+                controller_action_gap = np.asarray(
+                    info.get("controller_action_gap", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                battery_action_req = np.asarray(
+                    info.get("battery_action_req", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                battery_action_exec = np.asarray(
+                    info.get("battery_action_exec", np.zeros(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                pv_action_req = np.asarray(
+                    info.get("pv_action_req", np.ones(env.n, dtype=np.float32)),
+                    dtype=np.float32,
+                )
+                pv_action_exec = np.asarray(
+                    info.get("pv_action_exec", info.get("pv_action", np.ones(env.n, dtype=np.float32))),
+                    dtype=np.float32,
+                )
+                soc_penalty_unweighted = np.asarray(
+                    info.get("soc_penalty_unweighted", info.get("action_penalty_unweighted", np.zeros(env.n, dtype=np.float32))),
+                    dtype=np.float32,
+                )
+                soc_penalty = np.asarray(
+                    info.get("r_soc_pen", info.get("r_action_pen", np.zeros(env.n, dtype=np.float32))),
+                    dtype=np.float32,
+                )
+                battery_power = np.asarray(info["e_bat"], dtype=np.float32)
+                battery_power_req = np.asarray(info.get("e_bat_req", battery_power), dtype=np.float32)
+                battery_charge = np.clip(battery_power, 0.0, None).astype(np.float32)
+                battery_discharge = np.maximum(-battery_power, 0.0).astype(np.float32)
+                battery_charge_req = np.clip(battery_power_req, 0.0, None).astype(np.float32)
+                battery_discharge_req = np.maximum(-battery_power_req, 0.0).astype(np.float32)
+                pv_curtail_req = np.asarray(info.get("pv_curtail_req", pv_curtail), dtype=np.float32)
+                battery_request_gap_kw = np.abs(battery_power_req - battery_power).astype(np.float32)
+                pv_curtail_request_gap_kw = np.abs(pv_curtail_req - pv_curtail).astype(np.float32)
+                line_loading_pct = np.asarray(info.get("line_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
+                trafo_loading_pct = np.asarray(info.get("trafo_loading_pct", np.zeros(0, dtype=np.float32)), dtype=np.float32)
+                export_subsidy_per_agent = _export_subsidy_per_agent(info, float(env.dt), export_subsidy)
+                voltage_penalty_per_agent = np.asarray(info.get("r_safe_v", np.zeros(env.n, dtype=np.float32)), dtype=np.float32)
+                line_penalty_per_agent = np.asarray(info.get("r_safe_line", np.zeros(env.n, dtype=np.float32)), dtype=np.float32)
+                trafo_penalty_per_agent = np.asarray(info.get("r_safe_trafo", np.zeros(env.n, dtype=np.float32)), dtype=np.float32)
+                objective_per_agent = (
+                    purchase_cost_per_agent
+                    - export_subsidy_per_agent
+                    + soc_penalty
+                    + voltage_penalty_per_agent
+                    + line_penalty_per_agent
+                    + trafo_penalty_per_agent
+                ).astype(np.float32)
+                voltage_penalty_total = _mean_component_total(info, "r_safe_v", env.n)
+                line_penalty_total = _mean_component_total(info, "r_safe_line", env.n)
+                trafo_penalty_total = _mean_component_total(info, "r_safe_trafo", env.n)
+                soc_penalty_total = float(np.sum(soc_penalty))
+                purchase_cost_total = float(np.sum(purchase_cost_per_agent))
+                export_subsidy_total = float(np.sum(export_subsidy_per_agent))
+                pp_root_p_kw = float(
+                    np.asarray(info.get("trafo_p_signed_kw", np.zeros(1, dtype=np.float32)), dtype=np.float32).reshape(-1).sum()
+                )
+                agent_raw_net_load_kw = float(np.sum(base_net_load))
+                agent_effective_net_load_kw = float(np.sum(base_net_load_effective))
+                agent_post_action_net_load_kw = float(np.sum(net_load))
+                feeder_raw_net_load_kw = float(agent_raw_net_load_kw + fixed_load_kw - fixed_generation_kw)
+                feeder_effective_net_load_kw = float(agent_effective_net_load_kw + fixed_load_kw - fixed_generation_kw)
+                feeder_post_action_net_load_kw = float(agent_post_action_net_load_kw + fixed_load_kw - fixed_generation_kw)
+
+                step_rows.append(
+                    {
+                        "controller": rollout_label,
+                        "episode_idx": int(episode_idx),
+                        "step": step_in_episode,
+                        "timestamp": timestamp,
+                        "price": float(info["price"]),
+                        "price_pred": float(price_pred),
+                        "base_net_load_total": agent_raw_net_load_kw,
+                        "base_net_load_effective_total": agent_effective_net_load_kw,
+                        "net_load_total": agent_post_action_net_load_kw,
+                        "agent_raw_net_load_kw": agent_raw_net_load_kw,
+                        "agent_effective_net_load_kw": agent_effective_net_load_kw,
+                        "agent_post_action_net_load_kw": agent_post_action_net_load_kw,
+                        "fixed_load_kw": fixed_load_kw,
+                        "fixed_generation_kw": fixed_generation_kw,
+                        "feeder_raw_net_load_kw": feeder_raw_net_load_kw,
+                        "feeder_effective_net_load_kw": feeder_effective_net_load_kw,
+                        "feeder_post_action_net_load_kw": feeder_post_action_net_load_kw,
+                        "root_net_exchange_kw": pp_root_p_kw,
+                        "pp_root_p_kw": pp_root_p_kw,
+                        "load_total": float(np.sum(np.asarray(info["load"], dtype=np.float32))),
+                        "pv_raw_total": float(np.sum(pv_raw)),
+                        "pv_effective_total": float(np.sum(pv_effective)),
+                        "pv_curtail_total": float(np.sum(pv_curtail)),
+                        "grid_import_total": float(np.sum(grid_import)),
+                        "grid_export_total": float(np.sum(grid_export)),
+                        "battery_charge_total": float(np.sum(battery_charge)),
+                        "battery_charge_req_total": float(np.sum(battery_charge_req)),
+                        "battery_discharge_total": float(np.sum(battery_discharge)),
+                        "battery_discharge_req_total": float(np.sum(battery_discharge_req)),
+                        "pv_curtail_req_total": float(np.sum(pv_curtail_req)),
+                        "battery_request_gap_kw_total": float(np.sum(battery_request_gap_kw)),
+                        "pv_curtail_request_gap_kw_total": float(np.sum(pv_curtail_request_gap_kw)),
+                        "projector_adjustment_kw_total": float(
+                            np.sum(battery_request_gap_kw) + np.sum(pv_curtail_request_gap_kw)
+                        ),
+                        "purchase_cost_total": purchase_cost_total,
+                        "export_subsidy_total": export_subsidy_total,
+                        "soc_penalty_total": soc_penalty_total,
+                        "voltage_penalty_total": voltage_penalty_total,
+                        "line_penalty_total": line_penalty_total,
+                        "trafo_penalty_total": trafo_penalty_total,
+                        "psi_v_raw": float(info.get("psi_v_raw", 0.0)),
+                        "psi_line_raw": float(info.get("psi_line_raw", 0.0)),
+                        "psi_trafo_raw": float(info.get("psi_trafo_raw", 0.0)),
+                        "line_loading_pct_max": float(np.max(line_loading_pct)) if line_loading_pct.size else 0.0,
+                        "trafo_loading_pct_max": float(np.max(trafo_loading_pct)) if trafo_loading_pct.size else 0.0,
+                        "line_violation": float(info.get("line_violation", info.get("l_violation", 0.0))),
+                        "trafo_violation": float(info.get("trafo_violation", 0.0)),
+                        "n_line_violations": int(
+                            info.get("n_line_violations", info.get("n_l_violations", int(np.any(line_loading_pct > loading_limit_pct))))
+                        ),
+                        "n_trafo_violations": int(
+                            info.get("n_trafo_violations", info.get("n_t_violations", int(np.any(trafo_loading_pct > loading_limit_pct))))
+                        ),
+                        "objective_total": (
+                            purchase_cost_total
+                            - export_subsidy_total
+                            + soc_penalty_total
+                            + voltage_penalty_total
+                            + line_penalty_total
+                            + trafo_penalty_total
+                        ),
+                        "voltage_violation_count": int(
+                            ((np.asarray(info.get("vm_pu", []), dtype=np.float32) < float(comparison_cfg.grid.v_min_pu))
+                            | (np.asarray(info.get("vm_pu", []), dtype=np.float32) > float(comparison_cfg.grid.v_max_pu))).sum()
+                        ),
+                        "controller_action_gap_total": float(np.sum(controller_action_gap)),
+                        "soc_penalty_step_total": soc_penalty_total,
+                        "misocp_fallback": 0.0,
+                        "misocp_time_limit_feasible": float(result.time_limit_feasible),
+                        "solve_time_sec": float(result.solve_time_sec),
+                        "root_import_kw": float(result.root_import_mw[global_step] * 1000.0),
+                        "root_export_kw": float(result.root_export_mw[global_step] * 1000.0),
+                        "simultaneous_charge_discharge_kw_total": float(np.sum(simultaneous_kw)),
+                        "simultaneous_agent_count": int(np.sum(simultaneous_mask)),
+                        "simultaneous_step_flag": float(np.any(simultaneous_mask)),
+                        "trafo_limit_reference_kw": trafo_limit_kw,
+                    }
+                )
+
+                diagnostic_row = {
+                    "solver_type": "gurobi_misocp",
+                    "status_code": int(result.status_code),
+                    "status_label": str(result.status_label),
+                    "solve_mode": str(solve_mode),
+                    "solve_time_sec": float(result.solve_time_sec),
+                    "misocp_fallback": 0.0,
+                    "misocp_time_limit_feasible": float(result.time_limit_feasible),
+                    "mip_gap": float(result.mip_gap),
+                    "best_bound": float(result.best_bound),
+                    "objective_value": float(result.objective_value),
+                    "agent_purchase_cost_eur": float(result.agent_purchase_cost_eur),
+                    "agent_export_subsidy_eur": float(result.agent_export_subsidy_eur),
+                    "agent_net_cost_eur": float(result.agent_net_cost_eur),
+                    "feeder_purchase_cost_eur": float(result.feeder_purchase_cost_eur),
+                    "feeder_export_subsidy_eur": float(result.feeder_export_subsidy_eur),
+                    "feeder_net_cost_eur": float(result.feeder_net_cost_eur),
+                    "throughput_regularization_eur": float(result.throughput_regularization_eur),
+                    "throughput_regularization_weight": float(result.throughput_regularization_weight),
+                    "root_import_kw": float(result.root_import_mw[global_step] * 1000.0),
+                    "root_export_kw": float(result.root_export_mw[global_step] * 1000.0),
+                    "root_p_kw": float(result.root_p_kw[global_step]),
+                    "root_q_kvar": float(result.root_q_kvar[global_step]),
+                    "misocp_vm_pu": np.asarray(result.bus_vm_pu[:, global_step], dtype=np.float32).copy(),
+                    "misocp_line_loading_pct": np.asarray(result.line_loading_pct[:, global_step], dtype=np.float32).copy(),
+                    "misocp_trafo_loading_pct": np.asarray(result.trafo_loading_pct[:, global_step], dtype=np.float32).copy(),
+                    "model_size_num_vars": float(result.model_size.num_vars),
+                    "model_size_num_binary_vars": float(result.model_size.num_binary_vars),
+                    "model_size_num_linear_constraints": float(result.model_size.num_linear_constraints),
+                    "model_size_num_quadratic_constraints": float(result.model_size.num_quadratic_constraints),
+                    "simultaneous_step_ratio": float(result.simultaneous_step_ratio),
+                    "max_simultaneous_kw": float(result.max_simultaneous_kw),
+                    "simultaneous_agent_steps": float(result.simultaneous_agent_steps),
+                    "debug_artifacts": dict(result.debug_artifacts),
+                    "sanity_warning": str(result.sanity_warning or ""),
+                    "controller": rollout_label,
+                    "episode_idx": int(episode_idx),
+                    "step": step_in_episode,
+                    "timestamp": timestamp,
+                    "pp_vm_pu": np.asarray(info.get("vm_pu", np.zeros(0, dtype=np.float32)), dtype=np.float32).copy(),
+                    "pp_line_loading_pct": line_loading_pct.copy(),
+                    "pp_trafo_loading_pct": trafo_loading_pct.copy(),
+                    "pp_root_p_kw": float(
+                        np.asarray(info.get("trafo_p_signed_kw", np.zeros(1, dtype=np.float32)), dtype=np.float32).reshape(-1)[0]
+                    ),
+                }
+                diagnostic_rows.append(diagnostic_row)
+
+                for agent_idx, profile in enumerate(comparison_cfg.data.agent_profiles):
+                    agent_rows.append(
+                        {
+                            "controller": rollout_label,
+                            "episode_idx": int(episode_idx),
+                            "step": step_in_episode,
+                            "timestamp": timestamp,
+                            "agent_id": agent_idx,
+                            "agent_profile": str(profile),
+                            "load": float(np.asarray(info["load"], dtype=np.float32)[agent_idx]),
+                            "load_pred": float(np.asarray(load_pred, dtype=np.float32)[agent_idx]),
+                            "pv": float(np.asarray(info["pv"], dtype=np.float32)[agent_idx]),
+                            "pv_raw": float(pv_raw[agent_idx]),
+                            "pv_effective": float(pv_effective[agent_idx]),
+                            "pv_curtail": float(pv_curtail[agent_idx]),
+                            "pv_curtail_req": float(pv_curtail_req[agent_idx]),
+                            "pv_utilization": float(pv_utilization[agent_idx]),
+                            "pv_pred": float(np.asarray(pv_pred, dtype=np.float32)[agent_idx]),
+                            "base_net_load": float(base_net_load[agent_idx]),
+                            "base_net_load_effective": float(base_net_load_effective[agent_idx]),
+                            "net_load": float(net_load[agent_idx]),
+                            "grid_import_kw": float(grid_import[agent_idx]),
+                            "grid_export_kw": float(grid_export[agent_idx]),
+                            "e_bat": float(battery_power[agent_idx]),
+                            "e_bat_req": float(battery_power_req[agent_idx]),
+                            "battery_action_req": float(battery_action_req[agent_idx]),
+                            "battery_action_exec": float(battery_action_exec[agent_idx]),
+                            "pv_action_req": float(pv_action_req[agent_idx]),
+                            "pv_action_exec": float(pv_action_exec[agent_idx]),
+                            "controller_action_gap": float(controller_action_gap[agent_idx]),
+                            "battery_request_gap_kw": float(battery_request_gap_kw[agent_idx]),
+                            "pv_curtail_request_gap_kw": float(pv_curtail_request_gap_kw[agent_idx]),
+                            "soc_penalty_unweighted": float(soc_penalty_unweighted[agent_idx]),
+                            "r_soc_pen": float(soc_penalty[agent_idx]),
+                            "r_safe_v": float(voltage_penalty_per_agent[agent_idx]),
+                            "r_safe_line": float(line_penalty_per_agent[agent_idx]),
+                            "r_safe_trafo": float(trafo_penalty_per_agent[agent_idx]),
+                            "soc": float(np.asarray(info["soc_next"], dtype=np.float32)[agent_idx]),
+                            "purchase_cost": float(purchase_cost_per_agent[agent_idx]),
+                            "export_subsidy": float(export_subsidy_per_agent[agent_idx]),
+                            "objective_total": float(objective_per_agent[agent_idx]),
+                        }
+                    )
+
+                vm_pu = np.asarray(info.get("vm_pu", np.zeros(len(bus_ids), dtype=np.float32)), dtype=np.float32)
+                if vm_pu.shape[0] == len(bus_ids):
+                    for bus_id, vm_value in zip(bus_ids, vm_pu, strict=False):
+                        grid_rows.append(
+                            {
+                                "controller": rollout_label,
+                                "episode_idx": int(episode_idx),
+                                "step": step_in_episode,
+                                "timestamp": timestamp,
+                                "bus_id": int(bus_id),
+                                "vm_pu": float(vm_value),
+                                "is_agent_bus": bool(int(bus_id) in agent_bus_set),
+                            }
+                        )
+
+                previous_raw_obs = raw_obs
+                obs = next_obs
+                raw_obs = raw_next_obs
+
+            carried_soc = np.asarray(env.soc, dtype=np.float32).copy()
+
+        step_df = pd.DataFrame(step_rows).sort_values(["episode_idx", "step"]).reset_index(drop=True)
+        agent_df = pd.DataFrame(agent_rows).sort_values(["episode_idx", "step", "agent_id"]).reset_index(drop=True)
+        grid_df = pd.DataFrame(grid_rows).sort_values(["episode_idx", "step", "bus_id"]).reset_index(drop=True)
+        summary = (
+            agent_df.groupby(["controller", "agent_profile"], as_index=False)[
+                ["purchase_cost", "export_subsidy", "objective_total"]
+            ].sum()
+            if not agent_df.empty
+            else pd.DataFrame(columns=["controller", "agent_profile", "purchase_cost", "export_subsidy", "objective_total"])
+        )
+        rollout = RolloutResult(
+            step_df=step_df,
+            agent_df=agent_df,
+            grid_df=grid_df,
+            summary=summary,
+            meta={
+                "controller": rollout_label,
+                "n_agents": int(env.n),
+                "agent_profiles": list(comparison_cfg.data.agent_profiles),
+                "agent_bus_ids": agent_bus_ids,
+                "bus_ids": bus_ids,
+                "v_min_pu": float(comparison_cfg.grid.v_min_pu),
+                "v_max_pu": float(comparison_cfg.grid.v_max_pu),
+                "future_horizon": int(comparison_cfg.env.future_horizon),
+                "prediction_mode": PERFECT_PREDICTION_MODE,
+                "evaluation_mode": resolve_evaluation_mode(PERFECT_PREDICTION_MODE),
+                "dt_hours": float(comparison_cfg.env.dt),
+                "trafo_limit_kw": trafo_limit_kw,
+                "trafo_limit_note": "Transformer apparent-power limit shown as an active-power-view reference; not a strict P bound when Q != 0.",
+                "loading_limit_pct": loading_limit_pct,
+                "trafo_loading_limit_pct": loading_limit_pct,
+                "export_subsidy_eur_per_kwh": export_subsidy,
+                "controller_diagnostic_log": diagnostic_rows,
+                "soc_mode": "continuous",
+                "solve_mode": str(solve_mode),
+                "global_oracle_time_limit_sec": resolved_time_limit,
+                "global_oracle_runtime_sec": float(result.solve_time_sec),
+                "global_oracle_gap": float(result.mip_gap),
+                "global_misocp_gap": float(result.mip_gap),
+                "global_oracle_status_label": str(result.status_label),
+                "global_oracle_debug_artifacts": dict(result.debug_artifacts),
+                "is_near_optimal": bool(str(solve_mode) == "chunked_window"),
+                "economics_scope": "agent_only",
+                "agent_purchase_cost_eur": float(result.agent_purchase_cost_eur),
+                "agent_export_subsidy_eur": float(result.agent_export_subsidy_eur),
+                "agent_net_cost_eur": float(result.agent_net_cost_eur),
+                "feeder_purchase_cost_eur": float(result.feeder_purchase_cost_eur),
+                "feeder_export_subsidy_eur": float(result.feeder_export_subsidy_eur),
+                "feeder_net_cost_eur": float(result.feeder_net_cost_eur),
+                "episode_offsets": np.asarray(full_input.episode_offsets, dtype=np.int32).copy(),
+                "episode_lengths": np.asarray(full_input.episode_lengths, dtype=np.int32).copy(),
+            },
+        )
+        return _attach_misocp_validation_meta(rollout)
+    finally:
+        env.close()
+
+
+def _attach_misocp_validation_meta(rollout: RolloutResult) -> RolloutResult:
+    validation_df = _build_misocp_validation_df(rollout.meta.get("controller_diagnostic_log", []))
+    fallback_ratio = (
+        float(rollout.step_df["misocp_fallback"].mean())
+        if not rollout.step_df.empty and "misocp_fallback" in rollout.step_df.columns
+        else 0.0
+    )
+    simultaneous_step_ratio = (
+        float(rollout.step_df["simultaneous_step_flag"].mean())
+        if not rollout.step_df.empty and "simultaneous_step_flag" in rollout.step_df.columns
+        else 0.0
+    )
+    health_warning = ""
+    if fallback_ratio > 0.05:
+        health_warning = (
+            "Global SOCP-MPC fallback ratio exceeds 5%; hard-constrained steps were often infeasible "
+            "or timed out without an incumbent."
+        )
+    if simultaneous_step_ratio > 0.05:
+        suffix = (
+            "Simultaneous charge/discharge exceeded 5% of steps; check subsidy-driven arbitrage and the tiny "
+            "throughput regularization weight."
+        )
+        health_warning = f"{health_warning} {suffix}".strip()
+    if not validation_df.empty and bool((~validation_df["within_tolerance"]).any()):
+        suffix = "MISOCP-vs-pandapower validation exceeded at least one tolerance."
+        health_warning = f"{health_warning} {suffix}".strip()
+    rollout.meta["misocp_validation_df"] = validation_df
+    rollout.meta["misocp_fallback_ratio"] = fallback_ratio
+    rollout.meta["misocp_simultaneous_step_ratio"] = simultaneous_step_ratio
+    rollout.meta["misocp_health_warning"] = health_warning
+    return rollout
+
+
+def _build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.DataFrame:
+    from controllers.mpc.global_socp_mpc import (
+        _LINE_LOADING_ERR_TOL_PCT,
+        _ROOT_POWER_ERR_TOL_KW,
+        _TRAFO_LOADING_ERR_TOL_PCT,
+        _VOLTAGE_ERR_TOL_PU,
+    )
+
+    rows: list[dict[str, object]] = []
+    for entry in diagnostic_rows:
+        misocp_vm = entry.get("misocp_vm_pu")
+        pp_vm = entry.get("pp_vm_pu")
+        misocp_line = entry.get("misocp_line_loading_pct")
+        pp_line = entry.get("pp_line_loading_pct")
+        misocp_trafo = entry.get("misocp_trafo_loading_pct")
+        pp_trafo = entry.get("pp_trafo_loading_pct")
+        if misocp_vm is None or misocp_line is None or misocp_trafo is None:
+            max_vm_abs_err = np.nan
+            max_line_abs_err = np.nan
+            trafo_abs_err = np.nan
+            root_p_abs_err = np.nan
+            within_tolerance = False
+        else:
+            max_vm_abs_err = float(
+                np.max(np.abs(np.asarray(misocp_vm, dtype=np.float32) - np.asarray(pp_vm, dtype=np.float32)))
+            )
+            max_line_abs_err = float(
+                np.max(np.abs(np.asarray(misocp_line, dtype=np.float32) - np.asarray(pp_line, dtype=np.float32)))
+            )
+            trafo_abs_err = float(
+                np.max(np.abs(np.asarray(misocp_trafo, dtype=np.float32) - np.asarray(pp_trafo, dtype=np.float32)))
+            )
+            root_p_abs_err = float(
+                abs(float(entry.get("root_p_kw", np.nan)) - float(entry.get("pp_root_p_kw", np.nan)))
+            )
+            within_tolerance = bool(
+                max_vm_abs_err < _VOLTAGE_ERR_TOL_PU
+                and max_line_abs_err < _LINE_LOADING_ERR_TOL_PCT
+                and trafo_abs_err < _TRAFO_LOADING_ERR_TOL_PCT
+                and root_p_abs_err < _ROOT_POWER_ERR_TOL_KW
+            )
+
+        rows.append(
+            {
+                "controller": entry.get("controller", "Global SOCP-MPC"),
+                "episode_idx": int(entry.get("episode_idx", 0)),
+                "step": int(entry.get("step", 0)),
+                "timestamp": entry.get("timestamp"),
+                "misocp_fallback": float(entry.get("misocp_fallback", 0.0)),
+                "misocp_time_limit_feasible": float(entry.get("misocp_time_limit_feasible", 0.0)),
+                "solve_time_sec": float(entry.get("solve_time_sec", np.nan)),
+                "max_vm_abs_err_pu": max_vm_abs_err,
+                "max_line_loading_abs_err_pct": max_line_abs_err,
+                "trafo_loading_abs_err_pct": trafo_abs_err,
+                "root_p_abs_err_kw": root_p_abs_err,
+                "within_tolerance": within_tolerance,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_global_misocp_validation(
+    rollout: RolloutResult,
+    *,
+    figsize: tuple[float, float] = (11.0, 8.0),
+):
+    validation_df = rollout.meta.get("misocp_validation_df")
+    if not isinstance(validation_df, pd.DataFrame) or validation_df.empty:
+        raise ValueError("Rollout does not contain MISOCP-vs-pandapower validation data.")
+
+    from controllers.mpc.global_socp_mpc import (
+        _LINE_LOADING_ERR_TOL_PCT,
+        _ROOT_POWER_ERR_TOL_KW,
+        _TRAFO_LOADING_ERR_TOL_PCT,
+        _VOLTAGE_ERR_TOL_PU,
+    )
+
+    figure, axes = plt.subplots(4, 1, figsize=figsize, sharex=True, constrained_layout=True)
+    series = [
+        ("max_vm_abs_err_pu", _VOLTAGE_ERR_TOL_PU, "Max |V_misocp - V_pp| [p.u.]"),
+        ("max_line_loading_abs_err_pct", _LINE_LOADING_ERR_TOL_PCT, "Max |Line Loading| Error [pct-point]"),
+        ("trafo_loading_abs_err_pct", _TRAFO_LOADING_ERR_TOL_PCT, "|Trafo Loading| Error [pct-point]"),
+        ("root_p_abs_err_kw", _ROOT_POWER_ERR_TOL_KW, "|P_root| Error [kW]"),
+    ]
+    timestamps = validation_df["timestamp"]
+    for axis, (column, threshold, ylabel) in zip(axes, series, strict=False):
+        axis.plot(timestamps, validation_df[column], color="#1d4ed8", linewidth=1.8)
+        axis.axhline(float(threshold), color="#dc2626", linestyle="--", linewidth=1.2)
+        axis.set_ylabel(ylabel)
+        axis.grid(True, alpha=0.25)
+    warning = str(rollout.meta.get("misocp_health_warning", "") or "")
+    title = f"{rollout.meta.get('controller', 'Global SOCP-MPC')} Validation"
+    if warning:
+        title = f"{title}\n{warning}"
+    axes[0].set_title(title)
+    axes[-1].set_xlabel("Timestamp")
+    return figure
 
 
 def compare_purchase_costs(*rollouts: RolloutResult) -> pd.DataFrame:
@@ -1351,6 +2114,7 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
 
     metrics = {
         "controller": str(rollout.meta.get("controller", "unknown")),
+        "soc_mode": str(rollout.meta.get("soc_mode", "reset")),
         "purchase_cost_total": purchase_cost_total,
         "export_subsidy_total": export_subsidy_total,
         "objective_total": objective_total,
@@ -1383,6 +2147,7 @@ def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "controller",
+                "soc_mode",
                 "purchase_cost_total",
                 "export_subsidy_total",
                 "objective_total",
@@ -1834,11 +2599,28 @@ def plot_voltage_profile_comparison(
     highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
 
     for axis, rollout in zip(axes, rollouts, strict=False):
-        grid_df = rollout.grid_df.copy()
+        grid_df = rollout.grid_df
         if grid_df.empty:
             raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no grid_df.")
-        for _, frame in grid_df.loc[~grid_df["is_agent_bus"]].groupby("bus_id"):
-            axis.plot(frame["timestamp"], frame["vm_pu"], color=muted_color, linewidth=0.9, alpha=0.35, zorder=1)
+        background_df = grid_df.loc[~grid_df["is_agent_bus"], ["timestamp", "bus_id", "vm_pu"]].sort_values(
+            ["timestamp", "bus_id"]
+        )
+        if not background_df.empty:
+            background_wide = background_df.pivot_table(
+                index="timestamp",
+                columns="bus_id",
+                values="vm_pu",
+                aggfunc="first",
+            ).sort_index()
+            if background_wide.shape[1] > 0:
+                axis.plot(
+                    background_wide.index.to_numpy(),
+                    background_wide.to_numpy(dtype=np.float32),
+                    color=muted_color,
+                    linewidth=0.9,
+                    alpha=0.35,
+                    zorder=1,
+                )
         for color_idx, bus_id in enumerate(rollout.meta["agent_bus_ids"]):
             frame = grid_df.loc[grid_df["bus_id"] == int(bus_id)]
             if frame.empty:
@@ -1874,58 +2656,128 @@ def plot_net_load_comparison(
     n_rows = len(rollouts)
     figure, axes = plt.subplots(
         n_rows,
-        1,
-        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
-        sharex=True,
+        2,
+        figsize=figsize or (22.0, max(3.5 * n_rows, 5.4)),
+        sharex=False,
     )
-    axes = np.atleast_1d(axes)
+    axes = np.asarray(axes, dtype=object)
+    if axes.ndim == 1:
+        axes = axes.reshape(1, 2)
 
-    for axis, rollout in zip(axes, rollouts, strict=False):
+    for row_axes, rollout in zip(axes, rollouts, strict=False):
+        feeder_axis, agent_axis = row_axes.tolist()
         step_df = rollout.step_df.copy()
         if step_df.empty:
             raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
-        axis.plot(step_df["timestamp"], step_df["base_net_load_total"], color="#111827", linewidth=1.6, label="Raw net load")
-        if "base_net_load_effective_total" in step_df.columns:
-            axis.plot(
+
+        if {"agent_raw_net_load_kw", "agent_effective_net_load_kw", "agent_post_action_net_load_kw"}.issubset(step_df.columns):
+            agent_raw = step_df["agent_raw_net_load_kw"].to_numpy(dtype=np.float32)
+            agent_effective = step_df["agent_effective_net_load_kw"].to_numpy(dtype=np.float32)
+            agent_post_action = step_df["agent_post_action_net_load_kw"].to_numpy(dtype=np.float32)
+        else:
+            agent_raw = step_df["base_net_load_total"].to_numpy(dtype=np.float32)
+            agent_effective = np.asarray(step_df.get("base_net_load_effective_total", step_df["base_net_load_total"]), dtype=np.float32)
+            agent_post_action = step_df["net_load_total"].to_numpy(dtype=np.float32)
+
+        has_feeder_total = {"feeder_raw_net_load_kw", "feeder_effective_net_load_kw", "feeder_post_action_net_load_kw"}.issubset(step_df.columns)
+        if has_feeder_total:
+            feeder_axis.plot(
                 step_df["timestamp"],
-                step_df["base_net_load_effective_total"],
+                step_df["feeder_raw_net_load_kw"],
+                color="#111827",
+                linewidth=1.6,
+                label="Feeder raw net load",
+            )
+            feeder_axis.plot(
+                step_df["timestamp"],
+                step_df["feeder_effective_net_load_kw"],
                 color="#16a34a",
                 linewidth=1.4,
                 linestyle="-.",
-                label="Post-curtail net load",
+                label="Feeder post-curtail net load",
             )
-        axis.plot(
+            feeder_axis.plot(
+                step_df["timestamp"],
+                step_df["feeder_post_action_net_load_kw"],
+                color="#2563eb",
+                linewidth=1.5,
+                linestyle="--",
+                label="Feeder post-action net load",
+            )
+            if "root_net_exchange_kw" in step_df.columns:
+                feeder_axis.plot(
+                    step_df["timestamp"],
+                    step_df["root_net_exchange_kw"],
+                    color="#7c3aed",
+                    linewidth=1.7,
+                    label="Root net exchange",
+                )
+            elif "pp_root_p_kw" in step_df.columns:
+                feeder_axis.plot(
+                    step_df["timestamp"],
+                    step_df["pp_root_p_kw"],
+                    color="#7c3aed",
+                    linewidth=1.7,
+                    label="Pandapower root exchange",
+                )
+            trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
+            if trafo_limit_kw is not None:
+                trafo_limit_value = float(trafo_limit_kw)
+                if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
+                    feeder_axis.axhline(
+                        trafo_limit_value,
+                        color="#dc2626",
+                        linestyle=":",
+                        linewidth=1.2,
+                        label=f"Transformer S-limit ref (+P view) ({trafo_limit_value:.1f} kW)",
+                    )
+                    feeder_axis.axhline(
+                        -trafo_limit_value,
+                        color="#dc2626",
+                        linestyle=":",
+                        linewidth=1.2,
+                        label=f"Transformer S-limit ref (-P view) ({trafo_limit_value:.1f} kW)",
+                    )
+            feeder_axis.set_ylabel("kW")
+            feeder_axis.set_title(f"{rollout.meta['controller']} - feeder total")
+            feeder_axis.grid(True, alpha=0.25)
+            feeder_axis.legend(loc="upper right")
+        else:
+            feeder_axis.set_axis_off()
+
+        agent_axis.plot(
             step_df["timestamp"],
-            step_df["net_load_total"],
+            agent_raw,
+            color="#111827",
+            linewidth=1.6,
+            label="Agent raw net load",
+        )
+        agent_axis.plot(
+            step_df["timestamp"],
+            agent_effective,
+            color="#16a34a",
+            linewidth=1.4,
+            linestyle="-.",
+            label="Agent post-curtail net load",
+        )
+        agent_axis.plot(
+            step_df["timestamp"],
+            agent_post_action,
             color="#2563eb",
             linewidth=1.5,
             linestyle="--",
-            label="Post-action net load",
+            label="Agent post-action net load",
         )
-        trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
-        if trafo_limit_kw is not None:
-            trafo_limit_value = float(trafo_limit_kw)
-            if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
-                axis.axhline(
-                    trafo_limit_value,
-                    color="#dc2626",
-                    linestyle=":",
-                    linewidth=1.2,
-                    label=f"Approx trafo +limit ({trafo_limit_value:.1f} kW)",
-                )
-                axis.axhline(
-                    -trafo_limit_value,
-                    color="#dc2626",
-                    linestyle=":",
-                    linewidth=1.2,
-                    label=f"Approx trafo -limit ({trafo_limit_value:.1f} kW)",
-                )
-        axis.set_ylabel("kW")
-        axis.set_title(str(rollout.meta["controller"]))
-        axis.grid(True, alpha=0.25)
-        axis.legend(loc="upper right")
+        agent_axis.set_ylabel("kW")
+        if has_feeder_total:
+            agent_axis.set_title(f"{rollout.meta['controller']} - agent-only aggregate")
+        else:
+            agent_axis.set_title(f"{rollout.meta['controller']} - agent-only (feeder-total unavailable)")
+        agent_axis.grid(True, alpha=0.25)
+        agent_axis.legend(loc="upper right")
 
-    axes[-1].set_xlabel("Timestamp")
+    axes[-1, 0].set_xlabel("Timestamp")
+    axes[-1, 1].set_xlabel("Timestamp")
     figure.tight_layout()
     return figure
 
@@ -1945,7 +2797,6 @@ def plot_power_balance_comparison(
         sharex=True,
     )
     axes = np.atleast_1d(axes)
-    width = 0.008
     positive_specs = [
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
@@ -1985,35 +2836,41 @@ def plot_power_balance_comparison(
                 + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
             )
 
-        positive_bottom = np.zeros(len(step_df), dtype=np.float32)
-        for column, label, color in positive_specs:
-            values = step_df[column].to_numpy(dtype=np.float32)
-            extra_kwargs = {"hatch": "//", "edgecolor": "#dc2626", "linewidth": 1.0} if column == "pv_curtail_total" else {}
-            axis.bar(
-                step_df["timestamp"],
-                values,
-                width=width,
-                bottom=positive_bottom,
-                color=color,
-                alpha=0.78,
-                label=label if axis_idx == 0 else None,
-                **extra_kwargs,
-            )
-            positive_bottom = positive_bottom + values
+        timestamps = step_df["timestamp"].to_numpy()
+        positive_values = [step_df[column].to_numpy(dtype=np.float32) for column, _, _ in positive_specs]
+        negative_values = [(-step_df[column].to_numpy(dtype=np.float32)) for column, _, _ in negative_specs]
+        positive_colors = [color for _, _, color in positive_specs]
+        negative_colors = [color for _, _, color in negative_specs]
+        positive_labels = [label if axis_idx == 0 else None for _, label, _ in positive_specs]
+        negative_labels = [label if axis_idx == 0 else None for _, label, _ in negative_specs]
 
-        negative_bottom = np.zeros(len(step_df), dtype=np.float32)
-        for column, label, color in negative_specs:
-            values = step_df[column].to_numpy(dtype=np.float32)
-            axis.bar(
-                step_df["timestamp"],
-                -values,
-                width=width,
-                bottom=negative_bottom,
-                color=color,
-                alpha=0.78,
-                label=label if axis_idx == 0 else None,
-            )
-            negative_bottom = negative_bottom - values
+        axis.stackplot(
+            timestamps,
+            *positive_values,
+            colors=positive_colors,
+            labels=positive_labels,
+            alpha=0.78,
+            zorder=2,
+        )
+        axis.stackplot(
+            timestamps,
+            *negative_values,
+            colors=negative_colors,
+            labels=negative_labels,
+            alpha=0.78,
+            zorder=2,
+        )
+
+        positive_cumulative = np.cumsum(np.vstack(positive_values), axis=0)
+        curtail_top = positive_cumulative[-1]
+        axis.plot(
+            timestamps,
+            curtail_top,
+            color="#dc2626",
+            linewidth=0.9,
+            alpha=0.9,
+            zorder=3,
+        )
         axis.axhline(0.0, color="#111827", linewidth=1.0)
         axis.set_ylabel("kW")
         axis.set_title(str(rollout.meta["controller"]))
@@ -2086,8 +2943,10 @@ __all__ = [
     "apply_notebook_experiment_settings",
     "build_comparison_cfg",
     "collect_madrl_rollout",
-    "collect_mpc_rollout",
     "collect_controller_rollout",
+    "collect_global_full_horizon_rollout",
+    "collect_global_mpc_rollout",
+    "collect_mpc_rollout",
     "compare_purchase_costs",
     "compare_rollout_metrics",
     "build_trafo_diagnostic_table",
@@ -2100,6 +2959,7 @@ __all__ = [
     "plot_net_load_comparison",
     "plot_power_balance_bars",
     "plot_power_balance_comparison",
+    "plot_global_misocp_validation",
     "plot_rollout_comparison_dashboard",
     "plot_rollout_dashboard",
     "plot_test_rollout",

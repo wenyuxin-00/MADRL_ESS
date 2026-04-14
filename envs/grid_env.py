@@ -79,6 +79,9 @@ class GridEnv(gym.Env):
         from envs.rewards import NormalReward
 
         self.reward_fn = reward_fn if reward_fn is not None else NormalReward(cfg)
+        self.import_price_adder_eur_per_kwh = float(
+            getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+        )
 
         if dataset is None:
             from data.loaders.registry import build_dataset
@@ -355,6 +358,7 @@ class GridEnv(gym.Env):
             "available_signals": sorted(self.signals),
             "battery_capacity_kwh": self.agent_c_bat.astype(np.float32).copy(),
             "p_max": self.agent_p_max.astype(np.float32).copy(),
+            "import_price_adder_eur_per_kwh": float(self.import_price_adder_eur_per_kwh),
             "episode_meta": dict(self.episode_meta),
             "n_buses": int(getattr(self._grid_core, "n_buses", 0)),
             "n_lines": int(getattr(self._grid_core, "n_lines", 0)),
@@ -534,7 +538,8 @@ class GridEnv(gym.Env):
         signal_state["base_net_load_effective"] = base_net_load_effective
 
     def _build_signal_state(self, t: int, pv_action: np.ndarray) -> dict[str, Any]:
-        price_t = float(self.get_signal_step("price", t))
+        wholesale_price_t = float(self.get_signal_step("price", t))
+        import_price_t = float(wholesale_price_t + self.import_price_adder_eur_per_kwh)
         load_t = np.asarray(self.get_signal_step("load", t), dtype=np.float32)
         pv_raw = np.asarray(self.ep_pv[t], dtype=np.float32)
         pv_utilization_req = self._pv_action_to_utilization(pv_action)
@@ -542,7 +547,9 @@ class GridEnv(gym.Env):
         pv_curtail_req = (pv_raw - pv_effective_req).astype(np.float32)
         base_net_load_raw = (load_t - pv_raw).astype(np.float32)
         signal_state = {
-            "price_t": price_t,
+            "wholesale_price_t": wholesale_price_t,
+            "import_price_t": import_price_t,
+            "price_t": import_price_t,
             "load_t": load_t,
             "pv_raw": pv_raw,
             "pv_utilization_req": pv_utilization_req.astype(np.float32),
@@ -616,6 +623,7 @@ class GridEnv(gym.Env):
             "agent_vm_pu": pf_result.agent_vm_pu,
             "line_loading_pct": pf_result.line_loading_pct,
             "trafo_loading_pct": pf_result.trafo_loading_pct,
+            "trafo_p_signed_kw": pf_result.trafo_p_signed_kw,
             "v_violation": pf_result.v_violation,
             "line_violation": float(pf_result.line_violation),
             "trafo_violation": float(pf_result.trafo_violation),
@@ -639,7 +647,9 @@ class GridEnv(gym.Env):
             "pv_effective": step_state["pv_effective"],
             "pv_raw": step_state["pv_raw"],
             "p_max": step_state["p_max"],
-            "price_t": step_state["price_t"],
+            "price_t": step_state["import_price_t"],
+            "wholesale_price_t": step_state["wholesale_price_t"],
+            "import_price_t": step_state["import_price_t"],
             "net_load_t": step_state["base_net_load_raw"],
             "actual_grid_power_t": step_state["net_load"],
             "dt": self.dt,
@@ -677,7 +687,9 @@ class GridEnv(gym.Env):
         info: dict[str, Any] = {
             "episode_done": done,
             "t": step_state["t"],
-            "price": float(step_state["price_t"]),
+            "price": float(step_state["import_price_t"]),
+            "wholesale_price": float(step_state["wholesale_price_t"]),
+            "import_price": float(step_state["import_price_t"]),
             "load": step_state["load_t"].astype(np.float32),
             "pv": step_state["pv_raw"].astype(np.float32),
             "pv_raw": step_state["pv_raw"].astype(np.float32),
@@ -717,6 +729,7 @@ class GridEnv(gym.Env):
             "agent_vm_pu": step_state["agent_vm_pu"],
             "line_loading_pct": step_state["line_loading_pct"],
             "trafo_loading_pct": step_state["trafo_loading_pct"],
+            "trafo_p_signed_kw": step_state["trafo_p_signed_kw"],
             "v_violation": step_state["v_violation"],
             "line_violation": step_state["line_violation"],
             "trafo_violation": step_state["trafo_violation"],

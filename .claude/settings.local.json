@@ -46,7 +46,10 @@
       "Bash(python -c \"import pytest; pytest.main\\(['-x', '-v', 'tests/test_normal_reward.py', 'tests/test_registries.py', 'tests/test_evaluation_plots.py']\\)\")",
       "Bash(grep -n \"_actor_call\\\\|_actor_target_call\\\\|_critic_call\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS/controllers/madrl/*.py)",
       "Bash(python -c ':*)",
-      "Bash(python -m pytest tests/test_normal_reward.py -v)"
+      "Bash(python -m pytest tests/test_normal_reward.py -v)",
+      "Bash(grep -n \"collect_madrl_rollout\\\\|collect_mpc_rollout\\\\|compare_rollout_metrics\" scripts/utils/*.py)",
+      "Bash(grep -r \"sb_code\\\\|grid.sb_code\\\\|SimBench\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS --include=\"*.py\" -not -path \"*/.conda/*\")",
+      "Bash(grep -r \"sb_code\\\\|grid\\\\.sb_code\\\\|1-LV-rural\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS --include=\"*.py\" -not -path \"*/.conda/*\")"
     ]
   }
 }

@@ -108,3 +108,20 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 - If the goal is clear but the requested path is not the shortest, safest, or highest-leverage approach, say so explicitly and recommend a better alternative.
 - Prefer the simplest path that achieves the real goal with clear tradeoffs.
 - Be cautious about hidden assumptions, especially when the user sounds confident but key constraints are still missing.
+
+## Environment
+
+- Default to the `MADRL_ESS` Python environment for all repo work.
+- For Python, pytest, notebook inspection, and dependency checks, prefer the repo-local interpreter `.\.conda\python.exe` when it exists.
+- Do not use the system `python` by default for this repository unless the user explicitly asks for it.
+- If a dependency appears missing under the system interpreter, retry with `.\.conda\python.exe` before concluding that the dependency is unavailable.
+- When reporting environment issues, describe the status of the `MADRL_ESS` environment first; avoid treating missing packages in the system interpreter as the repo's default state.
+
+## GitNexus Runtime
+
+- For this repository, treat GitNexus CLI and npm-based tooling as permission-sensitive by default.
+- If a GitNexus CLI command fails because of sandbox, network, registry, npm-cache, or similar environment issues, proactively rerun it with escalated permissions instead of assuming the repo is at fault.
+- Prefer a preinstalled or repo-local `gitnexus` over repeated fresh `npx gitnexus ...` installs when available, because transient npm execution has been unreliable on this machine.
+- If `npx gitnexus ...` fails with npm/arborist errors such as `Cannot destructure property 'package' of 'node.target' as it is null.`, treat that as a GitNexus/npm runtime failure and report it explicitly as tooling instability.
+- Keep explaining the difference between "the repo/index is stale" and "the CLI/runtime failed before GitNexus could run".
+- The agent should proactively request the permissions needed to run GitNexus and npm commands successfully, but must not claim it can bypass the system's approval model or self-grant unrestricted access.
