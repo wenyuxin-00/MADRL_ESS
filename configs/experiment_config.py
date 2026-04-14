@@ -110,7 +110,27 @@ class RewardConfig:
 class MpcConfig:
     """Solver-side regularization knobs for offline MISOCP analysis."""
 
-    branch_current_tiebreaker_eur_per_pu_step: float = 1e-6
+    branch_current_tiebreaker_eur_per_pu_step: float = 0.0
+    physics_refinement_mode: str = "two_stage_min_branch_l"
+    physics_refinement_slack_ratio: float = 2e-2
+    physics_refinement_slack_abs_floor_eur: float = 2.0
+    physics_refinement_slack_ratio_schedule: list[float] = field(
+        default_factory=lambda: [2e-2, 5e-2]
+    )
+    physics_refinement_slack_abs_floor_schedule_eur: list[float] = field(
+        default_factory=lambda: [2.0, 5.0]
+    )
+    physics_refinement_enable_aggressive_third_tier: bool = False
+    physics_refinement_aggressive_third_tier_ratio: float = 1e-1
+    physics_refinement_aggressive_third_tier_abs_floor_eur: float = 10.0
+    physics_refinement_cap_utilization_trigger: float = 0.95
+    physics_refinement_branch_l_gap_ratio_trigger: float = 0.01
+    physics_refinement_time_limit_sec: float = 20.0
+    physics_refinement_total_time_limit_sec: float = 40.0
+    physics_refinement_target_mean_solver_gap_kw: float = 3.0
+    physics_refinement_target_max_solver_gap_kw: float = 15.0
+    physics_refinement_target_export_gap_ratio: float = 0.05
+    physics_refinement_use_full_start: bool = True
 
 
 @dataclass

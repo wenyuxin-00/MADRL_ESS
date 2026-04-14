@@ -19,6 +19,8 @@ from scripts.utils.misocp_notebook_helpers import (
     build_misocp_plan_package,
     build_debug_tables,
     build_full_horizon_step_df,
+    build_root_q_diagnostic_df,
+    build_soc_relaxation_diagnostics,
     build_misocp_validation_df,
     build_simultaneous_diagnostic_tables,
     build_voltage_df,
@@ -26,23 +28,34 @@ from scripts.utils.misocp_notebook_helpers import (
     format_solver_summary,
     load_misocp_plan_package,
     plot_full_horizon_net_load,
+    plot_misocp_validation_scatter_panel,
     plot_full_horizon_power_balance,
     plot_full_horizon_voltage,
+    plot_root_exchange_alignment,
     replay_misocp_plan_package,
+    resolve_latest_compatible_misocp_plan_package_dir,
     save_misocp_plan_package,
     summarize_misocp_validation,
     validate_misocp_result_schema,
 )
-from tests.support.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
 
 
 def _make_mock_problem() -> SimpleNamespace:
     network = SimpleNamespace(
         bus_ids=np.asarray([0, 1, 2, 3], dtype=np.int32),
+        bus_pos={0: 0, 1: 1, 2: 2, 3: 3},
+        s_base_mva=0.1,
         p_base_mw=np.asarray([0.005, 0.0, -0.002, 0.003], dtype=np.float32),
+        q_base_mvar=np.asarray([0.0, 0.0, 0.004, 0.0], dtype=np.float32),
         agent_bus_positions=np.asarray([1, 3], dtype=np.int32),
+        branch_parent_pos=np.asarray([0, 1, 1], dtype=np.int32),
+        branch_child_pos=np.asarray([1, 2, 3], dtype=np.int32),
+        branch_r_pu=np.asarray([0.05, 0.04, 0.02], dtype=np.float32),
+        branch_x_pu=np.asarray([0.10, 0.20, 0.30], dtype=np.float32),
         line_branch_indices=np.asarray([1, 2], dtype=np.int32),
         branch_is_trafo=np.asarray([True, False, False], dtype=bool),
+        root_outgoing_branches=np.asarray([0], dtype=np.int32),
     )
     return SimpleNamespace(
         network=network,
@@ -105,14 +118,22 @@ def _make_mock_result() -> SimpleNamespace:
         battery_discharge_mw=np.asarray([[0.0, 0.001], [0.002, 0.0]], dtype=np.float32),
         pv_curtail_mw=np.asarray([[0.001, 0.0], [0.0, 0.001]], dtype=np.float32),
         energy_mwh=np.asarray([[0.010, 0.011, 0.010], [0.012, 0.0115, 0.012]], dtype=np.float32),
-        branch_p_pu=np.zeros((2, 2), dtype=np.float32),
-        branch_q_pu=np.zeros((2, 2), dtype=np.float32),
-        branch_i2_pu=np.asarray([[0.25, 0.42], [0.16, 0.64]], dtype=np.float32),
-        bus_v_sq=np.zeros((4, 2), dtype=np.float32),
+        branch_p_pu=np.asarray([[0.30, 0.20], [0.20, 0.12], [0.10, 0.08]], dtype=np.float32),
+        branch_q_pu=np.asarray([[0.40, 0.10], [0.10, 0.08], [0.05, 0.04]], dtype=np.float32),
+        branch_i2_pu=np.asarray([[0.30, 0.06], [0.07, 0.03], [0.015, 0.01]], dtype=np.float32),
+        bus_v_sq=np.asarray(
+            [
+                [1.00, 1.00],
+                [0.98, 0.96],
+                [0.97, 0.95],
+                [0.99, 0.97],
+            ],
+            dtype=np.float32,
+        ),
         root_import_mw=np.asarray([0.018, 0.017], dtype=np.float32),
         root_export_mw=np.asarray([0.0, 0.0], dtype=np.float32),
         root_p_kw=np.asarray([18.0, 17.0], dtype=np.float32),
-        root_q_kvar=np.asarray([2.0, 3.0], dtype=np.float32),
+        root_q_kvar=np.asarray([9.0, 5.5], dtype=np.float32),
         bus_vm_pu=np.asarray(
             [
                 [1.00, 1.01],
@@ -134,6 +155,38 @@ def _make_mock_result() -> SimpleNamespace:
         bar_iter_count=7.0,
         solve_mode="single_window",
         chunk_summaries=None,
+        stage1_primary_objective_eur=0.885,
+        stage2_primary_objective_eur=0.89,
+        stage2_objective_slack_eur=0.1,
+        stage2_branch_l_objective=0.375,
+        physics_refinement_mode="two_stage_min_branch_l",
+        physics_refinement_status="refined",
+        physics_refinement_runtime_sec=1.0,
+        floor_p95_soc_slack=0.02,
+        floor_mean_abs_solver_feeder_gap_kw=3.0,
+        floor_primary_objective_eur=0.88,
+        floor_primary_delta_signed_eur=-0.005,
+        floor_primary_delta_positive_eur=0.0,
+        physics_refinement_slack_cap_eur=2.0,
+        initial_physics_refinement_slack_cap_eur=2.0,
+        returned_primary_objective_eur=0.89,
+        returned_primary_delta_abs_eur=0.005,
+        returned_primary_delta_pct=0.5649717514,
+        floor_accepted_tier=None,
+        used_physics_refinement_tier=0,
+        total_tiers_configured=2,
+        physics_refinement_attempt_count=1,
+        physics_refinement_attempt_caps_eur=[2.0],
+        physics_refinement_cap_utilization=0.25,
+        branch_l_gap_ratio_to_floor=0.015,
+        returned_mean_abs_solver_feeder_gap_kw=3.0,
+        returned_max_solver_feeder_gap_kw=6.0,
+        returned_mean_abs_export_gap_ratio=0.03,
+        high_budget_refinement_warn=False,
+        returned_solution_source="stage2",
+        formulation_tightening_required=False,
+        negative_floor_delta_warn=False,
+        refinement_status_counts={"refined": 1},
     )
 
 
@@ -211,6 +264,38 @@ def _make_real_result() -> MISOCPResult:
         episode_offsets=np.asarray([0], dtype=np.int32),
         episode_lengths=np.asarray([2], dtype=np.int32),
         chunk_summaries=None,
+        stage1_primary_objective_eur=float(mock.stage1_primary_objective_eur),
+        stage2_primary_objective_eur=float(mock.stage2_primary_objective_eur),
+        stage2_objective_slack_eur=float(mock.stage2_objective_slack_eur),
+        stage2_branch_l_objective=float(mock.stage2_branch_l_objective),
+        physics_refinement_mode=str(mock.physics_refinement_mode),
+        physics_refinement_status=str(mock.physics_refinement_status),
+        physics_refinement_runtime_sec=float(mock.physics_refinement_runtime_sec),
+        floor_p95_soc_slack=float(mock.floor_p95_soc_slack),
+        floor_mean_abs_solver_feeder_gap_kw=float(mock.floor_mean_abs_solver_feeder_gap_kw),
+        floor_primary_objective_eur=float(mock.floor_primary_objective_eur),
+        floor_primary_delta_signed_eur=float(mock.floor_primary_delta_signed_eur),
+        floor_primary_delta_positive_eur=float(mock.floor_primary_delta_positive_eur),
+        physics_refinement_slack_cap_eur=float(mock.physics_refinement_slack_cap_eur),
+        initial_physics_refinement_slack_cap_eur=float(mock.initial_physics_refinement_slack_cap_eur),
+        returned_primary_objective_eur=float(mock.returned_primary_objective_eur),
+        returned_primary_delta_abs_eur=float(mock.returned_primary_delta_abs_eur),
+        returned_primary_delta_pct=float(mock.returned_primary_delta_pct),
+        floor_accepted_tier=mock.floor_accepted_tier,
+        used_physics_refinement_tier=mock.used_physics_refinement_tier,
+        total_tiers_configured=int(mock.total_tiers_configured),
+        physics_refinement_attempt_count=int(mock.physics_refinement_attempt_count),
+        physics_refinement_attempt_caps_eur=[float(value) for value in list(mock.physics_refinement_attempt_caps_eur)],
+        physics_refinement_cap_utilization=float(mock.physics_refinement_cap_utilization),
+        branch_l_gap_ratio_to_floor=float(mock.branch_l_gap_ratio_to_floor),
+        returned_mean_abs_solver_feeder_gap_kw=float(mock.returned_mean_abs_solver_feeder_gap_kw),
+        returned_max_solver_feeder_gap_kw=float(mock.returned_max_solver_feeder_gap_kw),
+        returned_mean_abs_export_gap_ratio=float(mock.returned_mean_abs_export_gap_ratio),
+        high_budget_refinement_warn=bool(mock.high_budget_refinement_warn),
+        returned_solution_source=str(mock.returned_solution_source),
+        formulation_tightening_required=bool(mock.formulation_tightening_required),
+        negative_floor_delta_warn=bool(mock.negative_floor_delta_warn),
+        refinement_status_counts=dict(mock.refinement_status_counts or {}),
     )
 
 
@@ -319,6 +404,38 @@ def _make_real_problem_fixture(tmp_path: Path):
         sanity_warning="",
         horizon_steps=horizon_steps,
         solve_mode="single_window",
+        stage1_primary_objective_eur=agent_purchase_cost_eur,
+        stage2_primary_objective_eur=agent_purchase_cost_eur,
+        stage2_objective_slack_eur=0.1,
+        stage2_branch_l_objective=0.0,
+        physics_refinement_mode="two_stage_min_branch_l",
+        physics_refinement_status="refined",
+        physics_refinement_runtime_sec=0.25,
+        floor_p95_soc_slack=0.0,
+        floor_mean_abs_solver_feeder_gap_kw=0.0,
+        floor_primary_objective_eur=agent_purchase_cost_eur,
+        floor_primary_delta_signed_eur=0.0,
+        floor_primary_delta_positive_eur=0.0,
+        physics_refinement_slack_cap_eur=2.0,
+        initial_physics_refinement_slack_cap_eur=2.0,
+        returned_primary_objective_eur=agent_purchase_cost_eur,
+        returned_primary_delta_abs_eur=0.0,
+        returned_primary_delta_pct=0.0,
+        floor_accepted_tier=None,
+        used_physics_refinement_tier=0,
+        total_tiers_configured=2,
+        physics_refinement_attempt_count=1,
+        physics_refinement_attempt_caps_eur=[2.0],
+        physics_refinement_cap_utilization=0.0,
+        branch_l_gap_ratio_to_floor=0.0,
+        returned_mean_abs_solver_feeder_gap_kw=0.0,
+        returned_max_solver_feeder_gap_kw=0.0,
+        returned_mean_abs_export_gap_ratio=0.0,
+        high_budget_refinement_warn=False,
+        returned_solution_source="stage2",
+        formulation_tightening_required=False,
+        negative_floor_delta_warn=False,
+        refinement_status_counts={"refined": 1},
         episode_offsets=np.asarray(full_input.episode_offsets, dtype=np.int32),
         episode_lengths=np.asarray(full_input.episode_lengths, dtype=np.int32),
         chunk_summaries=None,
@@ -505,10 +622,60 @@ def test_estimate_model_size_and_solver_summary_helpers_return_expected_fields()
     assert solver_summary["num_quadratic_constraints"] == result.model_size.num_quadratic_constraints
     assert solver_summary["economics_scope"] == "agent_only"
     assert solver_summary["physical_tiebreaker_weight"] == pytest.approx(1e-6)
+    assert solver_summary["physics_refinement_mode"] == "two_stage_min_branch_l"
+    assert solver_summary["physics_refinement_status"] == "refined"
+    assert solver_summary["stage1_primary_objective_eur"] == pytest.approx(0.885)
+    assert solver_summary["floor_primary_objective_eur"] == pytest.approx(0.88)
+    assert solver_summary["returned_primary_objective_eur"] == pytest.approx(0.89)
+    assert solver_summary["physics_refinement_slack_cap_eur"] == pytest.approx(2.0)
+    assert solver_summary["returned_solution_source"] == "stage2"
+    assert solver_summary["refinement_status_counts"] == {"refined": 1}
+    assert solver_summary["floor_p95_soc_slack"] == pytest.approx(0.02)
     assert solver_summary["no_retry_or_fallback_used"]
     assert solver_summary["chunk_retry_count"] == 0
     assert solver_summary["total_runtime_sec"] == pytest.approx(result.solve_time_sec)
     assert np.isnan(float(solver_summary["max_chunk_runtime_sec"]))
+
+
+def test_soc_relaxation_diagnostics_use_parent_voltage_and_internal_pu_units():
+    problem = _make_mock_problem()
+    full_input = _make_mock_full_input()
+    result = _make_mock_result()
+
+    diagnostics = build_soc_relaxation_diagnostics(problem, full_input, result, top_k=6)
+    summary = diagnostics["summary"]
+    step_df = diagnostics["step_df"]
+    worst_df = diagnostics["worst_df"]
+
+    expected_branch1_step1 = 0.03 - ((0.12 ** 2 + 0.08 ** 2) / 0.96)
+    assert step_df.loc[0, "soc_slack_max"] == pytest.approx(0.05, rel=1e-5)
+    assert step_df.loc[1, "soc_slack_max"] == pytest.approx(0.01, rel=1e-5)
+    assert worst_df.loc[0, "branch_idx"] == 0
+    assert worst_df.loc[0, "global_step"] == 0
+    assert worst_df.loc[0, "soc_slack"] == pytest.approx(0.05, rel=1e-5)
+    assert worst_df.loc[1, "branch_idx"] == 1
+    assert worst_df.loc[1, "global_step"] == 0
+    branch1_step1 = worst_df.loc[
+        (worst_df["branch_idx"] == 1) & (worst_df["global_step"] == 1),
+        "soc_slack",
+    ].iloc[0]
+    assert branch1_step1 == pytest.approx(expected_branch1_step1, rel=1e-5)
+    assert summary["p95_soc_slack"] > 1e-4
+    assert bool(summary["soc_relaxation_is_tight"]) is False
+
+
+def test_root_q_diagnostic_df_decomposes_background_and_xl_proxy():
+    problem = _make_mock_problem()
+    full_input = _make_mock_full_input()
+    result = _make_mock_result()
+
+    root_q_df = build_root_q_diagnostic_df(problem, full_input, result)
+
+    assert root_q_df.loc[0, "background_q_base_total_kvar"] == pytest.approx(4.0)
+    assert root_q_df.loc[0, "network_q_loss_proxy_kvar"] == pytest.approx(4.85, rel=1e-5)
+    assert root_q_df.loc[0, "root_q_residual_kvar"] == pytest.approx(0.15, rel=1e-5)
+    assert root_q_df.loc[1, "network_q_loss_proxy_kvar"] == pytest.approx(1.5, rel=1e-5)
+    assert root_q_df.loc[1, "root_q_residual_kvar"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_validation_and_simultaneous_helpers_return_expected_tables():
@@ -550,6 +717,62 @@ def test_validation_and_simultaneous_helpers_return_expected_tables():
     assert simultaneous_step_df.loc[0, "simultaneous_kw_total"] == 0.5
     assert simultaneous_agent_df.loc[0, "agent_profile"] == "B"
     assert {"charge_kw", "discharge_kw", "soc_before", "soc_after"}.issubset(simultaneous_agent_df.columns)
+
+
+def test_validation_summary_reports_fit_and_gap_metrics():
+    validation_df = build_misocp_validation_df(
+        [
+            {
+                "controller": "Mock",
+                "episode_idx": 0,
+                "step": idx,
+                "timestamp": pd.Timestamp("2020-06-01 00:00:00") + pd.Timedelta(minutes=15 * idx),
+                "solve_time_sec": 1.0,
+                "misocp_vm_pu": np.asarray([1.0], dtype=np.float32),
+                "pp_vm_pu": np.asarray([1.0], dtype=np.float32),
+                "misocp_line_loading_pct": np.asarray([10.0], dtype=np.float32),
+                "pp_line_loading_pct": np.asarray([10.0], dtype=np.float32),
+                "misocp_trafo_loading_pct": np.asarray([20.0], dtype=np.float32),
+                "pp_trafo_loading_pct": np.asarray([20.0], dtype=np.float32),
+                "root_p_kw": float(root_p),
+                "pp_root_p_kw": float(pp_root_p),
+                "pp_root_p_available": True,
+                "misocp_root_s_kva": float(root_s),
+                "pp_root_s_kva": float(pp_root_s),
+                "root_q_kvar": 4.0,
+                "soc_slack_max": float(slack_max),
+                "soc_slack_mean": float(slack_mean),
+                "soc_slack_p95_global": 0.025,
+                "background_q_base_total_kvar": 4.0,
+                "network_q_loss_proxy_kvar": float(idx + 1),
+                "root_q_residual_kvar": float(idx - 1),
+                "solver_feeder_gap_kw": float(solver_gap),
+                "replay_feeder_gap_kw": float(replay_gap),
+            }
+            for idx, (root_p, pp_root_p, root_s, pp_root_s, slack_max, slack_mean, solver_gap, replay_gap) in enumerate(
+                [
+                    (1.0, 3.0, 2.0, 1.0, 0.01, 0.005, 1.0, 0.5),
+                    (2.0, 5.0, 4.0, 2.0, 0.02, 0.01, -2.0, -0.5),
+                    (3.0, 7.0, 6.0, 3.0, 0.03, 0.015, 3.0, 1.0),
+                ]
+            )
+        ]
+    )
+
+    summary = summarize_misocp_validation(validation_df)
+
+    assert summary["root_p_fit_k"] == pytest.approx(2.0)
+    assert summary["root_p_fit_b"] == pytest.approx(1.0)
+    assert summary["root_p_fit_r2"] == pytest.approx(1.0)
+    assert summary["root_s_fit_k"] == pytest.approx(0.5)
+    assert summary["root_s_fit_b"] == pytest.approx(0.0)
+    assert summary["root_s_fit_r2"] == pytest.approx(1.0)
+    assert summary["max_solver_feeder_gap_kw"] == pytest.approx(3.0)
+    assert summary["mean_abs_solver_feeder_gap_kw"] == pytest.approx(2.0)
+    assert summary["max_replay_feeder_gap_kw"] == pytest.approx(1.0)
+    assert summary["mean_abs_replay_feeder_gap_kw"] == pytest.approx((0.5 + 0.5 + 1.0) / 3.0)
+    assert summary["p95_soc_slack"] == pytest.approx(0.025)
+    assert summary["root_p_fit_interpretation"] == "systematic_linear_bias"
 
 
 def test_validation_marks_root_power_unavailable_without_silent_zero_fallback():
@@ -626,7 +849,8 @@ def test_plan_package_round_trip_reconstructs_real_dataclasses(tmp_path):
 
     assert isinstance(loaded["full_input"], FullHorizonProblemInput)
     assert isinstance(loaded["result"], MISOCPResult)
-    assert loaded["manifest"]["plan_package_version"] == 7
+    assert loaded["manifest"]["plan_package_version"] == 11
+    assert loaded["manifest"]["diagnostics_stage"] == "commit4_adaptive_refinement_ladder"
     assert loaded["manifest"]["cfg_snapshot"]["import_price_adder_eur_per_kwh"] == pytest.approx(
         cfg.reward.import_price_adder_eur_per_kwh
     )
@@ -636,6 +860,17 @@ def test_plan_package_round_trip_reconstructs_real_dataclasses(tmp_path):
     assert np.allclose(loaded["result"].battery_charge_mw, result.battery_charge_mw)
     assert loaded["solve_summary"]["status_label"] == "optimal"
     assert loaded["solve_summary"]["economics_scope"] == "agent_only"
+    assert loaded["solve_summary"]["diagnostics_stage"] == "commit4_adaptive_refinement_ladder"
+    assert loaded["solve_summary"]["physics_refinement_mode"] == "two_stage_min_branch_l"
+    assert loaded["solve_summary"]["physics_refinement_status"] == "refined"
+    assert loaded["solve_summary"]["total_tiers_configured"] == 2
+    assert loaded["solve_summary"]["used_physics_refinement_tier"] == 0
+    assert loaded["solve_summary"]["physics_refinement_attempt_caps_eur"] == [2.0]
+    assert loaded["solve_summary"]["returned_primary_objective_eur"] == pytest.approx(
+        result.returned_primary_objective_eur
+    )
+    assert loaded["solve_summary"]["refinement_status_counts"] == {"refined": 1}
+    assert loaded["solve_summary"]["floor_p95_soc_slack"] == pytest.approx(0.0)
     assert loaded["solve_summary"]["no_retry_or_fallback_used"] is True
     assert loaded["solve_summary"]["agent_purchase_cost_eur"] == pytest.approx(result.agent_purchase_cost_eur)
     assert loaded["solve_summary"]["physical_tiebreaker_weight"] == pytest.approx(
@@ -645,6 +880,16 @@ def test_plan_package_round_trip_reconstructs_real_dataclasses(tmp_path):
 
 def test_replay_misocp_plan_package_returns_compare_ready_rollout(tmp_path):
     cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
+    household_csv = Path(cfg.data.data_dir) / "processed" / "prosumer" / "household.csv"
+    if not household_csv.exists():
+        write_prosumer_processed_dataset(
+            cfg.data.data_dir,
+            agent_profiles=list(cfg.data.agent_profiles),
+            train_year=int(cfg.data.train_year),
+            test_year=int(cfg.data.test_year),
+            train_steps=int(cfg.env.episode_limit * 4),
+            test_steps=int(cfg.env.episode_limit * 4),
+        )
     saved_dir = save_misocp_plan_package(
         build_misocp_plan_package(
             problem,
@@ -668,12 +913,19 @@ def test_replay_misocp_plan_package_returns_compare_ready_rollout(tmp_path):
     assert not rollout.agent_df.empty
     assert not rollout.grid_df.empty
     assert rollout.meta["loaded_from_cached_plan"] is True
-    assert rollout.meta["plan_package_version"] == 7
+    assert rollout.meta["plan_package_version"] == 11
+    assert rollout.meta["diagnostics_stage"] == "commit4_adaptive_refinement_ladder"
+    assert rollout.meta["physics_refinement_mode"] == "two_stage_min_branch_l"
     assert rollout.meta["no_retry_or_fallback_used"] is True
     assert rollout.meta["chunk_retry_count"] == 0
     assert rollout.meta["economics_scope"] == "agent_only"
     assert rollout.meta["validation_root_power_source"] == "trafo_p_signed_kw"
     assert rollout.meta["agent_q_base_zeroed"] is True
+    assert rollout.meta["returned_solution_source"] == "stage2"
+    assert rollout.meta["total_tiers_configured"] == 2
+    assert rollout.meta["used_physics_refinement_tier"] == 0
+    assert rollout.meta["physics_refinement_attempt_caps_eur"] == [2.0]
+    assert rollout.meta["refinement_status_counts"] == {"refined": 1}
     assert "is_near_optimal" in rollout.meta
     assert rollout.meta["import_price_adder_eur_per_kwh"] == pytest.approx(
         cfg.reward.import_price_adder_eur_per_kwh
@@ -699,14 +951,44 @@ def test_misocp_plan_package_rejects_version_and_cfg_mismatches(tmp_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["plan_package_version"] = 999
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    with pytest.raises(ValueError, match="root-power validation fix"):
+    with pytest.raises(ValueError, match="adaptive slack ladder / tiered floor accept / floor-distance gate / time-budget refinement semantics"):
         load_misocp_plan_package(saved_dir)
 
-    manifest["plan_package_version"] = 7
+    manifest["plan_package_version"] = 11
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     cfg.grid.agent_bus_ids = list(reversed(cfg.grid.agent_bus_ids))
     with pytest.raises(ValueError, match="agent_bus_ids"):
         replay_misocp_plan_package(cfg, saved_dir)
+
+
+def test_resolve_latest_compatible_misocp_plan_package_dir_prefers_newest_matching_prefix(tmp_path):
+    cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
+    package = build_misocp_plan_package(
+        problem,
+        full_input,
+        result,
+        controller_label="Global MISOCP (single_window)",
+        export_subsidy=float(cfg.reward.export_subsidy_eur_per_kwh),
+        cfg=cfg,
+    )
+    plans_root = tmp_path / "cached_plans"
+    base_dir = save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5")
+    newer_dir = save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5_7ad699")
+
+    base_manifest_path = base_dir / "manifest.json"
+    base_manifest = json.loads(base_manifest_path.read_text(encoding="utf-8"))
+    base_manifest["plan_package_version"] = 3
+    base_manifest["saved_at_utc"] = "2026-01-01T00:00:00+00:00"
+    base_manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
+
+    newer_manifest_path = newer_dir / "manifest.json"
+    newer_manifest = json.loads(newer_manifest_path.read_text(encoding="utf-8"))
+    newer_manifest["saved_at_utc"] = "2026-04-15T12:00:00+00:00"
+    newer_manifest_path.write_text(json.dumps(newer_manifest, indent=2), encoding="utf-8")
+
+    resolved = resolve_latest_compatible_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
+
+    assert resolved == newer_dir.resolve()
 
 
 def test_misocp_notebook_plot_helpers_return_figures():
@@ -715,7 +997,40 @@ def test_misocp_notebook_plot_helpers_return_figures():
     result = _make_mock_result()
     step_df = build_full_horizon_step_df(problem, full_input, result)
     step_df["timestamp"] = pd.date_range("2020-06-01", periods=len(step_df), freq="15min", tz="Europe/Berlin")
+    step_df["pp_root_p_kw"] = np.asarray([17.5, 16.8], dtype=np.float32)
     voltage_df = build_voltage_df(problem, full_input, result)
+    validation_df = build_misocp_validation_df(
+        [
+            {
+                "controller": "Mock",
+                "episode_idx": 0,
+                "step": idx,
+                "timestamp": timestamp,
+                "solve_time_sec": 1.0,
+                "misocp_vm_pu": np.asarray([1.0], dtype=np.float32),
+                "pp_vm_pu": np.asarray([1.0], dtype=np.float32),
+                "misocp_line_loading_pct": np.asarray([10.0], dtype=np.float32),
+                "pp_line_loading_pct": np.asarray([10.0], dtype=np.float32),
+                "misocp_trafo_loading_pct": np.asarray([20.0], dtype=np.float32),
+                "pp_trafo_loading_pct": np.asarray([20.0], dtype=np.float32),
+                "root_p_kw": float(10.0 + idx),
+                "pp_root_p_kw": float(9.5 + idx),
+                "pp_root_p_available": True,
+                "misocp_root_s_kva": float(12.0 + idx),
+                "pp_root_s_kva": float(11.5 + idx),
+                "root_q_kvar": 4.0,
+                "soc_slack_max": 0.01,
+                "soc_slack_mean": 0.005,
+                "soc_slack_p95_global": 0.02,
+                "background_q_base_total_kvar": 4.0,
+                "network_q_loss_proxy_kvar": 1.0,
+                "root_q_residual_kvar": 0.0,
+                "solver_feeder_gap_kw": 1.0,
+                "replay_feeder_gap_kw": 0.5,
+            }
+            for idx, timestamp in enumerate(step_df["timestamp"])
+        ]
+    )
 
     balance_figure = plot_full_horizon_power_balance(
         step_df,
@@ -735,6 +1050,14 @@ def test_misocp_notebook_plot_helpers_return_figures():
         trafo_limit_kw=problem.trafo_limit_mva * 1000.0,
         controller_label="Global MISOCP (single_window)",
     )
+    root_alignment_figure = plot_root_exchange_alignment(
+        step_df,
+        controller_label="Global MISOCP (single_window)",
+    )
+    validation_scatter_figure = plot_misocp_validation_scatter_panel(
+        validation_df,
+        controller_label="Global MISOCP (single_window)",
+    )
 
     assert len(balance_figure.axes) == 1
     assert len(balance_figure.axes[0].lines) >= 2
@@ -743,9 +1066,14 @@ def test_misocp_notebook_plot_helpers_return_figures():
     assert len(net_load_figure.axes) == 2
     assert len(net_load_figure.axes[0].lines) >= 4
     assert len(net_load_figure.axes[1].lines) == 3
+    assert len(root_alignment_figure.axes) == 1
+    assert len(root_alignment_figure.axes[0].lines) >= 3
+    assert len(validation_scatter_figure.axes) == 2
     plt.close(balance_figure)
     plt.close(voltage_figure)
     plt.close(net_load_figure)
+    plt.close(root_alignment_figure)
+    plt.close(validation_scatter_figure)
 
 
 def test_misocp_global_notebook_code_cells_compile():
@@ -763,11 +1091,37 @@ def test_misocp_global_notebook_code_cells_compile():
     assert "agent_purchase_cost_eur" in notebook_source
     assert "branch_current_tiebreaker_eur_per_pu_step" in notebook_source
     assert "max_root_p_abs_err_kw ~= 148.8" in notebook_text
+    assert "max_root_p_abs_err_kw ~= 48" in notebook_text
     assert "agent_bus_q_base_nonzero_count" in notebook_source
+    assert "p95_soc_slack" in notebook_source
+    assert "root_p_fit_k" in notebook_source
+    assert "root_s_fit_k" in notebook_source
+    assert "build_soc_relaxation_diagnostics = misocp_nb.build_soc_relaxation_diagnostics" in notebook_source
+    assert "plot_root_exchange_alignment = misocp_nb.plot_root_exchange_alignment" in notebook_source
+    assert "plot_misocp_validation_scatter_panel = misocp_nb.plot_misocp_validation_scatter_panel" in notebook_source
+    assert "import configs as configs_pkg" in notebook_source
+    assert "config_profiles = importlib.reload(config_profiles)" in notebook_source
     assert "from controllers import mpc as mpc_pkg" in notebook_source
     assert "from controllers.mpc import global_socp_mpc as misocp_core" in notebook_source
     assert "misocp_core = importlib.reload(misocp_core)" in notebook_source
     assert "validate_misocp_result_schema = misocp_nb.validate_misocp_result_schema" in notebook_source
+    assert "build_floor_diagnostic_summary" in notebook_source
+    assert "build_refinement_summary" in notebook_source
+    assert "floor_diagnostic_summary" in notebook_source
+    assert "refinement_summary" in notebook_source
+    assert "physics_refinement_slack_abs_floor_eur" in notebook_source
+    assert "physics_refinement_slack_ratio_schedule" in notebook_source
+    assert "physics_refinement_total_time_limit_sec" in notebook_source
+    assert "physics_refinement_status" in notebook_source
+    assert "returned_primary_objective_eur" in notebook_source
+    assert "floor_accepted_tier" in notebook_source
+    assert "used_physics_refinement_tier" in notebook_source
+    assert "total_tiers_configured" in notebook_source
+    assert "branch_l_gap_ratio_to_floor" in notebook_source
+    assert "returned_mean_abs_export_gap_ratio" in notebook_source
+    assert "high_budget_refinement_warn" in notebook_source
+    assert "formulation_tightening_required" in notebook_source
+    assert "refinement_status_counts" in notebook_source
     assert "from controllers.mpc import FullHorizonProblemInput, GlobalMISOCPProblem, GurobiSolveConfig" not in notebook_source
     assert "from controllers.mpc.global_socp_mpc import default_primary_solve_config, default_retry_solve_config" not in notebook_source
     for cell_index, source in enumerate(code_cells, start=1):

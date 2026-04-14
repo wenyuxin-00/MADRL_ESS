@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Mapping
 
@@ -873,6 +874,14 @@ def collect_controller_rollout(
                         "base_net_load_total": float(np.sum(base_net_load)),
                         "base_net_load_effective_total": float(np.sum(base_net_load_effective)),
                         "net_load_total": float(np.sum(net_load)),
+                        "agent_raw_net_load_kw": agent_raw_net_load_kw,
+                        "agent_effective_net_load_kw": agent_effective_net_load_kw,
+                        "agent_post_action_net_load_kw": agent_post_action_net_load_kw,
+                        "fixed_load_kw": fixed_load_kw,
+                        "fixed_generation_kw": fixed_generation_kw,
+                        "feeder_raw_net_load_kw": feeder_raw_net_load_kw,
+                        "feeder_effective_net_load_kw": feeder_effective_net_load_kw,
+                        "feeder_post_action_net_load_kw": feeder_post_action_net_load_kw,
                         "load_total": float(np.sum(np.asarray(info["load"], dtype=np.float32))),
                         "pv_raw_total": float(np.sum(pv_raw)),
                         "pv_effective_total": float(np.sum(pv_effective)),
@@ -1048,6 +1057,9 @@ def collect_controller_rollout(
                 "loading_limit_pct": loading_limit_pct,
                 "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
+                "import_price_adder_eur_per_kwh": float(
+                    getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+                ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "reset",
             },
@@ -1594,6 +1606,9 @@ def collect_global_full_horizon_rollout(
                 "loading_limit_pct": loading_limit_pct,
                 "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": export_subsidy,
+                "import_price_adder_eur_per_kwh": float(
+                    getattr(getattr(comparison_cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+                ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "continuous",
                 "solve_mode": str(solve_mode),
@@ -1764,6 +1779,176 @@ def compare_purchase_costs(*rollouts: RolloutResult) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values("purchase_cost_total").reset_index(drop=True)
+
+
+def _step_group_columns(frame: pd.DataFrame) -> list[str]:
+    columns = [column for column in ["episode_idx", "step"] if column in frame.columns]
+    if columns:
+        return columns
+    if "timestamp" in frame.columns:
+        return ["timestamp"]
+    return []
+
+
+def _sort_columns(frame: pd.DataFrame, *preferred: str) -> list[str]:
+    return [column for column in preferred if column in frame.columns]
+
+
+def _prepare_agent_power_balance_frame(
+    step_df: pd.DataFrame,
+    *,
+    controller_label: str,
+    tolerance_kw: float = 1.0,
+) -> tuple[pd.DataFrame, float]:
+    if step_df.empty:
+        raise ValueError(f"Rollout '{controller_label}' has no step_df.")
+    prepared = step_df.copy()
+    required_columns = {
+        "load_total",
+        "battery_charge_total",
+        "pv_curtail_total",
+        "grid_import_total",
+        "grid_export_total",
+        "battery_discharge_total",
+    }
+    missing = sorted(required_columns.difference(prepared.columns))
+    if missing:
+        raise ValueError(
+            f"Rollout '{controller_label}' is missing required agent power-balance columns: {missing}"
+        )
+    if "pv_raw_total" not in prepared.columns:
+        if "pv_effective_total" not in prepared.columns:
+            raise ValueError(
+                f"Rollout '{controller_label}' must contain either pv_raw_total or pv_effective_total."
+            )
+        prepared["pv_raw_total"] = (
+            prepared["pv_effective_total"].to_numpy(dtype=np.float32)
+            + prepared["pv_curtail_total"].to_numpy(dtype=np.float32)
+        )
+
+    positive_total = (
+        prepared["load_total"].to_numpy(dtype=np.float32)
+        + prepared["battery_charge_total"].to_numpy(dtype=np.float32)
+        + prepared["grid_export_total"].to_numpy(dtype=np.float32)
+        + prepared["pv_curtail_total"].to_numpy(dtype=np.float32)
+    )
+    negative_total = (
+        prepared["pv_raw_total"].to_numpy(dtype=np.float32)
+        + prepared["grid_import_total"].to_numpy(dtype=np.float32)
+        + prepared["battery_discharge_total"].to_numpy(dtype=np.float32)
+    )
+    balance_residual_kw = positive_total - negative_total
+    max_abs_balance_residual_kw = float(np.max(np.abs(balance_residual_kw))) if balance_residual_kw.size else 0.0
+    if max_abs_balance_residual_kw > float(tolerance_kw):
+        raise ValueError(
+            f"Rollout '{controller_label}' violates agent-only power balance by "
+            f"{max_abs_balance_residual_kw:.3f} kW (tolerance={float(tolerance_kw):.3f} kW)."
+        )
+    prepared["agent_power_balance_residual_kw"] = balance_residual_kw.astype(np.float32)
+    return prepared, max_abs_balance_residual_kw
+
+
+def _prepare_compare_net_load_frame(
+    step_df: pd.DataFrame,
+    *,
+    controller_label: str,
+) -> pd.DataFrame:
+    if step_df.empty:
+        raise ValueError(f"Rollout '{controller_label}' has no step_df.")
+    prepared = step_df.copy()
+
+    if not {"agent_raw_net_load_kw", "agent_effective_net_load_kw", "agent_post_action_net_load_kw"}.issubset(
+        prepared.columns
+    ):
+        if not {"base_net_load_total", "net_load_total"}.issubset(prepared.columns):
+            raise ValueError(
+                f"Rollout '{controller_label}' is missing agent net-load columns required for compare plotting."
+            )
+        prepared["agent_raw_net_load_kw"] = prepared["base_net_load_total"].to_numpy(dtype=np.float32)
+        prepared["agent_effective_net_load_kw"] = np.asarray(
+            prepared.get("base_net_load_effective_total", prepared["base_net_load_total"]),
+            dtype=np.float32,
+        )
+        prepared["agent_post_action_net_load_kw"] = prepared["net_load_total"].to_numpy(dtype=np.float32)
+
+    if not {"feeder_raw_net_load_kw", "feeder_effective_net_load_kw", "feeder_post_action_net_load_kw"}.issubset(
+        prepared.columns
+    ):
+        if not {"fixed_load_kw", "fixed_generation_kw"}.issubset(prepared.columns):
+            raise ValueError(
+                f"Rollout '{controller_label}' is missing feeder-total net-load columns required for compare plotting."
+            )
+        fixed_load = prepared["fixed_load_kw"].to_numpy(dtype=np.float32)
+        fixed_generation = prepared["fixed_generation_kw"].to_numpy(dtype=np.float32)
+        prepared["feeder_raw_net_load_kw"] = (
+            prepared["agent_raw_net_load_kw"].to_numpy(dtype=np.float32) + fixed_load - fixed_generation
+        )
+        prepared["feeder_effective_net_load_kw"] = (
+            prepared["agent_effective_net_load_kw"].to_numpy(dtype=np.float32) + fixed_load - fixed_generation
+        )
+        prepared["feeder_post_action_net_load_kw"] = (
+            prepared["agent_post_action_net_load_kw"].to_numpy(dtype=np.float32) + fixed_load - fixed_generation
+        )
+
+    return prepared
+
+
+def _summarize_voltage_step_delta(grid_df: pd.DataFrame) -> tuple[float, float]:
+    if grid_df.empty or "vm_pu" not in grid_df.columns or "bus_id" not in grid_df.columns:
+        return float("nan"), float("nan")
+    sort_columns = _sort_columns(grid_df, "episode_idx", "bus_id", "step", "timestamp")
+    group_columns = [column for column in ["episode_idx", "bus_id"] if column in grid_df.columns]
+    if "bus_id" not in group_columns:
+        group_columns.append("bus_id")
+    ordered = grid_df.sort_values(sort_columns) if sort_columns else grid_df.copy()
+    step_delta = ordered.groupby(group_columns, sort=False)["vm_pu"].diff().abs()
+    finite = step_delta.to_numpy(dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    return float(np.percentile(finite, 95.0)), float(np.max(finite))
+
+
+def _summarize_voltage_spread(grid_df: pd.DataFrame) -> tuple[float, float]:
+    if grid_df.empty or "vm_pu" not in grid_df.columns:
+        return float("nan"), float("nan")
+    group_columns = _step_group_columns(grid_df)
+    if not group_columns:
+        return float("nan"), float("nan")
+    spread = grid_df.groupby(group_columns, sort=False)["vm_pu"].agg(lambda values: float(np.max(values) - np.min(values)))
+    values = spread.to_numpy(dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(values)), float(np.max(values))
+
+
+def _summarize_grouped_ramp(step_df: pd.DataFrame, column: str) -> tuple[float, float]:
+    if step_df.empty or column not in step_df.columns:
+        return float("nan"), float("nan")
+    sort_columns = _sort_columns(step_df, "episode_idx", "step", "timestamp")
+    ordered = step_df.sort_values(sort_columns) if sort_columns else step_df.copy()
+    group_columns = [column_name for column_name in ["episode_idx"] if column_name in ordered.columns]
+    if group_columns:
+        ramp = ordered.groupby(group_columns, sort=False)[column].diff().abs()
+    else:
+        ramp = ordered[column].diff().abs()
+    values = ramp.to_numpy(dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(values)), float(np.max(values))
+
+
+def _collect_compare_optional_missing_fields(rollout: RolloutResult) -> list[str]:
+    missing: list[str] = []
+    if "trafo_loading_pct_max" not in rollout.step_df.columns:
+        missing.append("step_df.trafo_loading_pct_max")
+    if "n_trafo_violations" not in rollout.step_df.columns:
+        missing.append("step_df.n_trafo_violations")
+    if "soc" not in rollout.agent_df.columns:
+        missing.append("agent_df.soc")
+    return missing
 
 
 def _safe_ratio_series(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -2065,9 +2250,20 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
     grid_df = rollout.grid_df.copy()
     summary_df = rollout.summary.copy()
 
-    purchase_cost_total = float(step_df["purchase_cost_total"].sum()) if "purchase_cost_total" in step_df.columns else 0.0
+    purchase_cost_total = (
+        float(step_df["purchase_cost_total"].sum())
+        if "purchase_cost_total" in step_df.columns
+        else float(rollout.meta.get("agent_purchase_cost_eur", float("nan")))
+    )
     export_subsidy_total = (
-        float(step_df["export_subsidy_total"].sum()) if "export_subsidy_total" in step_df.columns else 0.0
+        float(step_df["export_subsidy_total"].sum())
+        if "export_subsidy_total" in step_df.columns
+        else float(rollout.meta.get("agent_export_subsidy_eur", float("nan")))
+    )
+    total_cost_eur = (
+        float(purchase_cost_total - export_subsidy_total)
+        if np.isfinite(purchase_cost_total) and np.isfinite(export_subsidy_total)
+        else float("nan")
     )
     objective_total = float(step_df["objective_total"].sum()) if "objective_total" in step_df.columns else 0.0
     soc_penalty_total = (
@@ -2099,8 +2295,8 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
     v_min = float(rollout.meta.get("v_min_pu", np.nan))
     v_max = float(rollout.meta.get("v_max_pu", np.nan))
     if grid_df.empty or not np.isfinite(v_min) or not np.isfinite(v_max):
-        voltage_violation_bus_points = 0
-        voltage_violation_steps = 0
+        voltage_violation_bus_points = float("nan")
+        voltage_violation_steps = float("nan")
         min_vm_pu = float("nan")
         max_vm_pu = float("nan")
     else:
@@ -2112,11 +2308,42 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         min_vm_pu = float(grid_df["vm_pu"].min())
         max_vm_pu = float(grid_df["vm_pu"].max())
 
+    voltage_step_delta_p95_pu, voltage_step_delta_max_pu = _summarize_voltage_step_delta(grid_df)
+    voltage_spread_mean_pu, voltage_spread_max_pu = _summarize_voltage_spread(grid_df)
+    feeder_netload_ramp_mean_abs_kw, feeder_netload_ramp_max_kw = _summarize_grouped_ramp(
+        step_df,
+        "feeder_post_action_net_load_kw",
+    )
+    trafo_loading_limit_pct = float(
+        rollout.meta.get(
+            "trafo_loading_limit_pct",
+            rollout.meta.get("loading_limit_pct", np.nan),
+        )
+    )
+    trafo_loading_max_pct = (
+        float(step_df["trafo_loading_pct_max"].max()) if "trafo_loading_pct_max" in step_df.columns else float("nan")
+    )
+    if "n_trafo_violations" in step_df.columns:
+        trafo_overload_steps = int((step_df["n_trafo_violations"].astype(float) > 0.0).sum())
+    elif np.isfinite(trafo_loading_max_pct) and np.isfinite(trafo_loading_limit_pct) and "trafo_loading_pct_max" in step_df.columns:
+        trafo_overload_steps = int((step_df["trafo_loading_pct_max"].astype(float) > trafo_loading_limit_pct).sum())
+    else:
+        trafo_overload_steps = float("nan")
+    battery_net_power_kw_mean_abs = (
+        float(np.mean(np.abs(step_df["battery_discharge_total"].astype(float) - step_df["battery_charge_total"].astype(float))))
+        if {"battery_charge_total", "battery_discharge_total"}.issubset(step_df.columns)
+        else float("nan")
+    )
+    missing_optional_fields = _collect_compare_optional_missing_fields(rollout)
+
     metrics = {
         "controller": str(rollout.meta.get("controller", "unknown")),
         "soc_mode": str(rollout.meta.get("soc_mode", "reset")),
         "purchase_cost_total": purchase_cost_total,
+        "purchase_cost_total_eur": purchase_cost_total,
         "export_subsidy_total": export_subsidy_total,
+        "export_subsidy_total_eur": export_subsidy_total,
+        "total_cost_eur": total_cost_eur,
         "objective_total": objective_total,
         "soc_penalty_total": soc_penalty_total,
         "voltage_penalty_total": voltage_penalty_total,
@@ -2132,6 +2359,20 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         "max_vm_pu": max_vm_pu,
         "v_min_pu": v_min,
         "v_max_pu": v_max,
+        "voltage_step_delta_p95_pu": voltage_step_delta_p95_pu,
+        "voltage_step_delta_max_pu": voltage_step_delta_max_pu,
+        "voltage_spread_mean_pu": voltage_spread_mean_pu,
+        "voltage_spread_max_pu": voltage_spread_max_pu,
+        "trafo_overload_steps": trafo_overload_steps,
+        "trafo_loading_max_pct": trafo_loading_max_pct,
+        "feeder_netload_ramp_mean_abs_kw": feeder_netload_ramp_mean_abs_kw,
+        "feeder_netload_ramp_max_kw": feeder_netload_ramp_max_kw,
+        "battery_net_power_kw_mean_abs": battery_net_power_kw_mean_abs,
+        "returned_primary_objective_eur": float(rollout.meta.get("returned_primary_objective_eur", np.nan)),
+        "high_budget_refinement_warn": bool(rollout.meta.get("high_budget_refinement_warn", False)),
+        "formulation_tightening_required": bool(rollout.meta.get("formulation_tightening_required", False)),
+        "physics_refinement_status": str(rollout.meta.get("physics_refinement_status", "")),
+        "missing_optional_compare_fields": ", ".join(missing_optional_fields),
     }
     if not summary_df.empty:
         for row in summary_df.itertuples(index=False):
@@ -2149,7 +2390,10 @@ def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
                 "controller",
                 "soc_mode",
                 "purchase_cost_total",
+                "purchase_cost_total_eur",
                 "export_subsidy_total",
+                "export_subsidy_total_eur",
+                "total_cost_eur",
                 "objective_total",
                 "soc_penalty_total",
                 "voltage_penalty_total",
@@ -2165,9 +2409,142 @@ def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
                 "max_vm_pu",
                 "v_min_pu",
                 "v_max_pu",
+                "voltage_step_delta_p95_pu",
+                "voltage_step_delta_max_pu",
+                "voltage_spread_mean_pu",
+                "voltage_spread_max_pu",
+                "trafo_overload_steps",
+                "trafo_loading_max_pct",
+                "feeder_netload_ramp_mean_abs_kw",
+                "feeder_netload_ramp_max_kw",
+                "battery_net_power_kw_mean_abs",
+                "returned_primary_objective_eur",
+                "high_budget_refinement_warn",
+                "formulation_tightening_required",
+                "physics_refinement_status",
+                "missing_optional_compare_fields",
             ]
         )
     return pd.DataFrame(rows)
+
+
+def build_compare_economic_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    if metrics_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "controller",
+                "purchase_cost_total_eur",
+                "export_subsidy_total_eur",
+                "total_cost_eur",
+            ]
+        )
+    required_columns = [
+        "purchase_cost_total_eur",
+        "export_subsidy_total_eur",
+        "total_cost_eur",
+    ]
+    if metrics_df.loc[:, required_columns].isna().any().any():
+        incomplete = metrics_df.loc[
+            metrics_df.loc[:, required_columns].isna().any(axis=1),
+            "controller",
+        ].astype(str).tolist()
+        raise ValueError(
+            "Compare economic table requires final-dispatch purchase/export/total cost fields. "
+            f"Missing values detected for: {incomplete}"
+        )
+    return metrics_df.loc[
+        :,
+        [
+            "controller",
+            "purchase_cost_total_eur",
+            "export_subsidy_total_eur",
+            "total_cost_eur",
+        ],
+    ].copy()
+
+
+def build_compare_safety_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    if metrics_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "controller",
+                "voltage_violation_steps",
+                "voltage_violation_bus_points",
+                "voltage_step_delta_p95_pu",
+                "voltage_step_delta_max_pu",
+                "voltage_spread_mean_pu",
+                "voltage_spread_max_pu",
+                "trafo_overload_steps",
+                "trafo_loading_max_pct",
+                "feeder_netload_ramp_mean_abs_kw",
+                "feeder_netload_ramp_max_kw",
+            ]
+        )
+    return metrics_df.loc[
+        :,
+        [
+            "controller",
+            "voltage_violation_steps",
+            "voltage_violation_bus_points",
+            "voltage_step_delta_p95_pu",
+            "voltage_step_delta_max_pu",
+            "voltage_spread_mean_pu",
+            "voltage_spread_max_pu",
+            "trafo_overload_steps",
+            "trafo_loading_max_pct",
+            "feeder_netload_ramp_mean_abs_kw",
+            "feeder_netload_ramp_max_kw",
+        ],
+    ].copy()
+
+
+def build_compare_warning_banner(*rollouts: RolloutResult):
+    try:
+        from IPython.display import HTML as _HTML  # type: ignore
+    except ModuleNotFoundError:
+        class _HTML(str):
+            @property
+            def data(self) -> str:
+                return str(self)
+
+            def _repr_html_(self) -> str:
+                return str(self)
+
+    items: list[str] = []
+    for rollout in rollouts:
+        controller = escape(str(rollout.meta.get("controller", "unknown")))
+        if bool(rollout.meta.get("high_budget_refinement_warn", False)):
+            items.append(
+                f"<li><strong>{controller}</strong>: high-budget MISOCP refinement was used; "
+                "compare economics are based on the returned/final dispatch, so the economic comparison should be interpreted with care.</li>"
+            )
+        if bool(rollout.meta.get("formulation_tightening_required", False)):
+            items.append(
+                f"<li><strong>{controller}</strong>: formulation tightening is still required; "
+                "safety and economic conclusions may be unstable.</li>"
+            )
+        missing_optional_fields = _collect_compare_optional_missing_fields(rollout)
+        if missing_optional_fields:
+            joined = ", ".join(escape(field_name) for field_name in missing_optional_fields)
+            items.append(
+                f"<li><strong>{controller}</strong>: optional compare fields missing "
+                f"({joined}); affected table cells will show N/A.</li>"
+            )
+
+    if not items:
+        html = (
+            "<div style='padding:10px 12px;border:1px solid #86efac;background:#f0fdf4;color:#166534;"
+            "border-radius:8px;'>Compare warnings: none.</div>"
+        )
+        return _HTML(html)
+
+    html = (
+        "<div style='padding:10px 12px;border:1px solid #fdba74;background:#fff7ed;color:#9a3412;"
+        "border-radius:8px;'><strong>Compare warnings</strong><ul style='margin:8px 0 0 18px;'>"
+        + "".join(items)
+        + "</ul></div>"
+    )
+    return _HTML(html)
 
 
 def plot_rollout_dashboard(
@@ -2384,28 +2761,10 @@ def plot_power_balance_bars(
     *,
     figsize: tuple[float, float] = (18.0, 4.8),
 ):
-    step_df = rollout.step_df.copy()
-    if step_df.empty:
-        raise ValueError("Rollout is empty; nothing to plot.")
-
-    required_columns = {
-        "load_total",
-        "battery_charge_total",
-        "pv_curtail_total",
-        "grid_import_total",
-        "grid_export_total",
-        "battery_discharge_total",
-    }
-    missing = sorted(required_columns.difference(step_df.columns))
-    if missing:
-        raise ValueError(f"Rollout step_df is missing required power-balance columns: {missing}")
-    if "pv_raw_total" not in step_df.columns:
-        if "pv_effective_total" not in step_df.columns:
-            raise ValueError("Rollout step_df must contain either pv_raw_total or pv_effective_total.")
-        step_df["pv_raw_total"] = (
-            step_df["pv_effective_total"].to_numpy(dtype=np.float32)
-            + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
-        )
+    step_df, _ = _prepare_agent_power_balance_frame(
+        rollout.step_df,
+        controller_label=str(rollout.meta.get("controller", "unknown")),
+    )
 
     figure, axis = plt.subplots(1, 1, figsize=figsize)
     timestamps = step_df["timestamp"]
@@ -2646,6 +3005,78 @@ def plot_voltage_profile_comparison(
     return figure
 
 
+def plot_price_prediction_comparison(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] = (18.0, 4.2),
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    first_step_df = rollouts[0].step_df.copy()
+    if first_step_df.empty or not {"timestamp", "price", "price_pred"}.issubset(first_step_df.columns):
+        raise ValueError("Rollouts must contain timestamp, price, and price_pred columns.")
+
+    figure, axis = plt.subplots(1, 1, figsize=figsize)
+    axis.plot(
+        first_step_df["timestamp"],
+        first_step_df["price"],
+        color="#111827",
+        linewidth=1.8,
+        label="Price",
+    )
+
+    shared_prediction = True
+    first_price_adder = float(rollouts[0].meta.get("import_price_adder_eur_per_kwh", 0.0))
+    reference_pred = first_step_df["price_pred"].to_numpy(dtype=np.float64) + first_price_adder
+    for rollout in rollouts[1:]:
+        step_df = rollout.step_df.copy()
+        if step_df.empty or "price_pred" not in step_df.columns:
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing price_pred for compare plotting."
+            )
+        price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
+        shared_prediction = (
+            shared_prediction
+            and step_df["price_pred"].shape == first_step_df["price_pred"].shape
+            and np.allclose(
+                step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder,
+                reference_pred,
+                equal_nan=True,
+            )
+        )
+
+    if shared_prediction:
+        axis.plot(
+            first_step_df["timestamp"],
+            first_step_df["price_pred"].to_numpy(dtype=np.float64) + first_price_adder,
+            color="#dc2626",
+            linewidth=1.5,
+            linestyle="--",
+            label="Adjusted price pred (shared)",
+        )
+    else:
+        palette = ["#dc2626", "#2563eb", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+        for color_idx, rollout in enumerate(rollouts):
+            step_df = rollout.step_df.copy()
+            price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
+            axis.plot(
+                step_df["timestamp"],
+                step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder,
+                color=palette[color_idx % len(palette)],
+                linewidth=1.4,
+                linestyle="--",
+                label=f"{rollout.meta.get('controller', 'unknown')} adjusted pred",
+            )
+
+    axis.set_title("Price And Adjusted Forecast")
+    axis.set_ylabel("EUR/kWh")
+    axis.set_xlabel("Timestamp")
+    axis.grid(True, alpha=0.25)
+    axis.legend(loc="upper right", ncol=2)
+    figure.tight_layout()
+    return figure
+
+
 def plot_net_load_comparison(
     *rollouts: RolloutResult,
     figsize: tuple[float, float] | None = None,
@@ -2656,94 +3087,84 @@ def plot_net_load_comparison(
     n_rows = len(rollouts)
     figure, axes = plt.subplots(
         n_rows,
-        2,
-        figsize=figsize or (22.0, max(3.5 * n_rows, 5.4)),
+        3,
+        figsize=figsize or (30.0, max(3.8 * n_rows, 5.8)),
         sharex=False,
     )
     axes = np.asarray(axes, dtype=object)
     if axes.ndim == 1:
-        axes = axes.reshape(1, 2)
+        axes = axes.reshape(1, 3)
 
     for row_axes, rollout in zip(axes, rollouts, strict=False):
-        feeder_axis, agent_axis = row_axes.tolist()
-        step_df = rollout.step_df.copy()
-        if step_df.empty:
-            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
-
-        if {"agent_raw_net_load_kw", "agent_effective_net_load_kw", "agent_post_action_net_load_kw"}.issubset(step_df.columns):
-            agent_raw = step_df["agent_raw_net_load_kw"].to_numpy(dtype=np.float32)
-            agent_effective = step_df["agent_effective_net_load_kw"].to_numpy(dtype=np.float32)
-            agent_post_action = step_df["agent_post_action_net_load_kw"].to_numpy(dtype=np.float32)
-        else:
-            agent_raw = step_df["base_net_load_total"].to_numpy(dtype=np.float32)
-            agent_effective = np.asarray(step_df.get("base_net_load_effective_total", step_df["base_net_load_total"]), dtype=np.float32)
-            agent_post_action = step_df["net_load_total"].to_numpy(dtype=np.float32)
-
-        has_feeder_total = {"feeder_raw_net_load_kw", "feeder_effective_net_load_kw", "feeder_post_action_net_load_kw"}.issubset(step_df.columns)
-        if has_feeder_total:
+        feeder_axis, agent_axis, duration_axis = row_axes.tolist()
+        step_df = _prepare_compare_net_load_frame(
+            rollout.step_df,
+            controller_label=str(rollout.meta.get("controller", "unknown")),
+        )
+        agent_raw = step_df["agent_raw_net_load_kw"].to_numpy(dtype=np.float32)
+        agent_effective = step_df["agent_effective_net_load_kw"].to_numpy(dtype=np.float32)
+        agent_post_action = step_df["agent_post_action_net_load_kw"].to_numpy(dtype=np.float32)
+        feeder_axis.plot(
+            step_df["timestamp"],
+            step_df["feeder_raw_net_load_kw"],
+            color="#111827",
+            linewidth=1.6,
+            label="Feeder raw net load",
+        )
+        feeder_axis.plot(
+            step_df["timestamp"],
+            step_df["feeder_effective_net_load_kw"],
+            color="#16a34a",
+            linewidth=1.4,
+            linestyle="-.",
+            label="Feeder post-curtail net load",
+        )
+        feeder_axis.plot(
+            step_df["timestamp"],
+            step_df["feeder_post_action_net_load_kw"],
+            color="#2563eb",
+            linewidth=1.5,
+            linestyle="--",
+            label="Feeder post-action net load",
+        )
+        if "root_net_exchange_kw" in step_df.columns:
             feeder_axis.plot(
                 step_df["timestamp"],
-                step_df["feeder_raw_net_load_kw"],
-                color="#111827",
-                linewidth=1.6,
-                label="Feeder raw net load",
+                step_df["root_net_exchange_kw"],
+                color="#7c3aed",
+                linewidth=1.7,
+                label="Root net exchange",
             )
+        elif "pp_root_p_kw" in step_df.columns:
             feeder_axis.plot(
                 step_df["timestamp"],
-                step_df["feeder_effective_net_load_kw"],
-                color="#16a34a",
-                linewidth=1.4,
-                linestyle="-.",
-                label="Feeder post-curtail net load",
+                step_df["pp_root_p_kw"],
+                color="#7c3aed",
+                linewidth=1.7,
+                label="Pandapower root exchange",
             )
-            feeder_axis.plot(
-                step_df["timestamp"],
-                step_df["feeder_post_action_net_load_kw"],
-                color="#2563eb",
-                linewidth=1.5,
-                linestyle="--",
-                label="Feeder post-action net load",
-            )
-            if "root_net_exchange_kw" in step_df.columns:
-                feeder_axis.plot(
-                    step_df["timestamp"],
-                    step_df["root_net_exchange_kw"],
-                    color="#7c3aed",
-                    linewidth=1.7,
-                    label="Root net exchange",
+        trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
+        if trafo_limit_kw is not None:
+            trafo_limit_value = float(trafo_limit_kw)
+            if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
+                feeder_axis.axhline(
+                    trafo_limit_value,
+                    color="#dc2626",
+                    linestyle=":",
+                    linewidth=1.2,
+                    label=f"Transformer S-limit ref (+P view) ({trafo_limit_value:.1f} kW)",
                 )
-            elif "pp_root_p_kw" in step_df.columns:
-                feeder_axis.plot(
-                    step_df["timestamp"],
-                    step_df["pp_root_p_kw"],
-                    color="#7c3aed",
-                    linewidth=1.7,
-                    label="Pandapower root exchange",
+                feeder_axis.axhline(
+                    -trafo_limit_value,
+                    color="#dc2626",
+                    linestyle=":",
+                    linewidth=1.2,
+                    label=f"Transformer S-limit ref (-P view) ({trafo_limit_value:.1f} kW)",
                 )
-            trafo_limit_kw = rollout.meta.get("trafo_limit_kw")
-            if trafo_limit_kw is not None:
-                trafo_limit_value = float(trafo_limit_kw)
-                if np.isfinite(trafo_limit_value) and trafo_limit_value > 0.0:
-                    feeder_axis.axhline(
-                        trafo_limit_value,
-                        color="#dc2626",
-                        linestyle=":",
-                        linewidth=1.2,
-                        label=f"Transformer S-limit ref (+P view) ({trafo_limit_value:.1f} kW)",
-                    )
-                    feeder_axis.axhline(
-                        -trafo_limit_value,
-                        color="#dc2626",
-                        linestyle=":",
-                        linewidth=1.2,
-                        label=f"Transformer S-limit ref (-P view) ({trafo_limit_value:.1f} kW)",
-                    )
-            feeder_axis.set_ylabel("kW")
-            feeder_axis.set_title(f"{rollout.meta['controller']} - feeder total")
-            feeder_axis.grid(True, alpha=0.25)
-            feeder_axis.legend(loc="upper right")
-        else:
-            feeder_axis.set_axis_off()
+        feeder_axis.set_ylabel("kW")
+        feeder_axis.set_title(f"{rollout.meta['controller']} - feeder total")
+        feeder_axis.grid(True, alpha=0.25)
+        feeder_axis.legend(loc="upper right")
 
         agent_axis.plot(
             step_df["timestamp"],
@@ -2769,15 +3190,42 @@ def plot_net_load_comparison(
             label="Agent post-action net load",
         )
         agent_axis.set_ylabel("kW")
-        if has_feeder_total:
-            agent_axis.set_title(f"{rollout.meta['controller']} - agent-only aggregate")
-        else:
-            agent_axis.set_title(f"{rollout.meta['controller']} - agent-only (feeder-total unavailable)")
+        agent_axis.set_title(f"{rollout.meta['controller']} - agent-only aggregate")
         agent_axis.grid(True, alpha=0.25)
         agent_axis.legend(loc="upper right")
 
+        duration_rank = np.arange(len(step_df), dtype=np.int32)
+        duration_axis.plot(
+            duration_rank,
+            np.sort(step_df["feeder_raw_net_load_kw"].to_numpy(dtype=np.float32))[::-1],
+            color="#111827",
+            linewidth=1.4,
+            label="Feeder raw duration",
+        )
+        duration_axis.plot(
+            duration_rank,
+            np.sort(step_df["feeder_post_action_net_load_kw"].to_numpy(dtype=np.float32))[::-1],
+            color="#2563eb",
+            linewidth=1.6,
+            label="Feeder post-action duration",
+        )
+        if "root_net_exchange_kw" in step_df.columns:
+            duration_axis.plot(
+                duration_rank,
+                np.sort(step_df["root_net_exchange_kw"].to_numpy(dtype=np.float32))[::-1],
+                color="#7c3aed",
+                linewidth=1.4,
+                linestyle="--",
+                label="Root exchange duration",
+            )
+        duration_axis.set_ylabel("kW")
+        duration_axis.set_title(f"{rollout.meta['controller']} - feeder duration curve")
+        duration_axis.grid(True, alpha=0.25)
+        duration_axis.legend(loc="upper right")
+
     axes[-1, 0].set_xlabel("Timestamp")
     axes[-1, 1].set_xlabel("Timestamp")
+    axes[-1, 2].set_xlabel("Sorted interval")
     figure.tight_layout()
     return figure
 
@@ -2810,73 +3258,140 @@ def plot_power_balance_comparison(
     ]
 
     for axis_idx, (axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
-        step_df = rollout.step_df.copy()
-        if step_df.empty:
-            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
-        required_columns = {
-            "load_total",
-            "battery_charge_total",
-            "pv_curtail_total",
-            "grid_import_total",
-            "grid_export_total",
-            "battery_discharge_total",
-        }
-        missing = sorted(required_columns.difference(step_df.columns))
-        if missing:
-            raise ValueError(
-                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing required power-balance columns: {missing}"
-            )
-        if "pv_raw_total" not in step_df.columns:
-            if "pv_effective_total" not in step_df.columns:
-                raise ValueError(
-                    f"Rollout '{rollout.meta.get('controller', 'unknown')}' must contain either pv_raw_total or pv_effective_total."
-                )
-            step_df["pv_raw_total"] = (
-                step_df["pv_effective_total"].to_numpy(dtype=np.float32)
-                + step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
-            )
+        step_df, max_abs_balance_residual_kw = _prepare_agent_power_balance_frame(
+            rollout.step_df,
+            controller_label=str(rollout.meta.get("controller", "unknown")),
+        )
 
         timestamps = step_df["timestamp"].to_numpy()
-        positive_values = [step_df[column].to_numpy(dtype=np.float32) for column, _, _ in positive_specs]
-        negative_values = [(-step_df[column].to_numpy(dtype=np.float32)) for column, _, _ in negative_specs]
-        positive_colors = [color for _, _, color in positive_specs]
-        negative_colors = [color for _, _, color in negative_specs]
-        positive_labels = [label if axis_idx == 0 else None for _, label, _ in positive_specs]
-        negative_labels = [label if axis_idx == 0 else None for _, label, _ in negative_specs]
+        positive_bottom = np.zeros(len(step_df), dtype=np.float32)
+        for column, label, color in positive_specs:
+            values = step_df[column].to_numpy(dtype=np.float32)
+            extra_kwargs = (
+                {"hatch": "//", "edgecolor": "#dc2626", "linewidth": 1.0}
+                if column == "pv_curtail_total"
+                else {}
+            )
+            axis.bar(
+                timestamps,
+                values,
+                width=0.008,
+                bottom=positive_bottom,
+                color=color,
+                alpha=0.78,
+                label=label if axis_idx == 0 else None,
+                **extra_kwargs,
+            )
+            positive_bottom = positive_bottom + values
 
-        axis.stackplot(
-            timestamps,
-            *positive_values,
-            colors=positive_colors,
-            labels=positive_labels,
-            alpha=0.78,
-            zorder=2,
-        )
-        axis.stackplot(
-            timestamps,
-            *negative_values,
-            colors=negative_colors,
-            labels=negative_labels,
-            alpha=0.78,
-            zorder=2,
-        )
-
-        positive_cumulative = np.cumsum(np.vstack(positive_values), axis=0)
-        curtail_top = positive_cumulative[-1]
-        axis.plot(
-            timestamps,
-            curtail_top,
-            color="#dc2626",
-            linewidth=0.9,
-            alpha=0.9,
-            zorder=3,
-        )
+        negative_bottom = np.zeros(len(step_df), dtype=np.float32)
+        for column, label, color in negative_specs:
+            values = step_df[column].to_numpy(dtype=np.float32)
+            axis.bar(
+                timestamps,
+                -values,
+                width=0.008,
+                bottom=negative_bottom,
+                color=color,
+                alpha=0.78,
+                label=label if axis_idx == 0 else None,
+            )
+            negative_bottom = negative_bottom - values
         axis.axhline(0.0, color="#111827", linewidth=1.0)
         axis.set_ylabel("kW")
-        axis.set_title(str(rollout.meta["controller"]))
+        axis.set_title(
+            f"{rollout.meta['controller']} - agent-only balance (residual<={max_abs_balance_residual_kw:.3f} kW)"
+        )
         axis.grid(True, axis="y", alpha=0.25)
         if axis_idx == 0:
             axis.legend(loc="upper right", ncol=4)
+
+    axes[-1].set_xlabel("Timestamp")
+    figure.tight_layout()
+    return figure
+
+
+def plot_battery_power_and_soc_comparison(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] | None = None,
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    n_rows = len(rollouts) * 2
+    figure, axes = plt.subplots(
+        n_rows,
+        1,
+        figsize=figsize or (18.0, max(2.8 * n_rows, 6.0)),
+        sharex=False,
+    )
+    axes = np.atleast_1d(axes)
+
+    for rollout_idx, rollout in enumerate(rollouts):
+        power_axis = axes[2 * rollout_idx]
+        soc_axis = axes[2 * rollout_idx + 1]
+        step_df = rollout.step_df.copy()
+        agent_df = rollout.agent_df.copy()
+        if step_df.empty:
+            raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no step_df.")
+        if not {"battery_charge_total", "battery_discharge_total", "timestamp"}.issubset(step_df.columns):
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing battery power columns required for compare plotting."
+            )
+        step_df = step_df.copy()
+        step_df["battery_net_power_kw"] = (
+            step_df["battery_discharge_total"].to_numpy(dtype=np.float32)
+            - step_df["battery_charge_total"].to_numpy(dtype=np.float32)
+        )
+        power_axis.plot(
+            step_df["timestamp"],
+            step_df["battery_net_power_kw"],
+            color="#2563eb",
+            linewidth=1.6,
+            label="Battery net power (+ discharge / - charge)",
+        )
+        power_axis.axhline(0.0, color="#111827", linewidth=1.0)
+        power_axis.set_ylabel("kW")
+        power_axis.set_title(str(rollout.meta["controller"]))
+        power_axis.grid(True, alpha=0.25)
+        power_axis.legend(loc="upper right")
+
+        if agent_df.empty or "soc" not in agent_df.columns:
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing agent_df.soc required for compare plotting."
+            )
+        group_columns = [column for column in ["episode_idx", "step", "timestamp"] if column in agent_df.columns]
+        if not group_columns:
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing grouping columns required to aggregate SoC."
+            )
+        soc_summary = (
+            agent_df.groupby(group_columns, as_index=False)
+            .agg(
+                mean=("soc", "mean"),
+                min=("soc", "min"),
+                max=("soc", "max"),
+            )
+        )
+        soc_axis.plot(
+            soc_summary["timestamp"],
+            soc_summary["mean"],
+            color="#111827",
+            linewidth=1.5,
+            label="Mean SoC",
+        )
+        soc_axis.fill_between(
+            soc_summary["timestamp"].to_numpy(),
+            soc_summary["min"].to_numpy(dtype=np.float32),
+            soc_summary["max"].to_numpy(dtype=np.float32),
+            color="#cbd5e1",
+            alpha=0.45,
+            label="Min/Max SoC",
+        )
+        soc_axis.set_ylabel("SoC")
+        soc_axis.set_ylim(0.0, 1.0)
+        soc_axis.grid(True, alpha=0.25)
+        soc_axis.legend(loc="upper right")
 
     axes[-1].set_xlabel("Timestamp")
     figure.tight_layout()
@@ -2942,6 +3457,9 @@ __all__ = [
     "RolloutResult",
     "apply_notebook_experiment_settings",
     "build_comparison_cfg",
+    "build_compare_economic_table",
+    "build_compare_safety_table",
+    "build_compare_warning_banner",
     "collect_madrl_rollout",
     "collect_controller_rollout",
     "collect_global_full_horizon_rollout",
@@ -2957,8 +3475,10 @@ __all__ = [
     "plot_purchase_cost_comparison",
     "plot_operating_cost_comparison",
     "plot_net_load_comparison",
+    "plot_price_prediction_comparison",
     "plot_power_balance_bars",
     "plot_power_balance_comparison",
+    "plot_battery_power_and_soc_comparison",
     "plot_global_misocp_validation",
     "plot_rollout_comparison_dashboard",
     "plot_rollout_dashboard",

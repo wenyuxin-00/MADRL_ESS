@@ -13,6 +13,9 @@ from scripts.utils.grid_notebook_workflow import (
     PERFECT_PREDICTION_MODE,
     RolloutResult,
     apply_notebook_experiment_settings,
+    build_compare_economic_table,
+    build_compare_safety_table,
+    build_compare_warning_banner,
     build_trafo_diagnostic_table,
     compare_rollout_metrics,
     collect_mpc_rollout,
@@ -21,6 +24,8 @@ from scripts.utils.grid_notebook_workflow import (
     collect_global_mpc_rollout,
     load_training_run_bundle,
     normalize_date_input,
+    plot_battery_power_and_soc_comparison,
+    plot_price_prediction_comparison,
     plot_net_load_comparison,
     plot_global_misocp_validation,
     plot_power_balance_bars,
@@ -327,6 +332,14 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         "base_net_load_total",
         "base_net_load_effective_total",
         "net_load_total",
+        "agent_raw_net_load_kw",
+        "agent_effective_net_load_kw",
+        "agent_post_action_net_load_kw",
+        "fixed_load_kw",
+        "fixed_generation_kw",
+        "feeder_raw_net_load_kw",
+        "feeder_effective_net_load_kw",
+        "feeder_post_action_net_load_kw",
         "pv_raw_total",
         "pv_effective_total",
         "pv_curtail_total",
@@ -362,6 +375,9 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
     assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
     assert rollout.meta["v_max_pu"] == cfg.grid.v_max_pu
     assert rollout.meta["trafo_loading_limit_pct"] == cfg.grid.line_max_loading_pct
+    assert rollout.meta["import_price_adder_eur_per_kwh"] == pytest.approx(
+        cfg.reward.import_price_adder_eur_per_kwh
+    )
 
     aggregated = (
         rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["base_net_load", "net_load"]]
@@ -653,6 +669,9 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "line_penalty_total": [0.0, 0.0],
                 "trafo_penalty_total": [0.0, 0.0],
                 "objective_total": [0.9, 1.0],
+                "feeder_post_action_net_load_kw": [1.2, 1.8],
+                "trafo_loading_pct_max": [80.0, 105.0],
+                "n_trafo_violations": [0, 1],
                 "episode_idx": [0, 0],
                 "step": [0, 1],
             }
@@ -706,6 +725,9 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "agent_bus_ids": [2],
                 "v_min_pu": 0.95,
                 "v_max_pu": 1.05,
+                "trafo_loading_limit_pct": 100.0,
+                "high_budget_refinement_warn": controller == "MPC (forecast_eval)",
+                "returned_primary_objective_eur": 1.9,
             },
         )
 
@@ -724,7 +746,10 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "controller",
         "soc_mode",
         "purchase_cost_total",
+        "purchase_cost_total_eur",
         "export_subsidy_total",
+        "export_subsidy_total_eur",
+        "total_cost_eur",
         "objective_total",
         "voltage_penalty_total",
         "trafo_penalty_total",
@@ -737,8 +762,76 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "voltage_violation_bus_points",
         "min_vm_pu",
         "max_vm_pu",
+        "voltage_step_delta_p95_pu",
+        "voltage_step_delta_max_pu",
+        "voltage_spread_mean_pu",
+        "voltage_spread_max_pu",
+        "trafo_overload_steps",
+        "trafo_loading_max_pct",
+        "feeder_netload_ramp_mean_abs_kw",
+        "feeder_netload_ramp_max_kw",
+        "returned_primary_objective_eur",
+        "high_budget_refinement_warn",
     }.issubset(metrics_df.columns)
     assert metrics_df.loc[metrics_df["controller"] == "MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
+    assert metrics_df.loc[metrics_df["controller"] == "MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
+
+
+def test_build_compare_tables_and_warning_banner_uses_final_dispatch_costs():
+    metrics_df = pd.DataFrame(
+        {
+            "controller": ["Global MISOCP", "MADRL"],
+            "purchase_cost_total_eur": [2.0, 1.5],
+            "export_subsidy_total_eur": [0.4, 0.2],
+            "total_cost_eur": [1.6, 1.3],
+            "voltage_violation_steps": [1, 0],
+            "voltage_violation_bus_points": [2, 0],
+            "voltage_step_delta_p95_pu": [0.01, 0.02],
+            "voltage_step_delta_max_pu": [0.03, 0.04],
+            "voltage_spread_mean_pu": [0.02, 0.03],
+            "voltage_spread_max_pu": [0.05, 0.06],
+            "trafo_overload_steps": [1, 0],
+            "trafo_loading_max_pct": [101.0, 92.0],
+            "feeder_netload_ramp_mean_abs_kw": [3.0, 2.5],
+            "feeder_netload_ramp_max_kw": [8.0, 6.5],
+        }
+    )
+    economic_df = build_compare_economic_table(metrics_df)
+    safety_df = build_compare_safety_table(metrics_df)
+
+    assert list(economic_df.columns) == [
+        "controller",
+        "purchase_cost_total_eur",
+        "export_subsidy_total_eur",
+        "total_cost_eur",
+    ]
+    assert list(safety_df.columns) == [
+        "controller",
+        "voltage_violation_steps",
+        "voltage_violation_bus_points",
+        "voltage_step_delta_p95_pu",
+        "voltage_step_delta_max_pu",
+        "voltage_spread_mean_pu",
+        "voltage_spread_max_pu",
+        "trafo_overload_steps",
+        "trafo_loading_max_pct",
+        "feeder_netload_ramp_mean_abs_kw",
+        "feeder_netload_ramp_max_kw",
+    ]
+
+    rollout = RolloutResult(
+        step_df=pd.DataFrame({"trafo_loading_pct_max": [100.0], "n_trafo_violations": [0]}),
+        agent_df=pd.DataFrame({"soc": [0.5]}),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Global MISOCP",
+            "high_budget_refinement_warn": True,
+            "formulation_tightening_required": False,
+        },
+    )
+    banner = build_compare_warning_banner(rollout)
+    assert "returned/final dispatch" in banner.data
 
 
 def test_plot_rollout_comparison_dashboard_accepts_three_rollouts():
@@ -915,6 +1008,8 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
+                    "price": [0.10, 0.20],
+                    "price_pred": [0.11, 0.21],
                     "base_net_load_total": [2.0 + offset, 2.1 + offset],
                     "base_net_load_effective_total": [1.8 + offset, 1.9 + offset],
                     "net_load_total": [1.7 + offset, 1.8 + offset],
@@ -931,12 +1026,22 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
                     "battery_charge_total": [0.3, 0.1],
                     "pv_effective_total": [1.1, 1.0],
                     "pv_curtail_total": [0.1, 0.1],
-                    "grid_import_total": [0.9 + offset, 1.0 + offset],
+                    "grid_import_total": [1.6 + offset, 1.4 + offset],
                     "grid_export_total": [0.0, 0.0],
                     "battery_discharge_total": [0.0, 0.2],
                 }
             ),
-            agent_df=pd.DataFrame(),
+            agent_df=pd.DataFrame(
+                {
+                    "controller": [label] * 4,
+                    "episode_idx": [0, 0, 0, 0],
+                    "step": [0, 0, 1, 1],
+                    "timestamp": list(timestamps.repeat(2)),
+                    "agent_id": [0, 1, 0, 1],
+                    "agent_profile": ["A", "B", "A", "B"],
+                    "soc": [0.4, 0.5, 0.45, 0.55],
+                }
+            ),
             grid_df=pd.DataFrame(
                 {
                     "controller": [label] * 4,
@@ -959,13 +1064,94 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
         )
 
     rollouts = (_rollout("A", 0.0), _rollout("B", 0.1), _rollout("C", 0.2))
+    price_fig = plot_price_prediction_comparison(*rollouts)
     voltage_fig = plot_voltage_profile_comparison(*rollouts)
     net_load_fig = plot_net_load_comparison(*rollouts)
     power_fig = plot_power_balance_comparison(*rollouts)
+    battery_fig = plot_battery_power_and_soc_comparison(*rollouts)
 
+    assert len(price_fig.axes) == 1
+    assert len(price_fig.axes[0].lines) == 2
     assert len(voltage_fig.axes) == 3
-    assert len(net_load_fig.axes) == 6
+    assert len(net_load_fig.axes) == 9
     assert len(power_fig.axes) == 3
+    assert all(len(axis.patches) > 0 for axis in power_fig.axes)
+    assert len(battery_fig.axes) == 6
+
+
+def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_components():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "agent_raw_net_load_kw": [2.0, 2.2],
+                "agent_effective_net_load_kw": [1.8, 2.0],
+                "agent_post_action_net_load_kw": [1.5, 1.7],
+                "fixed_load_kw": [0.5, 0.5],
+                "fixed_generation_kw": [0.1, 0.1],
+                "root_net_exchange_kw": [1.9, 2.0],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Legacy MPC", "trafo_limit_kw": 4.0},
+    )
+
+    figure = plot_net_load_comparison(rollout)
+
+    assert len(figure.axes) == 3
+    assert len(figure.axes[0].lines) >= 3
+
+
+def test_plot_net_load_comparison_raises_when_feeder_columns_cannot_be_derived():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "base_net_load_total": [2.0, 2.2],
+                "net_load_total": [1.5, 1.7],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Broken rollout"},
+    )
+
+    with pytest.raises(ValueError, match="feeder-total net-load columns required for compare plotting"):
+        plot_net_load_comparison(rollout)
+
+
+def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_shared_line():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+
+    def _rollout(label: str) -> RolloutResult:
+        return RolloutResult(
+            step_df=pd.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "price": [0.30, 0.40],
+                    "price_pred": [0.10, 0.20],
+                }
+            ),
+            agent_df=pd.DataFrame(),
+            grid_df=pd.DataFrame(),
+            summary=pd.DataFrame(),
+            meta={
+                "controller": label,
+                "import_price_adder_eur_per_kwh": 0.2,
+            },
+        )
+
+    figure = plot_price_prediction_comparison(_rollout("A"), _rollout("B"))
+
+    assert len(figure.axes) == 1
+    assert len(figure.axes[0].lines) == 2
+    predicted_line = figure.axes[0].lines[1]
+    assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
 
 
 def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp_path):

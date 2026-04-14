@@ -24,6 +24,7 @@ def _make_global_mpc_cfg(tmp_path, label: str):
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.forecast.type = "perfect"
     cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.mpc.physics_refinement_mode = "none"
     return cfg
 
 

@@ -12,9 +12,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-_PLAN_PACKAGE_VERSION = 7
+_PLAN_PACKAGE_VERSION = 11
 _CFG_FLOAT_RTOL = 1e-6
 _CFG_FLOAT_ATOL = 1e-6
+_SOC_SLACK_EPS = 1e-6
+_SOC_SLACK_TIGHT_P95_THRESHOLD = 1e-4
 
 
 def expand_episode_indices(full_input: Any) -> np.ndarray:
@@ -171,6 +173,66 @@ def _build_cfg_snapshot_from_cfg(cfg: Any) -> dict[str, Any]:
         "branch_current_tiebreaker_eur_per_pu_step": float(
             getattr(getattr(cfg, "mpc", None), "branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
+        "physics_refinement_mode": str(getattr(getattr(cfg, "mpc", None), "physics_refinement_mode", "none")),
+        "physics_refinement_slack_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_ratio", 2e-2)
+        ),
+        "physics_refinement_slack_abs_floor_eur": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": [
+            float(value)
+            for value in list(
+                getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+            )
+        ],
+        "physics_refinement_slack_abs_floor_schedule_eur": [
+            float(value)
+            for value in list(
+                getattr(
+                    getattr(cfg, "mpc", None),
+                    "physics_refinement_slack_abs_floor_schedule_eur",
+                    [2.0, 5.0],
+                )
+            )
+        ],
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_aggressive_third_tier_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        "physics_refinement_aggressive_third_tier_abs_floor_eur": float(
+            getattr(
+                getattr(cfg, "mpc", None),
+                "physics_refinement_aggressive_third_tier_abs_floor_eur",
+                10.0,
+            )
+        ),
+        "physics_refinement_cap_utilization_trigger": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        "physics_refinement_branch_l_gap_ratio_trigger": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        "physics_refinement_time_limit_sec": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_time_limit_sec", 20.0)
+        ),
+        "physics_refinement_total_time_limit_sec": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "physics_refinement_target_mean_solver_gap_kw": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        "physics_refinement_target_max_solver_gap_kw": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        "physics_refinement_target_export_gap_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        "physics_refinement_use_full_start": bool(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_use_full_start", True)
+        ),
     }
 
 
@@ -191,6 +253,47 @@ def _build_problem_snapshot(problem: Any) -> dict[str, Any]:
         "branch_current_tiebreaker_eur_per_pu_step": float(
             getattr(problem, "branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
+        "physics_refinement_mode": str(getattr(problem, "physics_refinement_mode", "none")),
+        "physics_refinement_slack_ratio": float(getattr(problem, "physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            getattr(problem, "physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": [
+            float(value) for value in list(getattr(problem, "physics_refinement_slack_ratio_schedule", (2e-2, 5e-2)))
+        ],
+        "physics_refinement_slack_abs_floor_schedule_eur": [
+            float(value)
+            for value in list(getattr(problem, "physics_refinement_slack_abs_floor_schedule_eur", (2.0, 5.0)))
+        ],
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            getattr(problem, "physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_aggressive_third_tier_ratio": float(
+            getattr(problem, "physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        "physics_refinement_aggressive_third_tier_abs_floor_eur": float(
+            getattr(problem, "physics_refinement_aggressive_third_tier_abs_floor_eur", 10.0)
+        ),
+        "physics_refinement_cap_utilization_trigger": float(
+            getattr(problem, "physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        "physics_refinement_branch_l_gap_ratio_trigger": float(
+            getattr(problem, "physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        "physics_refinement_time_limit_sec": float(getattr(problem, "physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            getattr(problem, "physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "physics_refinement_target_mean_solver_gap_kw": float(
+            getattr(problem, "physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        "physics_refinement_target_max_solver_gap_kw": float(
+            getattr(problem, "physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        "physics_refinement_target_export_gap_ratio": float(
+            getattr(problem, "physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        "physics_refinement_use_full_start": bool(getattr(problem, "physics_refinement_use_full_start", True)),
         "agent_q_base_zeroed": bool(
             np.allclose(
                 np.asarray(problem.network.q_base_mvar, dtype=np.float32)[
@@ -244,6 +347,48 @@ def _build_problem_view(problem_snapshot: dict[str, Any]) -> SimpleNamespace:
         branch_current_tiebreaker_eur_per_pu_step=float(
             problem_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
+        physics_refinement_mode=str(problem_snapshot.get("physics_refinement_mode", "none")),
+        physics_refinement_slack_ratio=float(problem_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        physics_refinement_slack_abs_floor_eur=float(
+            problem_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        physics_refinement_slack_ratio_schedule=[
+            float(value)
+            for value in list(problem_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2]))
+        ],
+        physics_refinement_slack_abs_floor_schedule_eur=[
+            float(value)
+            for value in list(problem_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0]))
+        ],
+        physics_refinement_enable_aggressive_third_tier=bool(
+            problem_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        physics_refinement_aggressive_third_tier_ratio=float(
+            problem_snapshot.get("physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        physics_refinement_aggressive_third_tier_abs_floor_eur=float(
+            problem_snapshot.get("physics_refinement_aggressive_third_tier_abs_floor_eur", 10.0)
+        ),
+        physics_refinement_cap_utilization_trigger=float(
+            problem_snapshot.get("physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        physics_refinement_branch_l_gap_ratio_trigger=float(
+            problem_snapshot.get("physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        physics_refinement_time_limit_sec=float(problem_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        physics_refinement_total_time_limit_sec=float(
+            problem_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        physics_refinement_target_mean_solver_gap_kw=float(
+            problem_snapshot.get("physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        physics_refinement_target_max_solver_gap_kw=float(
+            problem_snapshot.get("physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        physics_refinement_target_export_gap_ratio=float(
+            problem_snapshot.get("physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        physics_refinement_use_full_start=bool(problem_snapshot.get("physics_refinement_use_full_start", True)),
     )
 
 
@@ -312,8 +457,35 @@ def _assert_cfg_snapshot_matches(expected_snapshot: dict[str, Any], actual_snaps
         "export_subsidy_eur_per_kwh",
         "import_price_adder_eur_per_kwh",
         "branch_current_tiebreaker_eur_per_pu_step",
+        "physics_refinement_slack_ratio",
+        "physics_refinement_slack_abs_floor_eur",
+        "physics_refinement_aggressive_third_tier_ratio",
+        "physics_refinement_aggressive_third_tier_abs_floor_eur",
+        "physics_refinement_cap_utilization_trigger",
+        "physics_refinement_branch_l_gap_ratio_trigger",
+        "physics_refinement_time_limit_sec",
+        "physics_refinement_total_time_limit_sec",
+        "physics_refinement_target_mean_solver_gap_kw",
+        "physics_refinement_target_max_solver_gap_kw",
+        "physics_refinement_target_export_gap_ratio",
     ):
         _assert_float_match(field_name, expected_snapshot[field_name], actual_snapshot[field_name])
+    _assert_float_sequence_match(
+        "physics_refinement_slack_ratio_schedule",
+        expected_snapshot["physics_refinement_slack_ratio_schedule"],
+        actual_snapshot["physics_refinement_slack_ratio_schedule"],
+    )
+    _assert_float_sequence_match(
+        "physics_refinement_slack_abs_floor_schedule_eur",
+        expected_snapshot["physics_refinement_slack_abs_floor_schedule_eur"],
+        actual_snapshot["physics_refinement_slack_abs_floor_schedule_eur"],
+    )
+    for field_name in (
+        "physics_refinement_mode",
+        "physics_refinement_enable_aggressive_third_tier",
+        "physics_refinement_use_full_start",
+    ):
+        _assert_strict_match(field_name, expected_snapshot[field_name], actual_snapshot[field_name])
 
 
 def _assert_full_input_structure_matches(expected_full_input: Any, actual_full_input: Any) -> None:
@@ -455,6 +627,72 @@ def format_solver_summary(
             "economics_scope": "agent_only",
             "physical_tiebreaker_eur": float(getattr(result, "physical_tiebreaker_eur", float("nan"))),
             "physical_tiebreaker_weight": float(getattr(result, "physical_tiebreaker_weight", float("nan"))),
+            "stage1_primary_objective_eur": float(getattr(result, "stage1_primary_objective_eur", float("nan"))),
+            "stage2_primary_objective_eur": float(getattr(result, "stage2_primary_objective_eur", float("nan"))),
+            "stage2_objective_slack_eur": float(getattr(result, "stage2_objective_slack_eur", float("nan"))),
+            "stage2_branch_l_objective": float(getattr(result, "stage2_branch_l_objective", float("nan"))),
+            "physics_refinement_mode": str(getattr(result, "physics_refinement_mode", "none")),
+            "physics_refinement_status": str(getattr(result, "physics_refinement_status", "not_enabled")),
+            "physics_refinement_runtime_sec": float(getattr(result, "physics_refinement_runtime_sec", 0.0)),
+            "floor_p95_soc_slack": float(getattr(result, "floor_p95_soc_slack", float("nan"))),
+            "floor_mean_abs_solver_feeder_gap_kw": float(
+                getattr(result, "floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "floor_primary_objective_eur": float(getattr(result, "floor_primary_objective_eur", float("nan"))),
+            "floor_primary_delta_signed_eur": float(
+                getattr(result, "floor_primary_delta_signed_eur", float("nan"))
+            ),
+            "floor_primary_delta_positive_eur": float(
+                getattr(result, "floor_primary_delta_positive_eur", float("nan"))
+            ),
+            "physics_refinement_slack_cap_eur": float(
+                getattr(result, "physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "initial_physics_refinement_slack_cap_eur": float(
+                getattr(result, "initial_physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "returned_primary_objective_eur": float(
+                getattr(result, "returned_primary_objective_eur", float("nan"))
+            ),
+            "returned_primary_delta_abs_eur": float(
+                getattr(result, "returned_primary_delta_abs_eur", float("nan"))
+            ),
+            "returned_primary_delta_pct": float(getattr(result, "returned_primary_delta_pct", float("nan"))),
+            "floor_accepted_tier": getattr(result, "floor_accepted_tier", None),
+            "used_physics_refinement_tier": getattr(result, "used_physics_refinement_tier", None),
+            "total_tiers_configured": int(getattr(result, "total_tiers_configured", 0)),
+            "physics_refinement_attempt_count": int(getattr(result, "physics_refinement_attempt_count", 0)),
+            "physics_refinement_attempt_caps_eur": [
+                float(value)
+                for value in list(getattr(result, "physics_refinement_attempt_caps_eur", None) or [])
+            ],
+            "physics_refinement_cap_utilization": float(
+                getattr(result, "physics_refinement_cap_utilization", float("nan"))
+            ),
+            "branch_l_gap_ratio_to_floor": float(
+                getattr(result, "branch_l_gap_ratio_to_floor", float("nan"))
+            ),
+            "returned_mean_abs_solver_feeder_gap_kw": float(
+                getattr(result, "returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_max_solver_feeder_gap_kw": float(
+                getattr(result, "returned_max_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_mean_abs_export_gap_ratio": float(
+                getattr(result, "returned_mean_abs_export_gap_ratio", float("nan"))
+            ),
+            "high_budget_refinement_warn": bool(
+                getattr(result, "high_budget_refinement_warn", False)
+            ),
+            "returned_solution_source": str(getattr(result, "returned_solution_source", "stage1")),
+            "formulation_tightening_required": bool(
+                getattr(result, "formulation_tightening_required", False)
+            ),
+            "negative_floor_delta_warn": bool(getattr(result, "negative_floor_delta_warn", False)),
+            "refinement_status_counts": {
+                str(key): int(value)
+                for key, value in dict(getattr(result, "refinement_status_counts", None) or {}).items()
+            },
             "no_retry_or_fallback_used": no_retry_or_fallback_used,
             "chunk_retry_count": chunk_retry_count,
             "chunk_count": int(len(chunk_summaries)),
@@ -937,6 +1175,158 @@ def build_chunk_boundary_soc_df(
     return pd.DataFrame(rows)
 
 
+def _linear_fit_summary(x_values: Any, y_values: Any) -> dict[str, float]:
+    x_array = np.asarray(x_values, dtype=np.float64).reshape(-1)
+    y_array = np.asarray(y_values, dtype=np.float64).reshape(-1)
+    finite_mask = np.isfinite(x_array) & np.isfinite(y_array)
+    if int(np.sum(finite_mask)) < 2:
+        return {"k": float("nan"), "b": float("nan"), "r2": float("nan")}
+    x = x_array[finite_mask]
+    y = y_array[finite_mask]
+    if np.allclose(x, x[0], atol=1e-12, rtol=0.0):
+        return {"k": float("nan"), "b": float("nan"), "r2": float("nan")}
+    slope, intercept = np.polyfit(x, y, deg=1)
+    y_pred = slope * x + intercept
+    ss_res = float(np.sum((y - y_pred) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    if ss_tot <= 1e-12:
+        r2 = 1.0 if ss_res <= 1e-12 else float("nan")
+    else:
+        r2 = 1.0 - (ss_res / ss_tot)
+    return {"k": float(slope), "b": float(intercept), "r2": float(r2)}
+
+
+def _interpret_linear_fit(k: float, b: float, r2: float) -> str:
+    if not (np.isfinite(k) and np.isfinite(b) and np.isfinite(r2)):
+        return "insufficient_data"
+    if abs(k - 1.0) <= 0.05 and abs(b) <= 1.0 and r2 > 0.99:
+        return "consistent"
+    if abs(k + 1.0) <= 0.05:
+        return "sign_error"
+    if abs(k) >= 900.0 or (abs(k) > 0.0 and abs(k) <= 0.002):
+        return "unit_mismatch"
+    if r2 < 0.9:
+        return "nonlinear_or_noise_dominated"
+    return "systematic_linear_bias"
+
+
+def build_soc_relaxation_diagnostics(
+    problem: Any,
+    full_input: Any,
+    result: Any,
+    *,
+    top_k: int = 10,
+) -> dict[str, Any]:
+    """Diagnose SOCP relaxation tightness using solver-internal per-unit variables."""
+
+    branch_p_pu = _require_solution_matrix(result.branch_p_pu, "branch_p_pu")
+    branch_q_pu = _require_solution_matrix(result.branch_q_pu, "branch_q_pu")
+    branch_i2_pu = _require_solution_matrix(result.branch_i2_pu, "branch_i2_pu")
+    bus_v_sq = _require_solution_matrix(result.bus_v_sq, "bus_v_sq")
+    parent_pos = np.asarray(problem.network.branch_parent_pos, dtype=np.int32).reshape(-1)
+    child_pos = np.asarray(problem.network.branch_child_pos, dtype=np.int32).reshape(-1)
+    bus_ids = np.asarray(problem.network.bus_ids, dtype=np.int32).reshape(-1)
+    timestamps = _timestamps_from_full_input(full_input)
+    episode_idx = expand_episode_indices(full_input)
+
+    if branch_p_pu.shape != branch_q_pu.shape or branch_p_pu.shape != branch_i2_pu.shape:
+        raise ValueError("branch_p_pu, branch_q_pu, and branch_i2_pu must share the same shape.")
+    if branch_p_pu.shape[0] != parent_pos.shape[0]:
+        raise ValueError("Branch solution arrays do not match network.branch_parent_pos length.")
+    if bus_v_sq.shape[0] != bus_ids.shape[0]:
+        raise ValueError("bus_v_sq bus dimension does not match network.bus_ids length.")
+
+    v_parent_sq = np.asarray(bus_v_sq[parent_pos, :], dtype=np.float32)
+    soc_slack = np.asarray(
+        branch_i2_pu - ((branch_p_pu ** 2 + branch_q_pu ** 2) / np.maximum(v_parent_sq, _SOC_SLACK_EPS)),
+        dtype=np.float32,
+    )
+    slack_max = np.max(soc_slack, axis=0).astype(np.float32)
+    slack_mean = np.mean(soc_slack, axis=0).astype(np.float32)
+    finite_slack = soc_slack[np.isfinite(soc_slack)]
+    p95_soc_slack = float(np.percentile(finite_slack, 95.0)) if finite_slack.size else float("nan")
+    summary = pd.Series(
+        {
+            "max_soc_slack": float(np.max(finite_slack)) if finite_slack.size else float("nan"),
+            "mean_soc_slack": float(np.mean(finite_slack)) if finite_slack.size else float("nan"),
+            "p95_soc_slack": p95_soc_slack,
+            "soc_relaxation_is_tight": bool(np.isfinite(p95_soc_slack) and p95_soc_slack < _SOC_SLACK_TIGHT_P95_THRESHOLD),
+        },
+        name="soc_relaxation_summary",
+    )
+    step_df = pd.DataFrame(
+        {
+            "global_step": np.arange(branch_p_pu.shape[1], dtype=np.int32),
+            "timestamp": timestamps,
+            "episode_idx": episode_idx.astype(np.int32),
+            "soc_slack_max": slack_max,
+            "soc_slack_mean": slack_mean,
+            "soc_slack_p95_global": np.full((branch_p_pu.shape[1],), p95_soc_slack, dtype=np.float32),
+        }
+    )
+
+    flat_indices = np.argsort(soc_slack.reshape(-1))[::-1]
+    worst_rows: list[dict[str, object]] = []
+    for flat_idx in flat_indices[: max(int(top_k), 0)]:
+        branch_idx, step_idx = np.unravel_index(int(flat_idx), soc_slack.shape)
+        worst_rows.append(
+            {
+                "branch_idx": int(branch_idx),
+                "global_step": int(step_idx),
+                "timestamp": timestamps[int(step_idx)],
+                "episode_idx": int(episode_idx[int(step_idx)]),
+                "parent_bus_id": int(bus_ids[int(parent_pos[int(branch_idx)])]),
+                "child_bus_id": int(bus_ids[int(child_pos[int(branch_idx)])]),
+                "v_parent_sq_pu": float(v_parent_sq[int(branch_idx), int(step_idx)]),
+                "branch_p_pu": float(branch_p_pu[int(branch_idx), int(step_idx)]),
+                "branch_q_pu": float(branch_q_pu[int(branch_idx), int(step_idx)]),
+                "branch_i2_pu": float(branch_i2_pu[int(branch_idx), int(step_idx)]),
+                "soc_slack": float(soc_slack[int(branch_idx), int(step_idx)]),
+            }
+        )
+    return {
+        "step_df": step_df,
+        "worst_df": pd.DataFrame(worst_rows),
+        "summary": summary,
+        "soc_slack": soc_slack,
+    }
+
+
+def build_root_q_diagnostic_df(problem: Any, full_input: Any, result: Any) -> pd.DataFrame:
+    """Decompose root reactive power into background-q, x*l loss proxy, and residual."""
+
+    branch_i2_pu = _require_solution_matrix(result.branch_i2_pu, "branch_i2_pu")
+    root_q_kvar = _require_solution_matrix(result.root_q_kvar, "root_q_kvar").reshape(-1)
+    branch_x_pu = np.asarray(problem.network.branch_x_pu, dtype=np.float32).reshape(-1)
+    s_base_mva = float(problem.network.s_base_mva)
+    timestamps = _timestamps_from_full_input(full_input)
+    episode_idx = expand_episode_indices(full_input)
+
+    if branch_i2_pu.shape[0] != branch_x_pu.shape[0]:
+        raise ValueError("branch_i2_pu and network.branch_x_pu must share the branch dimension.")
+    if branch_i2_pu.shape[1] != root_q_kvar.shape[0]:
+        raise ValueError("branch_i2_pu and root_q_kvar must share the horizon length.")
+
+    background_q_base_total_kvar = float(np.sum(np.asarray(problem.network.q_base_mvar, dtype=np.float32)) * 1000.0)
+    network_q_loss_proxy_kvar = (
+        np.sum(branch_x_pu[:, None] * branch_i2_pu, axis=0) * np.float32(s_base_mva * 1000.0)
+    ).astype(np.float32)
+    root_q_residual_kvar = (root_q_kvar.astype(np.float32) - background_q_base_total_kvar - network_q_loss_proxy_kvar).astype(
+        np.float32
+    )
+    return pd.DataFrame(
+        {
+            "global_step": np.arange(root_q_kvar.shape[0], dtype=np.int32),
+            "timestamp": timestamps,
+            "episode_idx": episode_idx.astype(np.int32),
+            "background_q_base_total_kvar": np.full((root_q_kvar.shape[0],), background_q_base_total_kvar, dtype=np.float32),
+            "network_q_loss_proxy_kvar": network_q_loss_proxy_kvar,
+            "root_q_kvar": root_q_kvar.astype(np.float32),
+            "root_q_residual_kvar": root_q_residual_kvar,
+        }
+    )
+
+
 def build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.DataFrame:
     """Build a per-step MISOCP-vs-pandapower validation DataFrame."""
 
@@ -1005,9 +1395,19 @@ def build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.D
                 "root_p_abs_err_kw": root_p_abs_err,
                 "pp_root_p_available": root_p_available,
                 "root_power_validation_unavailable": bool(not root_p_available),
+                "misocp_root_p_kw": float(entry.get("root_p_kw", np.nan)),
+                "pp_root_p_kw": float(pp_root_p_value),
                 "root_q_kvar": float(entry.get("root_q_kvar", np.nan)),
                 "misocp_root_s_kva": float(entry.get("misocp_root_s_kva", np.nan)),
                 "pp_root_s_kva": float(entry.get("pp_root_s_kva", np.nan)),
+                "soc_slack_max": float(entry.get("soc_slack_max", np.nan)),
+                "soc_slack_mean": float(entry.get("soc_slack_mean", np.nan)),
+                "soc_slack_p95_global": float(entry.get("soc_slack_p95_global", np.nan)),
+                "background_q_base_total_kvar": float(entry.get("background_q_base_total_kvar", np.nan)),
+                "network_q_loss_proxy_kvar": float(entry.get("network_q_loss_proxy_kvar", np.nan)),
+                "root_q_residual_kvar": float(entry.get("root_q_residual_kvar", np.nan)),
+                "solver_feeder_gap_kw": float(entry.get("solver_feeder_gap_kw", np.nan)),
+                "replay_feeder_gap_kw": float(entry.get("replay_feeder_gap_kw", np.nan)),
                 "within_tolerance": within_tolerance,
             }
         )
@@ -1029,10 +1429,39 @@ def summarize_misocp_validation(validation_df: pd.DataFrame) -> pd.Series:
                 "root_power_validation_unavailable": True,
                 "pp_root_p_available_ratio": 0.0,
                 "max_root_q_kvar": np.nan,
+                "max_soc_slack": np.nan,
+                "mean_soc_slack": np.nan,
+                "p95_soc_slack": np.nan,
+                "soc_relaxation_is_tight": False,
+                "max_solver_feeder_gap_kw": np.nan,
+                "mean_abs_solver_feeder_gap_kw": np.nan,
+                "max_replay_feeder_gap_kw": np.nan,
+                "mean_abs_replay_feeder_gap_kw": np.nan,
+                "background_q_base_total_kvar": np.nan,
+                "max_network_q_loss_proxy_kvar": np.nan,
+                "max_abs_root_q_residual_kvar": np.nan,
+                "root_p_fit_k": np.nan,
+                "root_p_fit_b": np.nan,
+                "root_p_fit_r2": np.nan,
+                "root_p_fit_interpretation": "insufficient_data",
+                "root_s_fit_k": np.nan,
+                "root_s_fit_b": np.nan,
+                "root_s_fit_r2": np.nan,
+                "root_s_fit_interpretation": "insufficient_data",
             },
             name="misocp_validation_summary",
         )
     available_mask = validation_df["pp_root_p_available"].fillna(False).astype(bool)
+    root_p_fit = _linear_fit_summary(
+        validation_df.loc[available_mask, "misocp_root_p_kw"].to_numpy(dtype=np.float64),
+        validation_df.loc[available_mask, "pp_root_p_kw"].to_numpy(dtype=np.float64),
+    )
+    root_s_fit = _linear_fit_summary(
+        validation_df["misocp_root_s_kva"].to_numpy(dtype=np.float64),
+        validation_df["pp_root_s_kva"].to_numpy(dtype=np.float64),
+    )
+    p95_soc_slack_series = validation_df["soc_slack_p95_global"].dropna()
+    p95_soc_slack = float(p95_soc_slack_series.iloc[0]) if not p95_soc_slack_series.empty else float("nan")
     return pd.Series(
         {
             "validation_rows": int(len(validation_df)),
@@ -1046,6 +1475,35 @@ def summarize_misocp_validation(validation_df: pd.DataFrame) -> pd.Series:
             "root_power_validation_unavailable": bool(not available_mask.all()),
             "pp_root_p_available_ratio": float(np.mean(available_mask.to_numpy(dtype=np.float32))),
             "max_root_q_kvar": float(validation_df["root_q_kvar"].max()),
+            "max_soc_slack": float(validation_df["soc_slack_max"].max()),
+            "mean_soc_slack": float(validation_df["soc_slack_mean"].mean()),
+            "p95_soc_slack": p95_soc_slack,
+            "soc_relaxation_is_tight": bool(np.isfinite(p95_soc_slack) and p95_soc_slack < _SOC_SLACK_TIGHT_P95_THRESHOLD),
+            "max_solver_feeder_gap_kw": float(np.abs(validation_df["solver_feeder_gap_kw"]).max()),
+            "mean_abs_solver_feeder_gap_kw": float(np.abs(validation_df["solver_feeder_gap_kw"]).mean()),
+            "max_replay_feeder_gap_kw": float(np.abs(validation_df["replay_feeder_gap_kw"]).max()),
+            "mean_abs_replay_feeder_gap_kw": float(np.abs(validation_df["replay_feeder_gap_kw"]).mean()),
+            "background_q_base_total_kvar": float(validation_df["background_q_base_total_kvar"].dropna().iloc[0])
+            if not validation_df["background_q_base_total_kvar"].dropna().empty
+            else float("nan"),
+            "max_network_q_loss_proxy_kvar": float(validation_df["network_q_loss_proxy_kvar"].max()),
+            "max_abs_root_q_residual_kvar": float(np.abs(validation_df["root_q_residual_kvar"]).max()),
+            "root_p_fit_k": float(root_p_fit["k"]),
+            "root_p_fit_b": float(root_p_fit["b"]),
+            "root_p_fit_r2": float(root_p_fit["r2"]),
+            "root_p_fit_interpretation": _interpret_linear_fit(
+                float(root_p_fit["k"]),
+                float(root_p_fit["b"]),
+                float(root_p_fit["r2"]),
+            ),
+            "root_s_fit_k": float(root_s_fit["k"]),
+            "root_s_fit_b": float(root_s_fit["b"]),
+            "root_s_fit_r2": float(root_s_fit["r2"]),
+            "root_s_fit_interpretation": _interpret_linear_fit(
+                float(root_s_fit["k"]),
+                float(root_s_fit["b"]),
+                float(root_s_fit["r2"]),
+            ),
         },
         name="misocp_validation_summary",
     )
@@ -1097,6 +1555,13 @@ def build_misocp_validation_artifacts(
     diagnostic_rows: list[dict[str, object]] = []
     carried_soc = np.asarray(full_input.soc_init, dtype=np.float32).copy()
     timestamps = _timestamps_from_full_input(full_input)
+    soc_relaxation_artifacts = build_soc_relaxation_diagnostics(problem, full_input, result, top_k=20)
+    soc_relaxation_step_df = soc_relaxation_artifacts["step_df"]
+    soc_relaxation_worst_df = soc_relaxation_artifacts["worst_df"]
+    soc_relaxation_summary = soc_relaxation_artifacts["summary"]
+    root_q_diagnostic_df = build_root_q_diagnostic_df(problem, full_input, result)
+    soc_relaxation_lookup = soc_relaxation_step_df.set_index("global_step", drop=False) if not soc_relaxation_step_df.empty else pd.DataFrame()
+    root_q_lookup = root_q_diagnostic_df.set_index("global_step", drop=False) if not root_q_diagnostic_df.empty else pd.DataFrame()
 
     for episode_list_idx, episode_idx in enumerate(np.asarray(full_input.episode_indices, dtype=np.int32).tolist()):
         obs, reset_info = env.reset(episode_idx=int(episode_idx))
@@ -1215,12 +1680,34 @@ def build_misocp_validation_artifacts(
             feeder_effective_net_load_kw = float(agent_effective_net_load_kw + fixed_load_kw - fixed_generation_kw)
             feeder_post_action_net_load_kw = float(agent_post_action_net_load_kw + fixed_load_kw - fixed_generation_kw)
             agent_root_gap_kw = float(result.root_p_kw[global_step] - agent_post_action_net_load_kw)
+            solver_feeder_gap_kw = float(result.root_p_kw[global_step] - feeder_post_action_net_load_kw)
+            replay_feeder_gap_kw = (
+                float(pp_root_p_kw - feeder_post_action_net_load_kw)
+                if pp_root_p_available
+                else float("nan")
+            )
             misocp_root_s_kva = float(np.hypot(float(result.root_p_kw[global_step]), float(result.root_q_kvar[global_step])))
             # Assumes pandapower trafo_loading_pct is apparent-power based; current-based loading would make
             # this back-calculated pp_root_s_kva only an approximation.
             pp_root_s_kva = float(
                 np.max(trafo_loading_pct) / 100.0 * float(problem.network.s_base_mva) * 1000.0
             ) if trafo_loading_pct.size else float("nan")
+            soc_row = soc_relaxation_lookup.loc[int(global_step)] if not soc_relaxation_lookup.empty else None
+            root_q_row = root_q_lookup.loc[int(global_step)] if not root_q_lookup.empty else None
+            soc_slack_max = float(soc_row["soc_slack_max"]) if soc_row is not None else float("nan")
+            soc_slack_mean = float(soc_row["soc_slack_mean"]) if soc_row is not None else float("nan")
+            soc_slack_p95_global = (
+                float(soc_relaxation_summary.get("p95_soc_slack", float("nan")))
+                if not soc_relaxation_summary.empty
+                else float("nan")
+            )
+            background_q_base_total_kvar = (
+                float(root_q_row["background_q_base_total_kvar"]) if root_q_row is not None else float("nan")
+            )
+            network_q_loss_proxy_kvar = (
+                float(root_q_row["network_q_loss_proxy_kvar"]) if root_q_row is not None else float("nan")
+            )
+            root_q_residual_kvar = float(root_q_row["root_q_residual_kvar"]) if root_q_row is not None else float("nan")
 
             step_rows.append(
                 {
@@ -1244,6 +1731,8 @@ def build_misocp_validation_artifacts(
                     "feeder_post_action_net_load_kw": feeder_post_action_net_load_kw,
                     "root_net_exchange_kw": float(result.root_p_kw[global_step]),
                     "agent_root_gap_kw": agent_root_gap_kw,
+                    "solver_feeder_gap_kw": solver_feeder_gap_kw,
+                    "replay_feeder_gap_kw": replay_feeder_gap_kw,
                     "pp_root_p_kw": pp_root_p_kw,
                     "pp_root_p_available": bool(pp_root_p_available),
                     "load_total": float(np.sum(np.asarray(info["load"], dtype=np.float32))),
@@ -1276,6 +1765,12 @@ def build_misocp_validation_artifacts(
                     "trafo_limit_reference_kw": trafo_limit_reference_kw,
                     "misocp_root_s_kva": misocp_root_s_kva,
                     "pp_root_s_kva": pp_root_s_kva,
+                    "soc_slack_max": soc_slack_max,
+                    "soc_slack_mean": soc_slack_mean,
+                    "soc_slack_p95_global": soc_slack_p95_global,
+                    "background_q_base_total_kvar": background_q_base_total_kvar,
+                    "network_q_loss_proxy_kvar": network_q_loss_proxy_kvar,
+                    "root_q_residual_kvar": root_q_residual_kvar,
                 }
             )
             diagnostic_rows.append(
@@ -1312,6 +1807,14 @@ def build_misocp_validation_artifacts(
                     "pp_root_p_available": bool(pp_root_p_available),
                     "misocp_root_s_kva": misocp_root_s_kva,
                     "pp_root_s_kva": pp_root_s_kva,
+                    "soc_slack_max": soc_slack_max,
+                    "soc_slack_mean": soc_slack_mean,
+                    "soc_slack_p95_global": soc_slack_p95_global,
+                    "background_q_base_total_kvar": background_q_base_total_kvar,
+                    "network_q_loss_proxy_kvar": network_q_loss_proxy_kvar,
+                    "root_q_residual_kvar": root_q_residual_kvar,
+                    "solver_feeder_gap_kw": solver_feeder_gap_kw,
+                    "replay_feeder_gap_kw": replay_feeder_gap_kw,
                     "controller": controller_label,
                     "episode_idx": int(episode_idx),
                     "step": int(step_in_episode),
@@ -1401,6 +1904,7 @@ def build_misocp_validation_artifacts(
             "controller_diagnostic_log": diagnostic_rows,
             "economics_scope": "agent_only",
             "validation_root_power_source": "trafo_p_signed_kw",
+            "soc_relaxation_summary": soc_relaxation_summary,
         },
     )
     return {
@@ -1411,6 +1915,10 @@ def build_misocp_validation_artifacts(
         "diagnostic_rows": diagnostic_rows,
         "validation_df": validation_df,
         "validation_summary": validation_summary,
+        "soc_relaxation_step_df": soc_relaxation_step_df,
+        "soc_relaxation_worst_df": soc_relaxation_worst_df,
+        "soc_relaxation_summary": soc_relaxation_summary,
+        "root_q_diagnostic_df": root_q_diagnostic_df,
     }
 
 
@@ -1424,6 +1932,7 @@ def build_misocp_plan_package(
     cfg: Any | None = None,
     cfg_snapshot: dict[str, Any] | None = None,
     extra_meta: dict[str, Any] | None = None,
+    diagnostic_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble a disk-friendly MISOCP plan package without replay data."""
 
@@ -1446,6 +1955,7 @@ def build_misocp_plan_package(
         "cfg_snapshot": dict(cfg_snapshot),
         "problem_snapshot": _build_problem_snapshot(problem),
         "extra_meta": dict(extra_meta or {}),
+        "diagnostics_stage": "commit4_adaptive_refinement_ladder",
         "validation_root_power_source": "trafo_p_signed_kw",
         "agent_q_base_zeroed": bool(
             np.allclose(
@@ -1457,7 +1967,27 @@ def build_misocp_plan_package(
             )
         ),
         "physical_tiebreaker_weight": float(getattr(solved_result, "physical_tiebreaker_weight", 0.0)),
-        "validation_fix_stage": "step3_branch_l_tiebreaker",
+        "validation_fix_stage": "commit4_adaptive_refinement_ladder",
+        "physics_refinement_mode": str(getattr(solved_result, "physics_refinement_mode", "none")),
+        "physics_refinement_status": str(getattr(solved_result, "physics_refinement_status", "not_enabled")),
+        "physics_refinement_slack_ratio": float(cfg_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": list(
+            cfg_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+        ),
+        "physics_refinement_slack_abs_floor_schedule_eur": list(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0])
+        ),
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            cfg_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_time_limit_sec": float(cfg_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            cfg_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "diagnostics_floor_stage": "min_sum_branch_l",
     }
     solve_summary = {
         **format_solver_summary(
@@ -1489,9 +2019,94 @@ def build_misocp_plan_package(
         "branch_current_tiebreaker_eur_per_pu_step": float(
             cfg_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
+        "physics_refinement_mode": str(getattr(solved_result, "physics_refinement_mode", "none")),
+        "physics_refinement_status": str(getattr(solved_result, "physics_refinement_status", "not_enabled")),
+        "physics_refinement_slack_ratio": float(cfg_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": list(
+            cfg_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+        ),
+        "physics_refinement_slack_abs_floor_schedule_eur": list(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0])
+        ),
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            cfg_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_time_limit_sec": float(cfg_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            cfg_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "stage1_primary_objective_eur": float(getattr(solved_result, "stage1_primary_objective_eur", float("nan"))),
+        "stage2_primary_objective_eur": float(getattr(solved_result, "stage2_primary_objective_eur", float("nan"))),
+        "stage2_objective_slack_eur": float(getattr(solved_result, "stage2_objective_slack_eur", float("nan"))),
+        "stage2_branch_l_objective": float(getattr(solved_result, "stage2_branch_l_objective", float("nan"))),
+        "physics_refinement_runtime_sec": float(getattr(solved_result, "physics_refinement_runtime_sec", 0.0)),
+        "floor_p95_soc_slack": float(getattr(solved_result, "floor_p95_soc_slack", float("nan"))),
+        "floor_mean_abs_solver_feeder_gap_kw": float(
+            getattr(solved_result, "floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+        ),
+        "floor_primary_objective_eur": float(getattr(solved_result, "floor_primary_objective_eur", float("nan"))),
+        "floor_primary_delta_signed_eur": float(
+            getattr(solved_result, "floor_primary_delta_signed_eur", float("nan"))
+        ),
+        "floor_primary_delta_positive_eur": float(
+            getattr(solved_result, "floor_primary_delta_positive_eur", float("nan"))
+        ),
+        "physics_refinement_slack_cap_eur": float(
+            getattr(solved_result, "physics_refinement_slack_cap_eur", float("nan"))
+        ),
+        "initial_physics_refinement_slack_cap_eur": float(
+            getattr(solved_result, "initial_physics_refinement_slack_cap_eur", float("nan"))
+        ),
+        "returned_primary_objective_eur": float(
+            getattr(solved_result, "returned_primary_objective_eur", float("nan"))
+        ),
+        "returned_primary_delta_abs_eur": float(
+            getattr(solved_result, "returned_primary_delta_abs_eur", float("nan"))
+        ),
+        "returned_primary_delta_pct": float(getattr(solved_result, "returned_primary_delta_pct", float("nan"))),
+        "floor_accepted_tier": getattr(solved_result, "floor_accepted_tier", None),
+        "used_physics_refinement_tier": getattr(solved_result, "used_physics_refinement_tier", None),
+        "total_tiers_configured": int(getattr(solved_result, "total_tiers_configured", 0)),
+        "physics_refinement_attempt_count": int(getattr(solved_result, "physics_refinement_attempt_count", 0)),
+        "physics_refinement_attempt_caps_eur": [
+            float(value)
+            for value in list(getattr(solved_result, "physics_refinement_attempt_caps_eur", None) or [])
+        ],
+        "physics_refinement_cap_utilization": float(
+            getattr(solved_result, "physics_refinement_cap_utilization", float("nan"))
+        ),
+        "branch_l_gap_ratio_to_floor": float(
+            getattr(solved_result, "branch_l_gap_ratio_to_floor", float("nan"))
+        ),
+        "returned_mean_abs_solver_feeder_gap_kw": float(
+            getattr(solved_result, "returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+        ),
+        "returned_max_solver_feeder_gap_kw": float(
+            getattr(solved_result, "returned_max_solver_feeder_gap_kw", float("nan"))
+        ),
+        "returned_mean_abs_export_gap_ratio": float(
+            getattr(solved_result, "returned_mean_abs_export_gap_ratio", float("nan"))
+        ),
+        "high_budget_refinement_warn": bool(getattr(solved_result, "high_budget_refinement_warn", False)),
+        "returned_solution_source": str(getattr(solved_result, "returned_solution_source", "stage1")),
+        "formulation_tightening_required": bool(
+            getattr(solved_result, "formulation_tightening_required", False)
+        ),
+        "negative_floor_delta_warn": bool(getattr(solved_result, "negative_floor_delta_warn", False)),
+        "refinement_status_counts": {
+            str(key): int(value)
+            for key, value in dict(getattr(solved_result, "refinement_status_counts", None) or {}).items()
+        },
         "economics_scope": "agent_only",
+        "diagnostics_stage": "commit4_adaptive_refinement_ladder",
+        "diagnostics_floor_stage": "min_sum_branch_l",
         "chunk_summaries": [dict(item) for item in list(getattr(solved_result, "chunk_summaries", []) or [])],
     }
+    if diagnostic_summary:
+        solve_summary.update(dict(diagnostic_summary))
     return {
         "manifest": manifest,
         "full_input": full_input,
@@ -1555,6 +2170,85 @@ def save_misocp_plan_package(package: dict[str, Any], target_dir: str | Path) ->
     return target_path
 
 
+def resolve_latest_compatible_misocp_plan_package_dir(target_dir: str | Path) -> Path:
+    """Resolve the newest complete cached-plan directory sharing the requested prefix."""
+
+    target_path = Path(target_dir).expanduser().resolve()
+    parent_dir = target_path.parent
+    prefix = target_path.name
+    required_names = ("manifest.json", "full_input.npz", "solve_result.npz", "solve_summary.json")
+
+    if not parent_dir.exists():
+        raise FileNotFoundError(
+            f"Cannot resolve cached MISOCP plan prefix '{prefix}' because parent directory does not exist: {parent_dir}"
+        )
+
+    compatible_candidates: list[dict[str, Any]] = []
+    discovered_candidates: list[str] = []
+    for candidate_dir in parent_dir.iterdir():
+        if not candidate_dir.is_dir():
+            continue
+        if candidate_dir.name != prefix and not candidate_dir.name.startswith(f"{prefix}_"):
+            continue
+        manifest_path = candidate_dir / "manifest.json"
+        if not manifest_path.exists():
+            discovered_candidates.append(f"{candidate_dir.name} (missing manifest)")
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            discovered_candidates.append(f"{candidate_dir.name} (invalid manifest)")
+            continue
+        version = int(manifest.get("plan_package_version", -1))
+        missing_required = [
+            name for name in required_names if not (candidate_dir / name).exists()
+        ]
+        saved_at_raw = manifest.get("saved_at_utc")
+        try:
+            saved_at = pd.Timestamp(saved_at_raw)
+            if saved_at.tzinfo is None:
+                saved_at = saved_at.tz_localize("UTC")
+            else:
+                saved_at = saved_at.tz_convert("UTC")
+            saved_at_key = int(saved_at.value)
+        except Exception:
+            saved_at_key = -1
+        if version == int(_PLAN_PACKAGE_VERSION) and not missing_required:
+            compatible_candidates.append(
+                {
+                    "path": candidate_dir,
+                    "saved_at_key": saved_at_key,
+                    "mtime_ns": int(candidate_dir.stat().st_mtime_ns),
+                }
+            )
+        else:
+            missing_display = (
+                f", missing={','.join(missing_required)}" if missing_required else ""
+            )
+            discovered_candidates.append(
+                f"{candidate_dir.name} (version={version}{missing_display})"
+            )
+
+    if compatible_candidates:
+        compatible_candidates.sort(
+            key=lambda item: (int(item["saved_at_key"]), int(item["mtime_ns"]), str(item["path"].name)),
+            reverse=True,
+        )
+        return Path(compatible_candidates[0]["path"])
+
+    if discovered_candidates:
+        raise ValueError(
+            "No compatible MISOCP plan package found for prefix "
+            f"'{prefix}' under {parent_dir}. Expected plan_package_version={_PLAN_PACKAGE_VERSION}. "
+            f"Discovered candidates: {', '.join(discovered_candidates)}. "
+            "Re-run MISOCP_global.ipynb or point MISOCP_PLAN_INPUT_DIR to a compatible package."
+        )
+
+    raise FileNotFoundError(
+        f"No cached MISOCP plan package directories matching prefix '{prefix}' were found under {parent_dir}."
+    )
+
+
 def load_misocp_plan_package(target_dir: str | Path) -> dict[str, Any]:
     """Load a saved MISOCP plan package and reconstruct real dataclasses."""
 
@@ -1581,7 +2275,7 @@ def load_misocp_plan_package(target_dir: str | Path) -> dict[str, Any]:
         raise ValueError(
             "Unsupported MISOCP plan package version at "
             f"{target_path}: expected={_PLAN_PACKAGE_VERSION}, actual={manifest.get('plan_package_version')!r}. "
-            "This cache predates the root-power validation fix, agent reactive-base zeroing, or branch-current tie-breaker update. "
+            "This cache predates the adaptive slack ladder / tiered floor accept / floor-distance gate / time-budget refinement semantics. "
             "Re-run MISOCP_global.ipynb to regenerate it."
         )
     solve_summary = json.loads(solve_summary_path.read_text(encoding="utf-8"))
@@ -1662,6 +2356,69 @@ def load_misocp_plan_package(target_dir: str | Path) -> dict[str, Any]:
             chunk_summaries=[dict(item) for item in list(solve_summary.get("chunk_summaries", []) or [])],
             no_retry_or_fallback_used=bool(solve_summary.get("no_retry_or_fallback_used", True)),
             chunk_retry_count=int(solve_summary.get("chunk_retry_count", 0)),
+            stage1_primary_objective_eur=float(solve_summary.get("stage1_primary_objective_eur", float("nan"))),
+            stage2_primary_objective_eur=float(solve_summary.get("stage2_primary_objective_eur", float("nan"))),
+            stage2_objective_slack_eur=float(solve_summary.get("stage2_objective_slack_eur", float("nan"))),
+            stage2_branch_l_objective=float(solve_summary.get("stage2_branch_l_objective", float("nan"))),
+            physics_refinement_mode=str(solve_summary.get("physics_refinement_mode", "none")),
+            physics_refinement_status=str(solve_summary.get("physics_refinement_status", "not_enabled")),
+            physics_refinement_runtime_sec=float(solve_summary.get("physics_refinement_runtime_sec", 0.0)),
+            floor_p95_soc_slack=float(solve_summary.get("floor_p95_soc_slack", float("nan"))),
+            floor_mean_abs_solver_feeder_gap_kw=float(
+                solve_summary.get("floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            floor_primary_objective_eur=float(solve_summary.get("floor_primary_objective_eur", float("nan"))),
+            floor_primary_delta_signed_eur=float(
+                solve_summary.get("floor_primary_delta_signed_eur", float("nan"))
+            ),
+            floor_primary_delta_positive_eur=float(
+                solve_summary.get("floor_primary_delta_positive_eur", float("nan"))
+            ),
+            physics_refinement_slack_cap_eur=float(
+                solve_summary.get("physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            initial_physics_refinement_slack_cap_eur=float(
+                solve_summary.get("initial_physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            returned_primary_objective_eur=float(
+                solve_summary.get("returned_primary_objective_eur", float("nan"))
+            ),
+            returned_primary_delta_abs_eur=float(
+                solve_summary.get("returned_primary_delta_abs_eur", float("nan"))
+            ),
+            returned_primary_delta_pct=float(solve_summary.get("returned_primary_delta_pct", float("nan"))),
+            floor_accepted_tier=solve_summary.get("floor_accepted_tier"),
+            used_physics_refinement_tier=solve_summary.get("used_physics_refinement_tier"),
+            total_tiers_configured=int(solve_summary.get("total_tiers_configured", 0)),
+            physics_refinement_attempt_count=int(solve_summary.get("physics_refinement_attempt_count", 0)),
+            physics_refinement_attempt_caps_eur=[
+                float(value) for value in list(solve_summary.get("physics_refinement_attempt_caps_eur", []) or [])
+            ],
+            physics_refinement_cap_utilization=float(
+                solve_summary.get("physics_refinement_cap_utilization", float("nan"))
+            ),
+            branch_l_gap_ratio_to_floor=float(
+                solve_summary.get("branch_l_gap_ratio_to_floor", float("nan"))
+            ),
+            returned_mean_abs_solver_feeder_gap_kw=float(
+                solve_summary.get("returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            returned_max_solver_feeder_gap_kw=float(
+                solve_summary.get("returned_max_solver_feeder_gap_kw", float("nan"))
+            ),
+            returned_mean_abs_export_gap_ratio=float(
+                solve_summary.get("returned_mean_abs_export_gap_ratio", float("nan"))
+            ),
+            high_budget_refinement_warn=bool(solve_summary.get("high_budget_refinement_warn", False)),
+            returned_solution_source=str(solve_summary.get("returned_solution_source", "stage1")),
+            formulation_tightening_required=bool(
+                solve_summary.get("formulation_tightening_required", False)
+            ),
+            negative_floor_delta_warn=bool(solve_summary.get("negative_floor_delta_warn", False)),
+            refinement_status_counts={
+                str(key): int(value)
+                for key, value in dict(solve_summary.get("refinement_status_counts", {}) or {}).items()
+            },
         )
 
     problem_view = _build_problem_view(manifest["problem_snapshot"])
@@ -1771,8 +2528,90 @@ def replay_misocp_plan_package(
                 package["manifest"]["cfg_snapshot"].get("import_price_adder_eur_per_kwh", 0.0)
             ),
             "physical_tiebreaker_weight": float(package["manifest"].get("physical_tiebreaker_weight", 0.0)),
+            "physics_refinement_mode": str(package["solve_summary"].get("physics_refinement_mode", "none")),
+            "physics_refinement_status": str(package["solve_summary"].get("physics_refinement_status", "not_enabled")),
+            "physics_refinement_runtime_sec": float(package["solve_summary"].get("physics_refinement_runtime_sec", 0.0)),
+            "stage1_primary_objective_eur": float(
+                package["solve_summary"].get("stage1_primary_objective_eur", float("nan"))
+            ),
+            "stage2_primary_objective_eur": float(
+                package["solve_summary"].get("stage2_primary_objective_eur", float("nan"))
+            ),
+            "stage2_objective_slack_eur": float(
+                package["solve_summary"].get("stage2_objective_slack_eur", float("nan"))
+            ),
+            "stage2_branch_l_objective": float(
+                package["solve_summary"].get("stage2_branch_l_objective", float("nan"))
+            ),
+            "floor_p95_soc_slack": float(package["solve_summary"].get("floor_p95_soc_slack", float("nan"))),
+            "floor_mean_abs_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "floor_primary_objective_eur": float(
+                package["solve_summary"].get("floor_primary_objective_eur", float("nan"))
+            ),
+            "floor_primary_delta_signed_eur": float(
+                package["solve_summary"].get("floor_primary_delta_signed_eur", float("nan"))
+            ),
+            "floor_primary_delta_positive_eur": float(
+                package["solve_summary"].get("floor_primary_delta_positive_eur", float("nan"))
+            ),
+            "physics_refinement_slack_cap_eur": float(
+                package["solve_summary"].get("physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "initial_physics_refinement_slack_cap_eur": float(
+                package["solve_summary"].get("initial_physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "returned_primary_objective_eur": float(
+                package["solve_summary"].get("returned_primary_objective_eur", float("nan"))
+            ),
+            "returned_primary_delta_abs_eur": float(
+                package["solve_summary"].get("returned_primary_delta_abs_eur", float("nan"))
+            ),
+            "returned_primary_delta_pct": float(
+                package["solve_summary"].get("returned_primary_delta_pct", float("nan"))
+            ),
+            "floor_accepted_tier": package["solve_summary"].get("floor_accepted_tier"),
+            "used_physics_refinement_tier": package["solve_summary"].get("used_physics_refinement_tier"),
+            "total_tiers_configured": int(package["solve_summary"].get("total_tiers_configured", 0)),
+            "physics_refinement_attempt_count": int(
+                package["solve_summary"].get("physics_refinement_attempt_count", 0)
+            ),
+            "physics_refinement_attempt_caps_eur": [
+                float(value)
+                for value in list(package["solve_summary"].get("physics_refinement_attempt_caps_eur", []) or [])
+            ],
+            "physics_refinement_cap_utilization": float(
+                package["solve_summary"].get("physics_refinement_cap_utilization", float("nan"))
+            ),
+            "branch_l_gap_ratio_to_floor": float(
+                package["solve_summary"].get("branch_l_gap_ratio_to_floor", float("nan"))
+            ),
+            "returned_mean_abs_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_max_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("returned_max_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_mean_abs_export_gap_ratio": float(
+                package["solve_summary"].get("returned_mean_abs_export_gap_ratio", float("nan"))
+            ),
+            "high_budget_refinement_warn": bool(
+                package["solve_summary"].get("high_budget_refinement_warn", False)
+            ),
+            "returned_solution_source": str(package["solve_summary"].get("returned_solution_source", "stage1")),
+            "formulation_tightening_required": bool(
+                package["solve_summary"].get("formulation_tightening_required", False)
+            ),
+            "negative_floor_delta_warn": bool(package["solve_summary"].get("negative_floor_delta_warn", False)),
+            "refinement_status_counts": {
+                str(key): int(value)
+                for key, value in dict(package["solve_summary"].get("refinement_status_counts", {}) or {}).items()
+            },
             "validation_root_power_source": str(package["manifest"].get("validation_root_power_source", "")),
             "agent_q_base_zeroed": bool(package["manifest"].get("agent_q_base_zeroed", False)),
+            "diagnostics_stage": str(package["manifest"].get("diagnostics_stage", "")),
+            "diagnostics_floor_stage": str(package["manifest"].get("diagnostics_floor_stage", "")),
             "chunk_summaries": [dict(item) for item in list(package["solve_summary"].get("chunk_summaries", []) or [])],
         }
     )
@@ -2065,8 +2904,114 @@ def plot_full_horizon_net_load(
     return figure
 
 
+def plot_root_exchange_alignment(
+    step_df: pd.DataFrame,
+    *,
+    controller_label: str,
+    figsize: tuple[float, float] = (14.0, 4.5),
+) -> plt.Figure:
+    """Plot solver root exchange, replay root exchange, and feeder post-action net load together."""
+
+    figure, axis = plt.subplots(figsize=figsize, constrained_layout=True)
+    axis.plot(
+        step_df["timestamp"],
+        step_df["root_net_exchange_kw"],
+        color="#2563eb",
+        linewidth=1.6,
+        label="MISOCP root net exchange",
+    )
+    if "pp_root_p_kw" in step_df.columns:
+        axis.plot(
+            step_df["timestamp"],
+            step_df["pp_root_p_kw"],
+            color="#f97316",
+            linewidth=1.4,
+            linestyle="--",
+            label="Pandapower root exchange",
+        )
+    axis.plot(
+        step_df["timestamp"],
+        step_df["feeder_post_action_net_load_kw"],
+        color="#16a34a",
+        linewidth=1.4,
+        linestyle="-.",
+        label="Feeder post-action net load",
+    )
+    axis.axhline(0.0, color="#111827", linewidth=0.8, alpha=0.6)
+    axis.set_title(f"{controller_label}: Root Exchange Alignment")
+    axis.set_ylabel("Power [kW]")
+    axis.set_xlabel("Timestamp")
+    axis.grid(True, alpha=0.25)
+    axis.legend(loc="upper right")
+    return figure
+
+
+def plot_misocp_validation_scatter_panel(
+    validation_df: pd.DataFrame,
+    *,
+    controller_label: str,
+    figsize: tuple[float, float] = (12.0, 4.8),
+) -> plt.Figure:
+    """Plot root-P and root-S scatter diagnostics with linear-fit annotations."""
+
+    figure, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    scatter_specs = [
+        (
+            axes[0],
+            "misocp_root_p_kw",
+            "pp_root_p_kw",
+            "Root P fit",
+            "MISOCP root P [kW]",
+            "Pandapower root P [kW]",
+        ),
+        (
+            axes[1],
+            "misocp_root_s_kva",
+            "pp_root_s_kva",
+            "Root S fit",
+            "MISOCP root S [kVA]",
+            "Pandapower root S [kVA]",
+        ),
+    ]
+    for axis, x_col, y_col, title, x_label, y_label in scatter_specs:
+        x = validation_df.get(x_col, pd.Series(dtype=np.float32)).to_numpy(dtype=np.float64)
+        y = validation_df.get(y_col, pd.Series(dtype=np.float32)).to_numpy(dtype=np.float64)
+        finite_mask = np.isfinite(x) & np.isfinite(y)
+        axis.scatter(x[finite_mask], y[finite_mask], s=18, alpha=0.75, color="#2563eb")
+        fit = _linear_fit_summary(x[finite_mask], y[finite_mask])
+        interpretation = _interpret_linear_fit(float(fit["k"]), float(fit["b"]), float(fit["r2"]))
+        if int(np.sum(finite_mask)) >= 2 and np.isfinite(float(fit["k"])) and np.isfinite(float(fit["b"])):
+            x_min = float(np.min(x[finite_mask]))
+            x_max = float(np.max(x[finite_mask]))
+            fit_x = np.linspace(x_min, x_max, num=100, dtype=np.float64)
+            fit_y = float(fit["k"]) * fit_x + float(fit["b"])
+            axis.plot(fit_x, fit_y, color="#ef4444", linewidth=1.2, label="linear fit")
+        if int(np.sum(finite_mask)) >= 1:
+            identity_min = float(np.min(np.concatenate([x[finite_mask], y[finite_mask]])))
+            identity_max = float(np.max(np.concatenate([x[finite_mask], y[finite_mask]])))
+            axis.plot([identity_min, identity_max], [identity_min, identity_max], color="#6b7280", linewidth=1.0, linestyle=":")
+        axis.set_title(title)
+        axis.set_xlabel(x_label)
+        axis.set_ylabel(y_label)
+        axis.grid(True, alpha=0.25)
+        axis.text(
+            0.03,
+            0.97,
+            f"k={fit['k']:.4g}\nb={fit['b']:.4g}\nR²={fit['r2']:.4g}\n{interpretation}",
+            transform=axis.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85, "edgecolor": "#d1d5db"},
+        )
+    figure.suptitle(f"{controller_label}: Validation Fit Diagnostics", fontsize=12)
+    return figure
+
+
 __all__ = [
     "build_chunk_boundary_soc_df",
+    "build_root_q_diagnostic_df",
+    "build_soc_relaxation_diagnostics",
     "build_misocp_plan_package",
     "build_misocp_validation_artifacts",
     "build_misocp_validation_df",
@@ -2081,7 +3026,10 @@ __all__ = [
     "plot_full_horizon_net_load",
     "plot_full_horizon_power_balance",
     "plot_full_horizon_voltage",
+    "plot_misocp_validation_scatter_panel",
+    "plot_root_exchange_alignment",
     "replay_misocp_plan_package",
+    "resolve_latest_compatible_misocp_plan_package_dir",
     "save_misocp_plan_package",
     "summarize_misocp_validation",
     "validate_misocp_result_schema",
