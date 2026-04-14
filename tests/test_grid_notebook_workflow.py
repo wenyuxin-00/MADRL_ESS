@@ -22,6 +22,7 @@ from scripts.utils.grid_notebook_workflow import (
     collect_controller_rollout,
     collect_global_full_horizon_rollout,
     collect_global_mpc_rollout,
+    _get_single_agent_mpc_solver,
     load_training_run_bundle,
     normalize_date_input,
     plot_battery_power_and_soc_comparison,
@@ -447,6 +448,8 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
     recorded_modes: list[str] = []
+    recorded_subsidies: list[float] = []
+    recorded_agent_indices: list[int] = []
 
     def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
         assert controller is None
@@ -470,7 +473,10 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             soc = np.array([0.5, 0.5], dtype=np.float32)
             agent_c_bat = np.array([4.0, 4.0], dtype=np.float32)
             agent_p_max = np.array([2.0, 2.0], dtype=np.float32)
+            reward_fn = type("_DummyReward", (), {"export_subsidy_eur_per_kwh": 0.079})()
             _grid_core = _DummyGridCore()
+            _single_agent_mpc_solver_cache = {}
+            _single_agent_mpc_stats = {}
 
         action_result = action_fn(
             _DummyEnv(),
@@ -499,10 +505,46 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
         "scripts.utils.grid_notebook_workflow.collect_controller_rollout",
         _fake_collect_controller_rollout,
     )
-    monkeypatch.setattr(
-        "scripts.utils.grid_notebook_workflow.solve_single_agent_gurobi_mpc_action",
-        lambda **kwargs: 0.5,
-    )
+
+    class _FakeSolver:
+        def __init__(self, agent_idx: int) -> None:
+            self.agent_idx = agent_idx
+
+        def solve(self, *, price_seq, load_seq, pv_seq, soc):
+            del price_seq, load_seq, pv_seq, soc
+            return type(
+                "_SolveResult",
+                (),
+                {
+                    "power_kw": 0.5,
+                    "solve_time_sec": 0.01,
+                    "used_guarded_fallback": False,
+                },
+            )()
+
+    def _fake_get_solver(
+        env,
+        *,
+        agent_idx,
+        price_seq,
+        battery_capacity_kwh,
+        p_max_kw,
+        dt_hours,
+        efficiency,
+        soc_min,
+        soc_max,
+        export_subsidy_eur_per_kwh,
+    ):
+        del env, price_seq, battery_capacity_kwh, p_max_kw, dt_hours, efficiency, soc_min, soc_max
+        recorded_subsidies.append(float(export_subsidy_eur_per_kwh))
+        recorded_agent_indices.append(int(agent_idx))
+        return _FakeSolver(int(agent_idx)), {
+            "solve_count": 0.0,
+            "solve_time_sec_total": 0.0,
+            "guarded_fallback_count": 0.0,
+        }
+
+    monkeypatch.setattr("scripts.utils.grid_notebook_workflow._get_single_agent_mpc_solver", _fake_get_solver)
 
     perfect_rollout = collect_mpc_rollout(cfg, prediction_mode="perfect", label="MPC (oracle_eval)")
     normal_rollout = collect_mpc_rollout(cfg, prediction_mode="normal", label="MPC (forecast_eval)")
@@ -510,6 +552,74 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
     assert perfect_rollout.meta["controller"] == "MPC (oracle_eval)"
     assert normal_rollout.meta["controller"] == "MPC (forecast_eval)"
     assert recorded_modes == ["perfect", "lstm"]
+    assert recorded_subsidies == [0.079, 0.079, 0.079, 0.079]
+    assert recorded_agent_indices == [0, 1, 0, 1]
+
+
+def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
+    class _DummySolver:
+        def __init__(self, **kwargs):
+            self.kwargs = dict(kwargs)
+
+    created_solvers: list[_DummySolver] = []
+
+    def _fake_solver_factory(**kwargs):
+        solver = _DummySolver(**kwargs)
+        created_solvers.append(solver)
+        return solver
+
+    monkeypatch.setattr(
+        "scripts.utils.grid_notebook_workflow.single_agent_mpc_module._ReusableSingleAgentMPCSolver",
+        _fake_solver_factory,
+    )
+
+    class _DummyEnv:
+        _single_agent_mpc_solver_cache = {}
+        _single_agent_mpc_stats = {}
+
+    env = _DummyEnv()
+    solver_a_1, stats = _get_single_agent_mpc_solver(
+        env,
+        agent_idx=0,
+        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        battery_capacity_kwh=4.0,
+        p_max_kw=2.0,
+        dt_hours=1.0,
+        efficiency=1.0,
+        soc_min=0.1,
+        soc_max=0.9,
+        export_subsidy_eur_per_kwh=0.079,
+    )
+    solver_a_2, stats = _get_single_agent_mpc_solver(
+        env,
+        agent_idx=0,
+        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        battery_capacity_kwh=4.0,
+        p_max_kw=2.0,
+        dt_hours=1.0,
+        efficiency=1.0,
+        soc_min=0.1,
+        soc_max=0.9,
+        export_subsidy_eur_per_kwh=0.079,
+    )
+    solver_b_1, stats = _get_single_agent_mpc_solver(
+        env,
+        agent_idx=1,
+        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        battery_capacity_kwh=4.0,
+        p_max_kw=2.0,
+        dt_hours=1.0,
+        efficiency=1.0,
+        soc_min=0.1,
+        soc_max=0.9,
+        export_subsidy_eur_per_kwh=0.079,
+    )
+
+    assert solver_a_1 is solver_a_2
+    assert solver_a_1 is not solver_b_1
+    assert len(created_solvers) == 2
+    assert stats["solver_build_count"] == pytest.approx(2.0)
+    assert stats["solver_reuse_count"] == pytest.approx(1.0)
 
 
 def test_collect_global_mpc_rollout_uses_controller_builder(tmp_path, monkeypatch):

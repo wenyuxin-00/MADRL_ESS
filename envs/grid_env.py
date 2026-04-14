@@ -142,6 +142,8 @@ class GridEnv(gym.Env):
         self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
+        self._single_agent_mpc_solver_cache: dict[tuple[object, ...], Any] = {}
+        self._single_agent_mpc_stats: dict[str, float] = {}
 
         self.agent_c_bat = (
             self._fixed_capacity_kwh.copy()
@@ -784,5 +786,12 @@ class GridEnv(gym.Env):
         info = self._build_step_info(step_state, components, reward, done)
         return obs, reward.tolist(), terminated_n, truncated_n, info
 
+    def _cleanup_gurobi_cache(self) -> None:
+        for solver in list(self._single_agent_mpc_solver_cache.values()):
+            dispose = getattr(solver, "dispose", None)
+            if callable(dispose):
+                dispose()
+        self._single_agent_mpc_solver_cache.clear()
+
     def close(self) -> None:
-        pass
+        self._cleanup_gurobi_cache()

@@ -18,6 +18,7 @@ from controllers.action_feasibility import (
     compute_action_gap_metrics_numpy,
     merge_action_info_into_step_info,
 )
+from controllers.mpc import gurobi_agent_mpc as single_agent_mpc_module
 from controllers.mpc import solve_single_agent_gurobi_mpc_action
 from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
@@ -564,6 +565,7 @@ def _solve_single_agent_mpc_action(
     efficiency: float,
     soc_min: float,
     soc_max: float,
+    export_subsidy_eur_per_kwh: float,
 ) -> float:
     return solve_single_agent_gurobi_mpc_action(
         price_seq=price_seq,
@@ -576,7 +578,76 @@ def _solve_single_agent_mpc_action(
         efficiency=efficiency,
         soc_min=soc_min,
         soc_max=soc_max,
+        export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh,
     )
+
+
+def _ensure_single_agent_mpc_cache_state(env) -> tuple[dict[tuple[object, ...], object], dict[str, float]]:
+    cache = getattr(env, "_single_agent_mpc_solver_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(env, "_single_agent_mpc_solver_cache", cache)
+    stats = getattr(env, "_single_agent_mpc_stats", None)
+    if not isinstance(stats, dict):
+        stats = {}
+        setattr(env, "_single_agent_mpc_stats", stats)
+    stats.setdefault("solver_build_count", 0.0)
+    stats.setdefault("solver_reuse_count", 0.0)
+    stats.setdefault("solve_count", 0.0)
+    stats.setdefault("solve_time_sec_total", 0.0)
+    stats.setdefault("guarded_fallback_count", 0.0)
+    return cache, stats
+
+
+def _get_single_agent_mpc_solver(
+    env,
+    *,
+    agent_idx: int,
+    price_seq: np.ndarray,
+    battery_capacity_kwh: float,
+    p_max_kw: float,
+    dt_hours: float,
+    efficiency: float,
+    soc_min: float,
+    soc_max: float,
+    export_subsidy_eur_per_kwh: float,
+):
+    cache, stats = _ensure_single_agent_mpc_cache_state(env)
+    use_guarded_fallback = single_agent_mpc_module._requires_grid_direction_binary(
+        np.asarray(price_seq, dtype=np.float32),
+        float(export_subsidy_eur_per_kwh),
+    )
+    horizon = int(np.asarray(price_seq, dtype=np.float32).reshape(-1).size)
+    cache_key = (
+        int(agent_idx),
+        int(horizon),
+        float(battery_capacity_kwh),
+        float(p_max_kw),
+        float(dt_hours),
+        float(efficiency),
+        float(soc_min),
+        float(soc_max),
+        float(export_subsidy_eur_per_kwh),
+        bool(use_guarded_fallback),
+    )
+    solver = cache.get(cache_key)
+    if solver is None:
+        solver = single_agent_mpc_module._ReusableSingleAgentMPCSolver(
+            horizon=horizon,
+            battery_capacity_kwh=float(battery_capacity_kwh),
+            p_max_kw=float(p_max_kw),
+            dt_hours=float(dt_hours),
+            efficiency=float(efficiency),
+            soc_min=float(soc_min),
+            soc_max=float(soc_max),
+            export_subsidy_eur_per_kwh=float(export_subsidy_eur_per_kwh),
+            use_guarded_fallback=bool(use_guarded_fallback),
+        )
+        cache[cache_key] = solver
+        stats["solver_build_count"] = float(stats["solver_build_count"]) + 1.0
+    else:
+        stats["solver_reuse_count"] = float(stats["solver_reuse_count"]) + 1.0
+    return solver, stats
 
 
 def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
@@ -584,19 +655,35 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
     price_seq = np.asarray(obs["price_seq"], dtype=np.float32)
     load_seq = np.asarray(obs["load_seq"], dtype=np.float32)
     pv_seq = np.asarray(obs["pv_seq"], dtype=np.float32)
+    export_subsidy_eur_per_kwh = float(getattr(env.reward_fn, "export_subsidy_eur_per_kwh", 0.079))
     for agent_idx in range(env.n):
-        power_kw = _solve_single_agent_mpc_action(
+        solver, solver_stats = _get_single_agent_mpc_solver(
+            env,
+            agent_idx=agent_idx,
             price_seq=price_seq,
-            load_seq=load_seq[agent_idx],
-            pv_seq=pv_seq[agent_idx],
-            soc=float(env.soc[agent_idx]),
             battery_capacity_kwh=float(env.agent_c_bat[agent_idx]),
             p_max_kw=float(env.agent_p_max[agent_idx]),
             dt_hours=float(env.dt),
             efficiency=float(env.eff),
             soc_min=float(env.soc_min),
             soc_max=float(env.soc_max),
+            export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh,
         )
+        solve_result = solver.solve(
+            price_seq=price_seq,
+            load_seq=load_seq[agent_idx],
+            pv_seq=pv_seq[agent_idx],
+            soc=float(env.soc[agent_idx]),
+        )
+        solver_stats["solve_count"] = float(solver_stats["solve_count"]) + 1.0
+        solver_stats["solve_time_sec_total"] = (
+            float(solver_stats["solve_time_sec_total"]) + float(solve_result.solve_time_sec)
+        )
+        if solve_result.used_guarded_fallback:
+            solver_stats["guarded_fallback_count"] = (
+                float(solver_stats["guarded_fallback_count"]) + 1.0
+            )
+        power_kw = float(solve_result.power_kw)
         actions.append(_power_to_full_action(power_kw, float(env.agent_p_max[agent_idx]), pv_action=1.0))
     load_raw = (
         np.asarray(env.get_signal_step("load"), dtype=np.float32)
@@ -1059,6 +1146,29 @@ def collect_controller_rollout(
                 "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
                 "import_price_adder_eur_per_kwh": float(
                     getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+                ),
+                "single_agent_mpc_solver_build_count": int(
+                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solver_build_count", 0.0))
+                ),
+                "single_agent_mpc_solver_reuse_count": int(
+                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solver_reuse_count", 0.0))
+                ),
+                "single_agent_mpc_solve_count": int(
+                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0))
+                ),
+                "single_agent_mpc_total_solve_time_sec": float(
+                    getattr(env, "_single_agent_mpc_stats", {}).get("solve_time_sec_total", 0.0)
+                ),
+                "single_agent_mpc_avg_solve_time_sec": float(
+                    (
+                        float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_time_sec_total", 0.0))
+                        / max(float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0)), 1.0)
+                    )
+                    if float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0)) > 0.0
+                    else 0.0
+                ),
+                "single_agent_mpc_guarded_fallback_count": int(
+                    float(getattr(env, "_single_agent_mpc_stats", {}).get("guarded_fallback_count", 0.0))
                 ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "reset",

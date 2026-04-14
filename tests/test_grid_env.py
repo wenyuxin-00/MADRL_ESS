@@ -259,6 +259,25 @@ def test_fixed_battery_mode_accepts_numpy_capacity_vector() -> None:
         env.close()
 
 
+def test_close_cleans_up_private_single_agent_mpc_cache() -> None:
+    env = _build_env(_make_cfg(), mode="test")
+
+    class _DummySolver:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    solver = _DummySolver()
+    env._single_agent_mpc_solver_cache[("agent", 0)] = solver
+
+    env.close()
+
+    assert solver.disposed is True
+    assert env._single_agent_mpc_solver_cache == {}
+
+
 def test_step_return_types(grid_env) -> None:
     grid_env.reset()
     actions = _zero_actions()
