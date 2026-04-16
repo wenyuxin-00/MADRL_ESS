@@ -1132,7 +1132,24 @@ def test_compare_notebook_code_cells_compile():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_path = repo_root / "notebooks" / "madrl" / "compare.ipynb"
     code_cells = _load_code_cells(notebook_path)
+    joined_source = "\n".join(code_cells)
 
     assert len(code_cells) >= 4
+    assert "from scripts.utils.dual_distributed_notebook_helpers import collect_dual_two_pass_rollout" in joined_source
+    assert joined_source.count("collect_dual_two_pass_rollout(") >= 2
+    assert 'label="Dual MPC + Perfect Forecast"' in joined_source
+    assert 'label="Dual MPC + LSTM Forecast"' in joined_source
+    assert 'prediction_mode="perfect"' in joined_source
+    assert 'prediction_mode="normal"' in joined_source
+    assert """rollouts = [
+    global_oracle,
+    mpc_perfect,
+    mpc_lstm,
+    dual_perfect,
+    dual_lstm,
+    madrl_base,
+    madrl_safe,
+    madrl_projection,
+]""" in joined_source
     for cell_index, source in enumerate(code_cells, start=1):
         compile(source, f"{notebook_path.name}:cell{cell_index}", "exec")

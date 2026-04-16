@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **MADRL_ESS** (1992 symbols, 5761 relationships, 169 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **MADRL_ESS** (2824 symbols, 8627 relationships, 243 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -99,3 +99,13 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Environment
+
+- Default to the `MADRL_ESS` Python environment for all repo work.
+- Treat the named Conda environment `MADRL_ESS` as the repository default state.
+- For Python, pytest, notebook inspection, and dependency checks, prefer the `MADRL_ESS` interpreter first, for example `C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe` or `conda run -n MADRL_ESS ...`.
+- Do not use the system `python` by default for this repository unless the user explicitly asks for it.
+- Do not prefer the repo-local `.\.conda\python.exe` as the default anymore; treat it only as a legacy fallback when the named `MADRL_ESS` environment is unavailable or the user explicitly asks for it.
+- If a dependency appears missing under the system interpreter, retry with the `MADRL_ESS` interpreter before concluding that the dependency is unavailable.
+- When reporting environment issues, describe the status of the `MADRL_ESS` environment first; avoid treating missing packages in the system interpreter as the repo's default state.

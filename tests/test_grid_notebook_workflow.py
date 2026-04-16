@@ -510,13 +510,14 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
         def __init__(self, agent_idx: int) -> None:
             self.agent_idx = agent_idx
 
-        def solve(self, *, price_seq, load_seq, pv_seq, soc):
-            del price_seq, load_seq, pv_seq, soc
+        def solve_full_horizon(self, *, price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw=None):
+            del price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw
             return type(
                 "_SolveResult",
                 (),
                 {
-                    "power_kw": 0.5,
+                    "signed_battery_kw": np.array([0.5, 0.0], dtype=np.float32),
+                    "feasible": True,
                     "solve_time_sec": 0.01,
                     "used_guarded_fallback": False,
                 },
@@ -1183,10 +1184,17 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
     assert len(price_fig.axes) == 1
     assert len(price_fig.axes[0].lines) == 2
     assert len(voltage_fig.axes) == 3
-    assert len(net_load_fig.axes) == 9
+    assert voltage_fig.axes[0].get_legend() is not None
+    assert all(axis.get_legend() is None for axis in voltage_fig.axes[1:])
+    assert len(net_load_fig.axes) == 3
     assert len(power_fig.axes) == 3
     assert all(len(axis.patches) > 0 for axis in power_fig.axes)
-    assert len(battery_fig.axes) == 6
+    soc_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "SoC"]
+    power_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "Battery Power [kW]"]
+    assert len(power_axes) == 3
+    assert len(soc_axes) == 3
+    assert all(len(axis.patches) > 0 for axis in power_axes)
+    assert all(len(axis.lines) >= 3 for axis in soc_axes)
 
 
 def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_components():
@@ -1211,7 +1219,7 @@ def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_co
 
     figure = plot_net_load_comparison(rollout)
 
-    assert len(figure.axes) == 3
+    assert len(figure.axes) == 1
     assert len(figure.axes[0].lines) >= 3
 
 
@@ -1262,6 +1270,35 @@ def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_s
     assert len(figure.axes[0].lines) == 2
     predicted_line = figure.axes[0].lines[1]
     assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
+
+
+def test_plot_price_prediction_comparison_raises_when_forecast_rollouts_disagree():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+
+    def _rollout(label: str, predicted: list[float]) -> RolloutResult:
+        return RolloutResult(
+            step_df=pd.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "price": [0.30, 0.40],
+                    "price_pred": predicted,
+                }
+            ),
+            agent_df=pd.DataFrame(),
+            grid_df=pd.DataFrame(),
+            summary=pd.DataFrame(),
+            meta={
+                "controller": label,
+                "prediction_mode": "normal",
+                "import_price_adder_eur_per_kwh": 0.2,
+            },
+        )
+
+    with pytest.raises(ValueError, match="share the same adjusted price prediction"):
+        plot_price_prediction_comparison(
+            _rollout("A", [0.10, 0.20]),
+            _rollout("B", [0.11, 0.21]),
+        )
 
 
 def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp_path):

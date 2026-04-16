@@ -12,6 +12,7 @@ from typing import Mapping
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 from controllers.action_feasibility import (
     build_safety_local_numpy,
@@ -293,7 +294,12 @@ def cache_only_forecast_enabled(cfg) -> bool:
 
 def build_comparison_cfg(cfg, *, prediction_mode: str):
     comparison_cfg = deepcopy(cfg)
-    comparison_cfg.forecast.type = resolve_forecast_backend(prediction_mode, comparison_cfg.env.future_horizon)
+    resolved_type = resolve_forecast_backend(prediction_mode, comparison_cfg.env.future_horizon)
+    if resolved_type != str(cfg.forecast.type):
+        comparison_cfg.runtime.shared_data_dir = None
+        comparison_cfg.runtime.shared_data_signature = None
+        comparison_cfg.runtime.forecast_ready = None
+    comparison_cfg.forecast.type = resolved_type
     if comparison_cfg.forecast.type == "lstm" and comparison_cfg.forecast.lstm_artifact_root is None:
         comparison_cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
     return comparison_cfg
@@ -613,10 +619,7 @@ def _get_single_agent_mpc_solver(
     export_subsidy_eur_per_kwh: float,
 ):
     cache, stats = _ensure_single_agent_mpc_cache_state(env)
-    use_guarded_fallback = single_agent_mpc_module._requires_grid_direction_binary(
-        np.asarray(price_seq, dtype=np.float32),
-        float(export_subsidy_eur_per_kwh),
-    )
+    use_guarded_fallback = False
     horizon = int(np.asarray(price_seq, dtype=np.float32).reshape(-1).size)
     cache_key = (
         int(agent_idx),
@@ -651,7 +654,7 @@ def _get_single_agent_mpc_solver(
 
 
 def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
-    actions: list[np.ndarray] = []
+    requested_battery_kw = np.zeros((env.n,), dtype=np.float32)
     price_seq = np.asarray(obs["price_seq"], dtype=np.float32)
     load_seq = np.asarray(obs["load_seq"], dtype=np.float32)
     pv_seq = np.asarray(obs["pv_seq"], dtype=np.float32)
@@ -669,12 +672,19 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
             soc_max=float(env.soc_max),
             export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh,
         )
-        solve_result = solver.solve(
+        solve_result = solver.solve_full_horizon(
             price_seq=price_seq,
             load_seq=load_seq[agent_idx],
             pv_seq=pv_seq[agent_idx],
             soc=float(env.soc[agent_idx]),
+            pv_curtail_upper_kw=np.zeros_like(pv_seq[agent_idx], dtype=np.float32),
         )
+        if not bool(solve_result.feasible):
+            raise RuntimeError(
+                "Local MPC returned an infeasible or unbounded full-horizon solution "
+                f"for agent {agent_idx}. This usually means the relaxed continuous "
+                "local MPC formulation is not properly bounded on the current price window."
+            )
         solver_stats["solve_count"] = float(solver_stats["solve_count"]) + 1.0
         solver_stats["solve_time_sec_total"] = (
             float(solver_stats["solve_time_sec_total"]) + float(solve_result.solve_time_sec)
@@ -683,8 +693,24 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
             solver_stats["guarded_fallback_count"] = (
                 float(solver_stats["guarded_fallback_count"]) + 1.0
             )
-        power_kw = float(solve_result.power_kw)
-        actions.append(_power_to_full_action(power_kw, float(env.agent_p_max[agent_idx]), pv_action=1.0))
+        requested_battery_kw[agent_idx] = (
+            np.float32(solve_result.signed_battery_kw[0]) if solve_result.signed_battery_kw.size else np.float32(0.0)
+        )
+    if hasattr(env, "get_signal_step"):
+        actions, action_array = _assemble_global_oracle_actions(
+            env,
+            battery_power_kw=requested_battery_kw,
+            pv_curtail_kw=np.zeros((env.n,), dtype=np.float32),
+        )
+    else:
+        clipped_battery_kw = _clip_global_oracle_battery_power_kw(env, requested_battery_kw)
+        p_max_kw = np.maximum(np.asarray(env.agent_p_max, dtype=np.float32), 1e-6)
+        battery_action = np.clip(clipped_battery_kw / p_max_kw, -1.0, 1.0).astype(np.float32)
+        action_array = np.stack(
+            [battery_action, np.ones((env.n,), dtype=np.float32)],
+            axis=-1,
+        ).astype(np.float32)
+        actions = [action_array[agent_idx].copy() for agent_idx in range(env.n)]
     load_raw = (
         np.asarray(env.get_signal_step("load"), dtype=np.float32)
         if hasattr(env, "get_signal_step")
@@ -695,7 +721,6 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
         if hasattr(env, "get_signal_step")
         else np.asarray(pv_seq[:, 0], dtype=np.float32)
     )
-    action_array = np.asarray(actions, dtype=np.float32)
     action_info = compute_action_gap_metrics_numpy(
         build_safety_local_numpy(
             soc=np.asarray(env.soc, dtype=np.float32),
@@ -3060,14 +3085,18 @@ def plot_voltage_profile_comparison(
     figure, axes = plt.subplots(
         n_rows,
         1,
-        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
+        figsize=figsize or (20.0, max(4.0 * n_rows, 5.6)),
         sharex=True,
     )
     axes = np.atleast_1d(axes)
     muted_color = "#cbd5e1"
     highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+    title_fontsize = 14
+    label_fontsize = 12
+    tick_fontsize = 11
+    legend_fontsize = 11
 
-    for axis, rollout in zip(axes, rollouts, strict=False):
+    for axis_idx, (axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         grid_df = rollout.grid_df
         if grid_df.empty:
             raise ValueError(f"Rollout '{rollout.meta.get('controller', 'unknown')}' has no grid_df.")
@@ -3100,89 +3129,103 @@ def plot_voltage_profile_comparison(
                 color=highlight_palette[color_idx % len(highlight_palette)],
                 linewidth=2.1,
                 alpha=0.95,
-                label=f"Agent bus {bus_id}",
+                label=f"Agent bus {bus_id}" if axis_idx == 0 else None,
                 zorder=3,
             )
-        axis.axhline(float(rollout.meta["v_min_pu"]), color="#dc2626", linestyle="--", linewidth=1.1, label="V min")
-        axis.axhline(float(rollout.meta["v_max_pu"]), color="#ea580c", linestyle="--", linewidth=1.1, label="V max")
-        axis.set_ylabel("V [p.u.]")
-        axis.set_title(str(rollout.meta["controller"]))
+        axis.axhline(
+            float(rollout.meta["v_min_pu"]),
+            color="#dc2626",
+            linestyle="--",
+            linewidth=1.1,
+            label="V min" if axis_idx == 0 else None,
+        )
+        axis.axhline(
+            float(rollout.meta["v_max_pu"]),
+            color="#ea580c",
+            linestyle="--",
+            linewidth=1.1,
+            label="V max" if axis_idx == 0 else None,
+        )
+        axis.set_ylabel("V [p.u.]", fontsize=label_fontsize)
+        axis.set_title(str(rollout.meta["controller"]), fontsize=title_fontsize)
         axis.grid(True, alpha=0.25)
-        axis.legend(loc="upper right", ncol=2)
+        axis.tick_params(axis="both", labelsize=tick_fontsize)
+        if axis_idx == 0:
+            axis.legend(loc="upper right", ncol=2, fontsize=legend_fontsize)
 
-    axes[-1].set_xlabel("Timestamp")
+    axes[-1].set_xlabel("Timestamp", fontsize=label_fontsize)
     figure.tight_layout()
     return figure
 
 
 def plot_price_prediction_comparison(
     *rollouts: RolloutResult,
-    figsize: tuple[float, float] = (18.0, 4.2),
+    figsize: tuple[float, float] = (20.0, 5.0),
 ):
     if not rollouts:
         raise ValueError("At least one rollout is required.")
 
-    first_step_df = rollouts[0].step_df.copy()
-    if first_step_df.empty or not {"timestamp", "price", "price_pred"}.issubset(first_step_df.columns):
+    title_fontsize = 14
+    label_fontsize = 12
+    tick_fontsize = 11
+    legend_fontsize = 11
+
+    reference_rollout = next(
+        (rollout for rollout in rollouts if str(rollout.meta.get("prediction_mode", "")) == NORMAL_PREDICTION_MODE),
+        rollouts[0],
+    )
+    reference_step_df = reference_rollout.step_df.copy()
+    if reference_step_df.empty or not {"timestamp", "price", "price_pred"}.issubset(reference_step_df.columns):
         raise ValueError("Rollouts must contain timestamp, price, and price_pred columns.")
 
     figure, axis = plt.subplots(1, 1, figsize=figsize)
     axis.plot(
-        first_step_df["timestamp"],
-        first_step_df["price"],
+        reference_step_df["timestamp"],
+        reference_step_df["price"],
         color="#111827",
         linewidth=1.8,
         label="Price",
     )
 
-    shared_prediction = True
-    first_price_adder = float(rollouts[0].meta.get("import_price_adder_eur_per_kwh", 0.0))
-    reference_pred = first_step_df["price_pred"].to_numpy(dtype=np.float64) + first_price_adder
-    for rollout in rollouts[1:]:
+    reference_price_adder = float(reference_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
+    reference_timestamps = pd.to_datetime(reference_step_df["timestamp"]).to_numpy()
+    reference_pred = reference_step_df["price_pred"].to_numpy(dtype=np.float64) + reference_price_adder
+    for rollout in rollouts:
+        if str(rollout.meta.get("prediction_mode", "")) != NORMAL_PREDICTION_MODE:
+            continue
         step_df = rollout.step_df.copy()
         if step_df.empty or "price_pred" not in step_df.columns:
             raise ValueError(
                 f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing price_pred for compare plotting."
             )
         price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
-        shared_prediction = (
-            shared_prediction
-            and step_df["price_pred"].shape == first_step_df["price_pred"].shape
-            and np.allclose(
-                step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder,
-                reference_pred,
-                equal_nan=True,
-            )
-        )
-
-    if shared_prediction:
-        axis.plot(
-            first_step_df["timestamp"],
-            first_step_df["price_pred"].to_numpy(dtype=np.float64) + first_price_adder,
-            color="#dc2626",
-            linewidth=1.5,
-            linestyle="--",
-            label="Adjusted price pred (shared)",
-        )
-    else:
-        palette = ["#dc2626", "#2563eb", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
-        for color_idx, rollout in enumerate(rollouts):
-            step_df = rollout.step_df.copy()
-            price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
-            axis.plot(
-                step_df["timestamp"],
-                step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder,
-                color=palette[color_idx % len(palette)],
-                linewidth=1.4,
-                linestyle="--",
-                label=f"{rollout.meta.get('controller', 'unknown')} adjusted pred",
+        candidate_timestamps = pd.to_datetime(step_df["timestamp"]).to_numpy()
+        candidate_pred = step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder
+        if (
+            candidate_timestamps.shape != reference_timestamps.shape
+            or not np.array_equal(candidate_timestamps, reference_timestamps)
+            or candidate_pred.shape != reference_pred.shape
+            or not np.allclose(candidate_pred, reference_pred, equal_nan=True)
+        ):
+            raise ValueError(
+                "Compare price plotting expects all forecast/LSTM rollouts to share the same adjusted price prediction."
             )
 
-    axis.set_title("Price And Adjusted Forecast")
-    axis.set_ylabel("EUR/kWh")
-    axis.set_xlabel("Timestamp")
+    axis.plot(
+        reference_step_df["timestamp"],
+        reference_pred,
+        color="#dc2626",
+        linewidth=1.8,
+        linestyle="--",
+        label="Predicted price",
+    )
+
+    axis.set_title("Price And Adjusted Forecast", fontsize=title_fontsize)
+    axis.set_ylabel("EUR/kWh", fontsize=label_fontsize)
+    axis.set_xlabel("Timestamp", fontsize=label_fontsize)
     axis.grid(True, alpha=0.25)
-    axis.legend(loc="upper right", ncol=2)
+    axis.tick_params(axis="both", labelsize=tick_fontsize)
+    axis.legend(loc="upper right", ncol=2, fontsize=legend_fontsize)
     figure.tight_layout()
     return figure
 
@@ -3197,23 +3240,21 @@ def plot_net_load_comparison(
     n_rows = len(rollouts)
     figure, axes = plt.subplots(
         n_rows,
-        3,
-        figsize=figsize or (30.0, max(3.8 * n_rows, 5.8)),
-        sharex=False,
+        1,
+        figsize=figsize or (20.0, max(4.2 * n_rows, 5.8)),
+        sharex=True,
     )
-    axes = np.asarray(axes, dtype=object)
-    if axes.ndim == 1:
-        axes = axes.reshape(1, 3)
+    axes = np.atleast_1d(axes)
+    title_fontsize = 14
+    label_fontsize = 12
+    tick_fontsize = 11
+    legend_fontsize = 11
 
-    for row_axes, rollout in zip(axes, rollouts, strict=False):
-        feeder_axis, agent_axis, duration_axis = row_axes.tolist()
+    for axis_idx, (feeder_axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         step_df = _prepare_compare_net_load_frame(
             rollout.step_df,
             controller_label=str(rollout.meta.get("controller", "unknown")),
         )
-        agent_raw = step_df["agent_raw_net_load_kw"].to_numpy(dtype=np.float32)
-        agent_effective = step_df["agent_effective_net_load_kw"].to_numpy(dtype=np.float32)
-        agent_post_action = step_df["agent_post_action_net_load_kw"].to_numpy(dtype=np.float32)
         feeder_axis.plot(
             step_df["timestamp"],
             step_df["feeder_raw_net_load_kw"],
@@ -3262,80 +3303,23 @@ def plot_net_load_comparison(
                     color="#dc2626",
                     linestyle=":",
                     linewidth=1.2,
-                    label=f"Transformer S-limit ref (+P view) ({trafo_limit_value:.1f} kW)",
+                    label=f"Transformer S-limit ref (+P view) ({trafo_limit_value:.1f} kW)" if axis_idx == 0 else None,
                 )
                 feeder_axis.axhline(
                     -trafo_limit_value,
                     color="#dc2626",
                     linestyle=":",
                     linewidth=1.2,
-                    label=f"Transformer S-limit ref (-P view) ({trafo_limit_value:.1f} kW)",
+                    label=f"Transformer S-limit ref (-P view) ({trafo_limit_value:.1f} kW)" if axis_idx == 0 else None,
                 )
-        feeder_axis.set_ylabel("kW")
-        feeder_axis.set_title(f"{rollout.meta['controller']} - feeder total")
+        feeder_axis.set_ylabel("kW", fontsize=label_fontsize)
+        feeder_axis.set_title(f"{rollout.meta['controller']} - feeder total", fontsize=title_fontsize)
         feeder_axis.grid(True, alpha=0.25)
-        feeder_axis.legend(loc="upper right")
+        feeder_axis.tick_params(axis="both", labelsize=tick_fontsize)
+        if axis_idx == 0:
+            feeder_axis.legend(loc="upper right", fontsize=legend_fontsize)
 
-        agent_axis.plot(
-            step_df["timestamp"],
-            agent_raw,
-            color="#111827",
-            linewidth=1.6,
-            label="Agent raw net load",
-        )
-        agent_axis.plot(
-            step_df["timestamp"],
-            agent_effective,
-            color="#16a34a",
-            linewidth=1.4,
-            linestyle="-.",
-            label="Agent post-curtail net load",
-        )
-        agent_axis.plot(
-            step_df["timestamp"],
-            agent_post_action,
-            color="#2563eb",
-            linewidth=1.5,
-            linestyle="--",
-            label="Agent post-action net load",
-        )
-        agent_axis.set_ylabel("kW")
-        agent_axis.set_title(f"{rollout.meta['controller']} - agent-only aggregate")
-        agent_axis.grid(True, alpha=0.25)
-        agent_axis.legend(loc="upper right")
-
-        duration_rank = np.arange(len(step_df), dtype=np.int32)
-        duration_axis.plot(
-            duration_rank,
-            np.sort(step_df["feeder_raw_net_load_kw"].to_numpy(dtype=np.float32))[::-1],
-            color="#111827",
-            linewidth=1.4,
-            label="Feeder raw duration",
-        )
-        duration_axis.plot(
-            duration_rank,
-            np.sort(step_df["feeder_post_action_net_load_kw"].to_numpy(dtype=np.float32))[::-1],
-            color="#2563eb",
-            linewidth=1.6,
-            label="Feeder post-action duration",
-        )
-        if "root_net_exchange_kw" in step_df.columns:
-            duration_axis.plot(
-                duration_rank,
-                np.sort(step_df["root_net_exchange_kw"].to_numpy(dtype=np.float32))[::-1],
-                color="#7c3aed",
-                linewidth=1.4,
-                linestyle="--",
-                label="Root exchange duration",
-            )
-        duration_axis.set_ylabel("kW")
-        duration_axis.set_title(f"{rollout.meta['controller']} - feeder duration curve")
-        duration_axis.grid(True, alpha=0.25)
-        duration_axis.legend(loc="upper right")
-
-    axes[-1, 0].set_xlabel("Timestamp")
-    axes[-1, 1].set_xlabel("Timestamp")
-    axes[-1, 2].set_xlabel("Sorted interval")
+    axes[-1].set_xlabel("Timestamp", fontsize=label_fontsize)
     figure.tight_layout()
     return figure
 
@@ -3351,10 +3335,14 @@ def plot_power_balance_comparison(
     figure, axes = plt.subplots(
         n_rows,
         1,
-        figsize=figsize or (18.0, max(3.2 * n_rows, 4.8)),
+        figsize=figsize or (20.0, max(4.0 * n_rows, 5.6)),
         sharex=True,
     )
     axes = np.atleast_1d(axes)
+    title_fontsize = 14
+    label_fontsize = 12
+    tick_fontsize = 11
+    legend_fontsize = 11
     positive_specs = [
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
@@ -3408,15 +3396,17 @@ def plot_power_balance_comparison(
             )
             negative_bottom = negative_bottom - values
         axis.axhline(0.0, color="#111827", linewidth=1.0)
-        axis.set_ylabel("kW")
+        axis.set_ylabel("kW", fontsize=label_fontsize)
         axis.set_title(
-            f"{rollout.meta['controller']} - agent-only balance (residual<={max_abs_balance_residual_kw:.3f} kW)"
+            f"{rollout.meta['controller']} - agent-only balance (residual<={max_abs_balance_residual_kw:.3f} kW)",
+            fontsize=title_fontsize,
         )
         axis.grid(True, axis="y", alpha=0.25)
+        axis.tick_params(axis="both", labelsize=tick_fontsize)
         if axis_idx == 0:
-            axis.legend(loc="upper right", ncol=4)
+            axis.legend(loc="upper right", ncol=4, fontsize=legend_fontsize)
 
-    axes[-1].set_xlabel("Timestamp")
+    axes[-1].set_xlabel("Timestamp", fontsize=label_fontsize)
     figure.tight_layout()
     return figure
 
@@ -3428,18 +3418,27 @@ def plot_battery_power_and_soc_comparison(
     if not rollouts:
         raise ValueError("At least one rollout is required.")
 
-    n_rows = len(rollouts) * 2
+    n_rows = len(rollouts)
     figure, axes = plt.subplots(
         n_rows,
         1,
-        figsize=figsize or (18.0, max(2.8 * n_rows, 6.0)),
-        sharex=False,
+        figsize=figsize or (20.0, max(4.2 * n_rows, 6.5)),
+        sharex=True,
     )
     axes = np.atleast_1d(axes)
+    title_fontsize = 14
+    label_fontsize = 12
+    tick_fontsize = 11
+    legend_fontsize = 11
+    discharge_color = "#dc2626"
+    charge_color = "#2563eb"
+    soc_agent_color = "#94a3b8"
+    soc_mean_color = "#111827"
+    zero_line_color = "#475569"
 
     for rollout_idx, rollout in enumerate(rollouts):
-        power_axis = axes[2 * rollout_idx]
-        soc_axis = axes[2 * rollout_idx + 1]
+        power_axis = axes[rollout_idx]
+        soc_axis = power_axis.twinx()
         step_df = rollout.step_df.copy()
         agent_df = rollout.agent_df.copy()
         if step_df.empty:
@@ -3453,18 +3452,20 @@ def plot_battery_power_and_soc_comparison(
             step_df["battery_discharge_total"].to_numpy(dtype=np.float32)
             - step_df["battery_charge_total"].to_numpy(dtype=np.float32)
         )
-        power_axis.plot(
+        net_power = step_df["battery_net_power_kw"].to_numpy(dtype=np.float32)
+        bar_colors = [discharge_color if value >= 0.0 else charge_color for value in net_power]
+        power_axis.bar(
             step_df["timestamp"],
-            step_df["battery_net_power_kw"],
-            color="#2563eb",
-            linewidth=1.6,
-            label="Battery net power (+ discharge / - charge)",
+            net_power,
+            width=0.008,
+            color=bar_colors,
+            alpha=0.82,
         )
-        power_axis.axhline(0.0, color="#111827", linewidth=1.0)
-        power_axis.set_ylabel("kW")
-        power_axis.set_title(str(rollout.meta["controller"]))
+        power_axis.axhline(0.0, color=zero_line_color, linewidth=1.0)
+        power_axis.set_ylabel("Battery Power [kW]", fontsize=label_fontsize)
+        power_axis.set_title(str(rollout.meta["controller"]), fontsize=title_fontsize)
         power_axis.grid(True, alpha=0.25)
-        power_axis.legend(loc="upper right")
+        power_axis.tick_params(axis="both", labelsize=tick_fontsize)
 
         if agent_df.empty or "soc" not in agent_df.columns:
             raise ValueError(
@@ -3475,35 +3476,54 @@ def plot_battery_power_and_soc_comparison(
             raise ValueError(
                 f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing grouping columns required to aggregate SoC."
             )
+        agent_id_column = "agent_id" if "agent_id" in agent_df.columns else None
+        if agent_id_column is None:
+            raise ValueError(
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing agent_df.agent_id required for compare plotting."
+            )
         soc_summary = (
             agent_df.groupby(group_columns, as_index=False)
             .agg(
                 mean=("soc", "mean"),
-                min=("soc", "min"),
-                max=("soc", "max"),
             )
         )
+        first_agent = True
+        for _, agent_frame in agent_df.sort_values(group_columns + [agent_id_column]).groupby(agent_id_column, sort=True):
+            soc_axis.plot(
+                agent_frame["timestamp"],
+                agent_frame["soc"],
+                color=soc_agent_color,
+                linewidth=1.1,
+                alpha=0.45,
+                label="Agent SoC" if first_agent and rollout_idx == 0 else None,
+            )
+            first_agent = False
         soc_axis.plot(
             soc_summary["timestamp"],
             soc_summary["mean"],
-            color="#111827",
-            linewidth=1.5,
-            label="Mean SoC",
+            color=soc_mean_color,
+            linewidth=1.7,
+            label="Mean SoC" if rollout_idx == 0 else None,
         )
-        soc_axis.fill_between(
-            soc_summary["timestamp"].to_numpy(),
-            soc_summary["min"].to_numpy(dtype=np.float32),
-            soc_summary["max"].to_numpy(dtype=np.float32),
-            color="#cbd5e1",
-            alpha=0.45,
-            label="Min/Max SoC",
-        )
-        soc_axis.set_ylabel("SoC")
+        soc_axis.set_ylabel("SoC", fontsize=label_fontsize)
         soc_axis.set_ylim(0.0, 1.0)
         soc_axis.grid(True, alpha=0.25)
-        soc_axis.legend(loc="upper right")
+        soc_axis.tick_params(axis="both", labelsize=tick_fontsize)
+        if rollout_idx == 0:
+            legend_handles = [
+                Patch(facecolor=discharge_color, alpha=0.82, label="Discharge (+)"),
+                Patch(facecolor=charge_color, alpha=0.82, label="Charge (-)"),
+            ]
+            handles_2, labels_2 = soc_axis.get_legend_handles_labels()
+            power_axis.legend(
+                legend_handles + handles_2,
+                ["Discharge (+)", "Charge (-)"] + labels_2,
+                loc="upper right",
+                ncol=2,
+                fontsize=legend_fontsize,
+            )
 
-    axes[-1].set_xlabel("Timestamp")
+    axes[-1].set_xlabel("Timestamp", fontsize=label_fontsize)
     figure.tight_layout()
     return figure
 
