@@ -49,7 +49,8 @@
       "Bash(python -m pytest tests/test_normal_reward.py -v)",
       "Bash(grep -n \"collect_madrl_rollout\\\\|collect_mpc_rollout\\\\|compare_rollout_metrics\" scripts/utils/*.py)",
       "Bash(grep -r \"sb_code\\\\|grid.sb_code\\\\|SimBench\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS --include=\"*.py\" -not -path \"*/.conda/*\")",
-      "Bash(grep -r \"sb_code\\\\|grid\\\\.sb_code\\\\|1-LV-rural\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS --include=\"*.py\" -not -path \"*/.conda/*\")"
+      "Bash(grep -r \"sb_code\\\\|grid\\\\.sb_code\\\\|1-LV-rural\" /c/Users/10856/Desktop/GithubProject/MADRL_ESS --include=\"*.py\" -not -path \"*/.conda/*\")",
+      "Bash(awk -F, 'NR>1 {for\\(i=2;i<=NF;i++\\) if\\($i+0>m[i]\\) m[i]=$i+0} END {for\\(i=2;i<=NF;i++\\) printf \"col%d_max=%s\\\\n\", i, m[i]}' c:/Users/10856/Desktop/GithubProject/MADRL_ESS/data/processed/prosumer/pv_reference.csv)"
     ]
   }
 }

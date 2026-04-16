@@ -1135,21 +1135,40 @@ def test_compare_notebook_code_cells_compile():
     joined_source = "\n".join(code_cells)
 
     assert len(code_cells) >= 4
+    assert "from scripts.utils.dual_direct_notebook_helpers import (" in joined_source
+    assert "collect_admm_direct_rollout" in joined_source
+    assert "ADMM_DIRECT_PERFECT_LABEL" in joined_source
     assert "from scripts.utils.dual_distributed_notebook_helpers import collect_dual_two_pass_rollout" in joined_source
     assert joined_source.count("collect_dual_two_pass_rollout(") >= 2
+    assert 'ENABLE_ADMM_DIRECT = True' in joined_source
+    assert 'admm_direct = collect_admm_direct_rollout(' in joined_source
     assert 'label="Dual MPC + Perfect Forecast"' in joined_source
     assert 'label="Dual MPC + LSTM Forecast"' in joined_source
     assert 'prediction_mode="perfect"' in joined_source
     assert 'prediction_mode="normal"' in joined_source
-    assert """rollouts = [
-    global_oracle,
-    mpc_perfect,
-    mpc_lstm,
-    dual_perfect,
-    dual_lstm,
-    madrl_base,
-    madrl_safe,
-    madrl_projection,
-]""" in joined_source
+    assert """if ENABLE_ADMM_DIRECT:
+    rollouts = [
+        global_oracle,
+        admm_direct,
+        mpc_perfect,
+        mpc_lstm,
+        dual_perfect,
+        dual_lstm,
+        madrl_base,
+        madrl_safe,
+        madrl_projection,
+    ]
+else:
+    rollouts = [
+        global_oracle,
+        mpc_perfect,
+        mpc_lstm,
+        dual_perfect,
+        dual_lstm,
+        madrl_base,
+        madrl_safe,
+        madrl_projection,
+    ]""" in joined_source
+    assert "admm_direct," in joined_source
     for cell_index, source in enumerate(code_cells, start=1):
         compile(source, f"{notebook_path.name}:cell{cell_index}", "exec")
