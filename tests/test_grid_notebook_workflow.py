@@ -3,9 +3,11 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
 
 matplotlib.use("Agg")
 
+from configs.experiment_config import ExperimentConfig
 from scripts.utils.grid_notebook_workflow import (
     FORECAST_EVAL_MODE,
     NORMAL_PREDICTION_MODE,
@@ -38,10 +40,36 @@ from scripts.utils.grid_notebook_workflow import (
     summarize_trafo_diagnostics,
     validate_compare_model_bundles,
 )
-from scripts.utils.forecast_shared_preset import get_managed_lstm_forecast_controls
+from scripts.utils.forecast_shared_preset import (
+    get_managed_lstm_forecast_controls,
+    merge_managed_forecast_controls,
+)
 from scripts.utils.experiment_notebook_utils import summarize_cfg
 from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
-from tests.support.helpers import make_case_dir, make_smoke_config
+from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
+
+
+def _load_code_cells(path: Path) -> list[str]:
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    return [
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+        if cell.get("cell_type") == "code"
+    ]
+
+
+def _expand_cfg_to_multiday(cfg, *, evaluation_days: int = 5) -> None:
+    cfg.env.episode_limit = 96
+    cfg.env.future_horizon = 1
+    cfg.train.max_train_steps = cfg.train.train_episodes * cfg.env.episode_limit
+    write_prosumer_processed_dataset(
+        cfg.data.data_dir,
+        agent_profiles=list(cfg.data.agent_profiles),
+        train_year=2019,
+        test_year=2020,
+        train_steps=96 * evaluation_days,
+        test_steps=96 * evaluation_days,
+    )
 
 
 def test_resolve_forecast_backend_handles_mainline_modes():
@@ -168,6 +196,85 @@ def test_apply_notebook_experiment_settings_applies_forecast_controls(tmp_path):
     assert cfg.forecast.signal_training_overrides == forecast_controls["signal_training_overrides"]
     assert summary["forecast"]["artifact_root"] == cfg.forecast.lstm_artifact_root
     assert summary["forecast"]["auto_train_missing"] is False
+
+
+def test_get_managed_lstm_forecast_controls_matches_canonical_config_defaults():
+    cfg = ExperimentConfig()
+
+    controls = get_managed_lstm_forecast_controls(auto_train_missing=False)
+
+    assert controls["future_horizon"] == cfg.env.future_horizon
+    assert controls["history_window"] == cfg.forecast.history_window
+    assert controls["load_component_split"] is cfg.forecast.load_component_split
+    assert controls["load_scaler_type"] == cfg.forecast.load_scaler_type
+    assert controls["signal_training_overrides"] == cfg.forecast.signal_training_overrides
+
+
+def test_merge_managed_forecast_controls_backfills_missing_fields_and_deep_merges_signals():
+    canonical = get_managed_lstm_forecast_controls(auto_train_missing=False)
+
+    merged = merge_managed_forecast_controls(
+        canonical,
+        {
+            "auto_train_missing": True,
+            "signal_training_overrides": {
+                "price": {
+                    "epochs": 99,
+                }
+            },
+        },
+    )
+
+    assert merged["auto_train_missing"] is True
+    assert merged["load_component_split"] == canonical["load_component_split"]
+    assert merged["signal_training_overrides"]["price"]["epochs"] == 99
+    assert merged["signal_training_overrides"]["price"]["hidden_size"] == canonical["signal_training_overrides"]["price"]["hidden_size"]
+    assert merged["signal_training_overrides"]["load"] == canonical["signal_training_overrides"]["load"]
+
+
+def test_apply_notebook_experiment_settings_backfills_partial_forecast_controls_from_canonical_defaults(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_forecast_partial")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    apply_notebook_experiment_settings(
+        cfg,
+        prediction_mode="normal",
+        test_start_date=20190101,
+        test_end_date=20190130,
+        agent_profiles=["SFH12", "SFH14"],
+        agent_bus_ids=[10, 6],
+        load_scale=1.0,
+        pv_scale=1.0,
+        forecast_controls={
+            "auto_train_missing": False,
+            "signal_training_overrides": {
+                "price": {
+                    "epochs": 99,
+                }
+            },
+        },
+        future_horizon=24,
+        train_year=2019,
+        test_year=2019,
+    )
+
+    assert cfg.forecast.auto_train_missing is False
+    assert cfg.forecast.load_component_split is True
+    assert cfg.forecast.load_scaler_type == "robust"
+    assert cfg.forecast.signal_training_overrides["price"]["epochs"] == 99
+    assert cfg.forecast.signal_training_overrides["price"]["hidden_size"] == 128
+    assert cfg.forecast.signal_training_overrides["load"]["hidden_size"] == 96
+
+
+def test_forecast_lstm_notebook_uses_shared_forecast_preset():
+    repo_root = Path(__file__).resolve().parents[1]
+    notebook_path = repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb"
+    joined_source = "\n".join(_load_code_cells(notebook_path))
+
+    assert "get_managed_lstm_forecast_controls" in joined_source
+    assert "hidden_size = 128" not in joined_source
+    assert "batch_size = 1024" not in joined_source
+    assert "epochs = 20" not in joined_source
 
 
 def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
@@ -441,6 +548,26 @@ def test_collect_controller_rollout_skips_forecast_preflight_in_shared_data_mode
     )
 
     assert not rollout.step_df.empty
+
+
+def test_collect_controller_rollout_respects_shared_data_selected_episode_indices(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_rollout_shared_data_subset")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _expand_cfg_to_multiday(cfg, evaluation_days=5)
+    shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
+    cfg.data.test_start_date = "2020-01-02"
+    cfg.data.test_end_date = "2020-01-04"
+
+    rollout = collect_controller_rollout(
+        cfg,
+        label="ZeroPolicy",
+        action_fn=lambda env, obs: [np.array([0.0, 1.0], dtype=np.float32) for _ in range(env.n)],
+    )
+
+    assert sorted(rollout.step_df["episode_idx"].unique().tolist()) == [1, 2, 3]
+    assert rollout.meta["selected_episode_indices"] == [1, 2, 3]
 
 
 def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_path, monkeypatch):

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import warnings
 from pathlib import Path
 from typing import Any
 
-from data.loaders.registry import build_dataset
+from data.loaders.registry import _resolve_split_dates, build_dataset
 from envs.grid.core.grid_core import GridCore
 from envs.grid.deployments import build_agent_deployments
 from envs.grid_env import GridEnv
@@ -20,7 +21,7 @@ from envs.vec_env import DummyVecEnv
 from models import validate_and_finalize_model_config
 from predictors.registry import build_forecaster
 from scripts.train import TrainRunner
-from scripts.utils.madrl_shared_data import load_madrl_shared_data_manifest
+from scripts.utils.madrl_shared_data import load_madrl_shared_data_manifest, select_shared_data_episode_indices
 from scripts.utils.torch_runtime import configure_torch_runtime
 
 
@@ -44,6 +45,46 @@ def _shared_split_dir(cfg: Any, split: str) -> Path | None:
             f"shared_data_dir is set to '{shared_data_dir}', but split='{split}' is missing '{manifest_path.name}'."
         )
     return split_dir
+
+
+def _load_split_manifest(split_dir: Path) -> dict[str, Any]:
+    return json.loads((split_dir / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _clear_runtime_split_state(cfg: Any) -> None:
+    runtime_cfg = getattr(cfg, "runtime", None)
+    if runtime_cfg is None:
+        return
+    runtime_cfg.effective_split_controls = None
+    runtime_cfg.selected_episode_indices = None
+
+
+def _full_manifest_episode_indices(split_manifest: dict[str, Any]) -> list[int]:
+    episodes = list(split_manifest.get("episodes") or [])
+    return [int(entry["episode_idx"]) for entry in episodes]
+
+
+def _cfg_runtime_split_payload(
+    *,
+    source: str,
+    split: str,
+    year: int,
+    start_date: str | None,
+    end_date: str | None,
+    exclude_start_date: str | None,
+    exclude_end_date: str | None,
+    window_strategy: str = "cfg_window",
+) -> dict[str, Any]:
+    return {
+        "source": str(source),
+        "split": str(split),
+        "year": int(year),
+        "start_date": start_date,
+        "end_date": end_date,
+        "exclude_start_date": exclude_start_date,
+        "exclude_end_date": exclude_end_date,
+        "window_strategy": str(window_strategy),
+    }
 
 
 def _shared_data_metadata(cfg: Any) -> dict[str, Any] | None:
@@ -92,11 +133,58 @@ def build_env(
     forecaster: Any | None = None,
     obs_builder: Any | None = None,
 ) -> Any:
+    _clear_runtime_split_state(cfg)
     split_name = str(mode)
     split_precomputed_dir = _shared_split_dir(cfg, split_name) if split_name in {"train", "test"} else None
+    shared_split_manifest: dict[str, Any] | None = None
 
-    if dataset is None:
+    if split_precomputed_dir is not None:
+        shared_split_manifest = _load_split_manifest(split_precomputed_dir)
+        split_controls = dict(shared_split_manifest.get("split_controls") or {})
+        dataset = build_dataset(
+            cfg,
+            mode=mode,
+            override_start_date=split_controls.get("start_date"),
+            override_end_date=split_controls.get("end_date"),
+            override_exclude_start_date=split_controls.get("exclude_start_date"),
+            override_exclude_end_date=split_controls.get("exclude_end_date"),
+        )
+        requested_start = cfg.data.test_start_date if split_name == "test" else cfg.data.train_start_date
+        requested_end = cfg.data.test_end_date if split_name == "test" else cfg.data.train_end_date
+        selected_episode_indices = (
+            select_shared_data_episode_indices(
+                shared_split_manifest,
+                start_date=requested_start,
+                end_date=requested_end,
+            )
+            if split_name == "test"
+            else _full_manifest_episode_indices(shared_split_manifest)
+        )
+        cfg.runtime.effective_split_controls = _cfg_runtime_split_payload(
+            source="shared_data_manifest",
+            split=split_name,
+            year=int(split_controls.get("year", cfg.data.train_year if split_name == "train" else cfg.data.test_year)),
+            start_date=split_controls.get("start_date"),
+            end_date=split_controls.get("end_date"),
+            exclude_start_date=split_controls.get("exclude_start_date"),
+            exclude_end_date=split_controls.get("exclude_end_date"),
+            window_strategy=str(split_controls.get("window_strategy", "cfg_window")),
+        )
+        cfg.runtime.selected_episode_indices = [int(index) for index in selected_episode_indices]
+    elif dataset is None:
         dataset = build_dataset(cfg, mode=mode)
+    if split_precomputed_dir is None:
+        selected_year, start_date, end_date, exclude_start_date, exclude_end_date = _resolve_split_dates(cfg, mode)
+        cfg.runtime.effective_split_controls = _cfg_runtime_split_payload(
+            source="cfg",
+            split=split_name,
+            year=int(selected_year),
+            start_date=start_date,
+            end_date=end_date,
+            exclude_start_date=exclude_start_date,
+            exclude_end_date=exclude_end_date,
+        )
+        cfg.runtime.selected_episode_indices = None
     if reward_fn is None:
         reward_fn = NormalReward(cfg)
 

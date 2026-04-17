@@ -24,6 +24,7 @@ from controllers.mpc import solve_single_agent_gurobi_mpc_action
 from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
 from predictors.training import ensure_lstm_artifacts
+from scripts.utils.forecast_shared_preset import merge_managed_forecast_controls
 
 PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
@@ -109,6 +110,29 @@ def _normalize_signal_training_overrides(
     return normalized
 
 
+def _canonical_forecast_controls_from_cfg(cfg) -> dict[str, object]:
+    artifact_root = getattr(cfg.forecast, "lstm_artifact_root", None)
+    resolved_artifact_root = None if artifact_root in (None, "") else str(Path(artifact_root).resolve())
+    return {
+        "artifact_root": resolved_artifact_root,
+        "target_signals": [str(value) for value in cfg.forecast.target_signals],
+        "future_horizon": int(cfg.env.future_horizon),
+        "history_window": int(cfg.forecast.history_window),
+        "load_model_mode": str(cfg.forecast.load_model_mode),
+        "load_component_split": bool(cfg.forecast.load_component_split),
+        "load_scaler_type": str(cfg.forecast.load_scaler_type),
+        "load_time_feature_mode": str(cfg.forecast.load_time_feature_mode),
+        "pv_time_feature_mode": str(cfg.forecast.pv_time_feature_mode),
+        "load_hybrid_mode": str(cfg.forecast.load_hybrid_mode),
+        "load_baseline_mode": str(cfg.forecast.load_baseline_mode),
+        "pv_postprocess_mode": str(cfg.forecast.pv_postprocess_mode),
+        "auto_train_missing": bool(cfg.forecast.auto_train_missing),
+        "signal_training_overrides": _normalize_signal_training_overrides(
+            getattr(cfg.forecast, "signal_training_overrides", {})
+        ),
+    }
+
+
 def resolve_forecast_controls(cfg, forecast_controls: Mapping[str, object] | None = None) -> dict[str, object]:
     controls = dict(forecast_controls or {})
     target_signals = [str(value) for value in controls.get("target_signals", cfg.forecast.target_signals)]
@@ -119,27 +143,27 @@ def resolve_forecast_controls(cfg, forecast_controls: Mapping[str, object] | Non
             "forecast_controls.future_horizon must match cfg.env.future_horizon, "
             f"got {configured_future_horizon} vs {cfg.env.future_horizon}."
         )
-
-    artifact_root = controls.get("artifact_root", cfg.forecast.lstm_artifact_root)
+    merged_controls = merge_managed_forecast_controls(_canonical_forecast_controls_from_cfg(cfg), controls)
+    artifact_root = merged_controls.get("artifact_root", cfg.forecast.lstm_artifact_root)
     resolved_artifact_root = None if artifact_root in (None, "") else str(Path(artifact_root).resolve())
     signal_training_overrides = _normalize_signal_training_overrides(
-        controls.get("signal_training_overrides", getattr(cfg.forecast, "signal_training_overrides", {}))
+        merged_controls.get("signal_training_overrides", getattr(cfg.forecast, "signal_training_overrides", {}))
     )
 
     resolved = {
-        "target_signals": target_signals,
-        "history_window": history_window,
-        "load_model_mode": str(controls.get("load_model_mode", cfg.forecast.load_model_mode)),
-        "load_component_split": bool(controls.get("load_component_split", cfg.forecast.load_component_split)),
-        "load_scaler_type": str(controls.get("load_scaler_type", cfg.forecast.load_scaler_type)),
+        "target_signals": [str(value) for value in merged_controls.get("target_signals", target_signals)],
+        "history_window": int(merged_controls.get("history_window", history_window)),
+        "load_model_mode": str(merged_controls.get("load_model_mode", cfg.forecast.load_model_mode)),
+        "load_component_split": bool(merged_controls.get("load_component_split", cfg.forecast.load_component_split)),
+        "load_scaler_type": str(merged_controls.get("load_scaler_type", cfg.forecast.load_scaler_type)),
         "load_time_feature_mode": str(
-            controls.get("load_time_feature_mode", cfg.forecast.load_time_feature_mode)
+            merged_controls.get("load_time_feature_mode", cfg.forecast.load_time_feature_mode)
         ),
-        "pv_time_feature_mode": str(controls.get("pv_time_feature_mode", cfg.forecast.pv_time_feature_mode)),
-        "load_hybrid_mode": str(controls.get("load_hybrid_mode", cfg.forecast.load_hybrid_mode)),
-        "load_baseline_mode": str(controls.get("load_baseline_mode", cfg.forecast.load_baseline_mode)),
-        "pv_postprocess_mode": str(controls.get("pv_postprocess_mode", cfg.forecast.pv_postprocess_mode)),
-        "auto_train_missing": bool(controls.get("auto_train_missing", cfg.forecast.auto_train_missing)),
+        "pv_time_feature_mode": str(merged_controls.get("pv_time_feature_mode", cfg.forecast.pv_time_feature_mode)),
+        "load_hybrid_mode": str(merged_controls.get("load_hybrid_mode", cfg.forecast.load_hybrid_mode)),
+        "load_baseline_mode": str(merged_controls.get("load_baseline_mode", cfg.forecast.load_baseline_mode)),
+        "pv_postprocess_mode": str(merged_controls.get("pv_postprocess_mode", cfg.forecast.pv_postprocess_mode)),
+        "auto_train_missing": bool(merged_controls.get("auto_train_missing", cfg.forecast.auto_train_missing)),
         "artifact_root": resolved_artifact_root,
         "signal_training_overrides": signal_training_overrides,
     }
@@ -772,6 +796,7 @@ def collect_controller_rollout(
     controller=None,
     controller_builder=None,
     action_fn=None,
+    episode_indices: list[int] | None = None,
 ) -> RolloutResult:
     provided = int(controller is not None) + int(controller_builder is not None) + int(action_fn is not None)
     if provided != 1:
@@ -796,7 +821,15 @@ def collect_controller_rollout(
     trafo_limit_kw = _approx_trafo_limit_kw(env, loading_limit_pct=loading_limit_pct)
     try:
         active_controller = controller_builder(env) if controller_builder is not None else controller
-        for episode_idx in range(env.num_available_episodes):
+        effective_episode_indices = (
+            [int(index) for index in episode_indices]
+            if episode_indices is not None
+            else (
+                [int(index) for index in list(getattr(cfg.runtime, "selected_episode_indices", []) or [])]
+                or list(range(int(env.num_available_episodes)))
+            )
+        )
+        for episode_idx in effective_episode_indices:
             obs, reset_info = env.reset(episode_idx=episode_idx)
             raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
             if active_controller is not None:
@@ -1186,6 +1219,7 @@ def collect_controller_rollout(
                 ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "reset",
+                "selected_episode_indices": effective_episode_indices,
             },
         )
     finally:
@@ -1201,6 +1235,7 @@ def collect_madrl_rollout(
     experiment_name: str = "grid_mainline",
     checkpoint_root=None,
     label: str | None = None,
+    episode_indices: list[int] | None = None,
 ) -> RolloutResult:
     from scripts.utils.experiment_notebook_utils import load_madrl_controller
 
@@ -1219,6 +1254,7 @@ def collect_madrl_rollout(
         loaded["cfg"],
         label=label or f"DRL ({resolve_evaluation_mode(prediction_mode)})",
         controller=loaded["controller"],
+        episode_indices=episode_indices,
     )
 
 
@@ -1306,7 +1342,11 @@ def collect_global_full_horizon_rollout(
 
     try:
         problem = GlobalMISOCPProblem.from_env(env, comparison_cfg)
-        full_input = problem.build_full_horizon_input(env)
+        selected_episode_indices = list(getattr(comparison_cfg.runtime, "selected_episode_indices", []) or [])
+        full_input = problem.build_full_horizon_input(
+            env,
+            episode_indices=None if not selected_episode_indices else selected_episode_indices,
+        )
         export_subsidy = float(
             getattr(comparison_cfg.reward, "export_subsidy_eur_per_kwh", problem.export_subsidy_default)
         )

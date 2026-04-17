@@ -19,8 +19,9 @@ import numpy as np
 import pandas as pd
 import torch
 from numpy.lib.format import open_memmap
+from tqdm.auto import tqdm
 
-from data.loaders.registry import build_dataset
+from data.loaders.registry import _resolve_split_dates, _same_year_has_explicit_train_range, build_dataset
 from predictors.lstm_forecaster import load_lstm_forecaster_artifacts
 from predictors.registry import build_forecaster
 from predictors.time_features import DEFAULT_LOCAL_TIMEZONE, coerce_timestamp_index
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 _FLOAT_PRECISION = 6
 _LOCK_TIMEOUT_S = 300.0
 _LOCK_POLL_INTERVAL_S = 0.25
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def _json_default(value: Any):
@@ -150,6 +151,7 @@ def validate_lstm_artifacts_for_shared_data(cfg) -> dict[str, object]:
 
 
 def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, object]) -> dict[str, object]:
+    include_test_window = _test_window_in_signature(cfg)
     return {
         "schema_version": _SCHEMA_VERSION,
         "num_agents": int(cfg.env.num_agents),
@@ -161,8 +163,11 @@ def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, objec
         "test_year": int(cfg.data.test_year),
         "train_start_date": cfg.data.train_start_date,
         "train_end_date": cfg.data.train_end_date,
-        "test_start_date": cfg.data.test_start_date,
-        "test_end_date": cfg.data.test_end_date,
+        "same_year_has_explicit_train_range": bool(_same_year_has_explicit_train_range(cfg)),
+        "test_window_in_signature": bool(include_test_window),
+        "test_window_strategy": _test_window_strategy(cfg),
+        "test_start_date": cfg.data.test_start_date if include_test_window else None,
+        "test_end_date": cfg.data.test_end_date if include_test_window else None,
         "load_components": list(cfg.data.load_components),
         "pv_reference": str(cfg.data.pv_reference),
         "pv_capacity_kw": list(cfg.data.pv_capacity_kw),
@@ -175,6 +180,67 @@ def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, objec
 def build_shared_data_signature(cfg) -> dict[str, object]:
     artifact_info = validate_lstm_artifacts_for_shared_data(cfg)
     return _shared_data_signature_payload(cfg, artifact_fingerprint=dict(artifact_info["fingerprint"]))
+
+
+def _test_window_in_signature(cfg) -> bool:
+    return (
+        int(cfg.data.train_year) == int(cfg.data.test_year)
+        and not _same_year_has_explicit_train_range(cfg)
+    )
+
+
+def _test_window_strategy(cfg) -> str:
+    return "cfg_window" if _test_window_in_signature(cfg) else "full_year_runtime_slice"
+
+
+def _resolve_shared_split_controls(cfg, split: str) -> dict[str, object]:
+    if str(split) == "test" and _test_window_strategy(cfg) == "full_year_runtime_slice":
+        selected_year, start_date, end_date, exclude_start_date, exclude_end_date = _resolve_split_dates(
+            cfg,
+            split,
+            override_start_date=None,
+            override_end_date=None,
+            override_exclude_start_date=None,
+            override_exclude_end_date=None,
+        )
+    else:
+        selected_year, start_date, end_date, exclude_start_date, exclude_end_date = _resolve_split_dates(cfg, split)
+    return {
+        "split": str(split),
+        "year": int(selected_year),
+        "start_date": start_date,
+        "end_date": end_date,
+        "exclude_start_date": exclude_start_date,
+        "exclude_end_date": exclude_end_date,
+        "window_strategy": (
+            _test_window_strategy(cfg)
+            if str(split) == "test"
+            else "cfg_window"
+        ),
+    }
+
+
+def _episode_manifest_entry(dataset, episode_idx: int, episode: dict[str, object]) -> dict[str, object]:
+    episode_slices = list(getattr(dataset, "_episode_slices", []))
+    history_start_idx, active_start_idx, active_end_idx = episode_slices[int(episode_idx)]
+    timestamps = [str(value) for value in list(dict(episode.get("meta", {})).get("timestamps") or [])]
+    first_timestamp = None if not timestamps else str(timestamps[0])
+    last_timestamp = None if not timestamps else str(timestamps[-1])
+    return {
+        "episode_idx": int(episode_idx),
+        "first_timestamp": first_timestamp,
+        "last_timestamp": last_timestamp,
+        "first_local_date": None if first_timestamp is None else str(pd.Timestamp(first_timestamp).date()),
+        "last_local_date": None if last_timestamp is None else str(pd.Timestamp(last_timestamp).date()),
+        "history_start_idx": int(history_start_idx),
+        "active_start_idx": int(active_start_idx),
+        "active_end_idx": int(active_end_idx),
+    }
+
+
+def _full_episode_index_list(split_manifest: dict[str, object]) -> list[int]:
+    episodes = list(split_manifest.get("episodes") or [])
+    return [int(entry["episode_idx"]) for entry in episodes]
 
 
 def _build_calendar_time_matrix(
@@ -246,7 +312,15 @@ def _merge_history_with_episode_signals(
 
 
 def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, object]:
-    dataset = build_dataset(cfg, mode=str(split))
+    split_controls = _resolve_shared_split_controls(cfg, str(split))
+    dataset = build_dataset(
+        cfg,
+        mode=str(split),
+        override_start_date=split_controls["start_date"],
+        override_end_date=split_controls["end_date"],
+        override_exclude_start_date=split_controls["exclude_start_date"],
+        override_exclude_end_date=split_controls["exclude_end_date"],
+    )
     n_episodes = int(dataset.num_episodes())
     episode_length = int(cfg.env.episode_limit)
     n_agents = int(cfg.env.num_agents)
@@ -303,8 +377,13 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
 
     forecaster = build_forecaster(cfg)
     vectorized_forecaster = hasattr(forecaster, "predict_episode_matrix")
+    episode_manifest: list[dict[str, object]] = []
 
-    for episode_idx in range(n_episodes):
+    for episode_idx in tqdm(
+        range(n_episodes),
+        desc=f"shared_data[{split}] episodes",
+        leave=False,
+    ):
         episode = dataset.get_episode(episode_idx)
         signals = {
             key: np.asarray(value, dtype=np.float32)
@@ -319,6 +398,7 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         history_timestamps = [str(value) for value in list(episode.get("history_timestamps") or [])]
         combined_signals, prefix_length = _merge_history_with_episode_signals(signals, history_signals)
         combined_timestamps = [*history_timestamps, *timestamps]
+        episode_manifest.append(_episode_manifest_entry(dataset, episode_idx, episode))
 
         forecaster.reset()
         forecaster.set_episode(combined_signals, meta)
@@ -385,6 +465,8 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         "episode_length": episode_length,
         "num_agents": n_agents,
         "sequence_length": sequence_length,
+        "split_controls": split_controls,
+        "episodes": episode_manifest,
         "files": files,
     }
     (split_dir / "manifest.json").write_text(json.dumps(split_manifest, indent=2, default=_json_default), encoding="utf-8")
@@ -505,6 +587,41 @@ def load_madrl_shared_data_manifest(path: str | Path) -> dict[str, object]:
     return json.loads((shared_dir / "manifest.json").read_text(encoding="utf-8"))
 
 
+def select_shared_data_episode_indices(
+    manifest: dict[str, object],
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> list[int]:
+    episodes = list(manifest.get("episodes") or [])
+    if not episodes:
+        raise ValueError("Shared-data split manifest does not contain episode metadata.")
+
+    if start_date in (None, "") and end_date in (None, ""):
+        selected = [int(entry["episode_idx"]) for entry in episodes]
+        if not selected:
+            raise ValueError("Shared-data split manifest does not contain any selectable episodes.")
+        return selected
+
+    normalized_start = None if start_date in (None, "") else pd.Timestamp(str(start_date)).date()
+    normalized_end = None if end_date in (None, "") else pd.Timestamp(str(end_date)).date()
+    selected: list[int] = []
+    for entry in episodes:
+        first_local_date = None if entry.get("first_local_date") in (None, "") else pd.Timestamp(str(entry["first_local_date"])).date()
+        last_local_date = None if entry.get("last_local_date") in (None, "") else pd.Timestamp(str(entry["last_local_date"])).date()
+        if normalized_start is not None and (first_local_date is None or first_local_date < normalized_start):
+            continue
+        if normalized_end is not None and (last_local_date is None or last_local_date > normalized_end):
+            continue
+        selected.append(int(entry["episode_idx"]))
+    if not selected:
+        raise ValueError(
+            "No shared-data episodes fall fully inside the requested date window: "
+            f"start_date={start_date!r}, end_date={end_date!r}."
+        )
+    return selected
+
+
 def ensure_madrl_shared_data(
     cfg,
     *,
@@ -570,6 +687,8 @@ def ensure_madrl_shared_data(
                 "train_end_date": cfg.data.train_end_date,
                 "test_start_date": cfg.data.test_start_date,
                 "test_end_date": cfg.data.test_end_date,
+                "same_year_has_explicit_train_range": bool(_same_year_has_explicit_train_range(cfg)),
+                "test_window_strategy": _test_window_strategy(cfg),
                 "load_scale": _normalize_for_signature(list(cfg.data.load_scale)),
                 "pv_scale": _normalize_for_signature(list(cfg.data.pv_scale)),
                 "pv_capacity_kw": _normalize_for_signature(list(cfg.data.pv_capacity_kw)),

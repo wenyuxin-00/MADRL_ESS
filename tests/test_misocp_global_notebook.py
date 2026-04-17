@@ -443,6 +443,22 @@ def _make_real_problem_fixture(tmp_path: Path):
     return cfg, problem, full_input, result
 
 
+def test_build_full_horizon_input_supports_contiguous_subranges_and_rejects_noncontiguous_indices(tmp_path):
+    case_dir = make_case_dir(tmp_path, "misocp_full_horizon_indices")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    env = build_env(cfg, mode="test")
+    try:
+        problem = GlobalMISOCPProblem.from_env(env, cfg)
+        contiguous = problem.build_full_horizon_input(env, episode_indices=[1, 2])
+        assert contiguous.episode_indices.tolist() == [1, 2]
+        assert contiguous.episode_offsets.tolist() == [0, cfg.env.episode_limit]
+
+        with pytest.raises(ValueError, match="contiguous episode index ranges"):
+            problem.build_full_horizon_input(env, episode_indices=[0, 2])
+    finally:
+        env.close()
+
+
 def _load_code_cells(path: Path) -> list[str]:
     notebook = json.loads(path.read_text(encoding="utf-8"))
     return [

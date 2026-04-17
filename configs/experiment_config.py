@@ -11,6 +11,35 @@ import torch
 def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]:
+    return {
+        "price": {
+            "hidden_size": 128,
+            "num_layers": 2,
+            "dropout": 0.10,
+            "batch_size": 1024,
+            "epochs": 20,
+            "lr": 1e-3,
+        },
+        "load": {
+            "hidden_size": 96,
+            "num_layers": 2,
+            "dropout": 0.10,
+            "batch_size": 1024,
+            "epochs": 20,
+            "lr": 1e-3,
+        },
+        "pv": {
+            "hidden_size": 96,
+            "num_layers": 1,
+            "dropout": 0.00,
+            "batch_size": 1024,
+            "epochs": 20,
+            "lr": 8e-4,
+        },
+    }
+
 @dataclass
 class DataConfig:
     """Processed prosumer dataset selection."""
@@ -26,7 +55,7 @@ class DataConfig:
     load_components: list[str] = field(default_factory=lambda: ["household", "heatpump"])
     pv_reference: str = "south"
     pv_capacity_kw: list[float] = field(default_factory=list)
-    load_scale: list[float] = field(default_factory=lambda: [5.5, 5.5, 5.5, 5.5, 5.5])
+    load_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
     pv_scale: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 5.0, 5.0])
 
     def resolved_load_scale(self, n_agents: int) -> list[float]:
@@ -98,10 +127,10 @@ class EnvConfig:
 class RewardConfig:
     """Reward weights for the default NormalReward."""
 
-    w_soc_pen: float = 1.0
+    w_soc_pen: float = 2
     export_subsidy_eur_per_kwh: float = 0.079
     import_price_adder_eur_per_kwh: float = 0.20
-    w_voltage_pen: float = 500.0
+    w_voltage_pen: float = 400.0
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
 
@@ -186,7 +215,7 @@ class ForecastConfig:
 
     type: str = "perfect"
     target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
-    history_window: int = 96*3
+    history_window: int = 96 * 3
     load_model_mode: str = "per_agent"
     load_time_feature_mode: str = "hour_week_year"
     pv_time_feature_mode: str = "hour_week_year"
@@ -207,9 +236,11 @@ class ForecastConfig:
     lstm_val_ratio: float = 0.15
     auto_train_missing: bool = True
     lstm_artifact_root: str | Path | None = None
-    signal_training_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
-    load_component_split: bool = False
-    load_scaler_type: str = "standard"
+    signal_training_overrides: dict[str, dict[str, object]] = field(
+        default_factory=_default_managed_signal_training_overrides
+    )
+    load_component_split: bool = True
+    load_scaler_type: str = "robust"
 
     @property
     def lstm_model_path(self) -> None:
@@ -258,6 +289,8 @@ class RuntimeConfig:
     shared_data_dir: str | None = None
     shared_data_signature: str | None = None
     forecast_ready: dict[str, object] | None = None
+    effective_split_controls: dict[str, object] | None = None
+    selected_episode_indices: list[int] | None = None
 
 
 @dataclass

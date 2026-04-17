@@ -30,7 +30,7 @@ def test_testcompare_notebook_contains_compare_calls():
     joined_source = "\n".join(_load_code_cells(notebook_path))
 
     assert "TEST_START_DATE = \"2020-06-01\"" in joined_source
-    assert "TEST_END_DATE = \"2020-06-04\"" in joined_source
+    assert "TEST_END_DATE = \"2020-06-02\"" in joined_source
     assert "PREDICTION_MODE = \"normal\"" in joined_source
     assert "load_training_run_bundle(" in joined_source
     assert "resolve_madrl_model_root(" in joined_source

@@ -2156,17 +2156,44 @@ class GlobalMISOCPProblem:
             chunk_summaries=chunk_summaries,
         )
 
-    def build_full_horizon_input(self, env: Any) -> FullHorizonProblemInput:
+    def build_full_horizon_input(
+        self,
+        env: Any,
+        episode_indices: Sequence[int] | None = None,
+    ) -> FullHorizonProblemInput:
+        if episode_indices is None:
+            requested_episode_indices = list(range(int(env.num_available_episodes)))
+        else:
+            requested_episode_indices = [int(index) for index in episode_indices]
+        if not requested_episode_indices:
+            raise ValueError("build_full_horizon_input requires at least one episode index.")
+        if requested_episode_indices != sorted(requested_episode_indices):
+            raise ValueError(
+                "Global MISOCP full-horizon stitching requires episode_indices to be sorted in ascending order."
+            )
+        for episode_idx in requested_episode_indices:
+            if episode_idx < 0 or episode_idx >= int(env.num_available_episodes):
+                raise IndexError(
+                    f"episode_idx={episode_idx} is out of range [0, {int(env.num_available_episodes) - 1}]"
+                )
+        if any(
+            requested_episode_indices[offset + 1] != requested_episode_indices[offset] + 1
+            for offset in range(len(requested_episode_indices) - 1)
+        ):
+            raise ValueError(
+                "Global MISOCP full-horizon stitching only supports contiguous episode index ranges."
+            )
+
         price_chunks: list[np.ndarray] = []
         load_chunks: list[np.ndarray] = []
         pv_chunks: list[np.ndarray] = []
         timestamps: list[str] = []
         episode_offsets: list[int] = []
         episode_lengths: list[int] = []
-        episode_indices: list[int] = []
+        stitched_episode_indices: list[int] = []
         cursor = 0
 
-        for episode_idx in range(int(env.num_available_episodes)):
+        for episode_idx in requested_episode_indices:
             episode = env._dataset.get_episode(int(episode_idx))
             signals = dict(episode.get("signals", {}))
             if "price" not in signals or "load" not in signals:
@@ -2194,7 +2221,7 @@ class GlobalMISOCPProblem:
 
             episode_offsets.append(cursor)
             episode_lengths.append(int(price.size))
-            episode_indices.append(int(episode_idx))
+            stitched_episode_indices.append(int(episode_idx))
             price_chunks.append(price.astype(np.float32, copy=False))
             load_chunks.append(load.T.astype(np.float32, copy=False))
             pv_chunks.append(pv.T.astype(np.float32, copy=False))
@@ -2209,7 +2236,7 @@ class GlobalMISOCPProblem:
             timestamps=tuple(timestamps),
             episode_offsets=np.asarray(episode_offsets, dtype=np.int32),
             episode_lengths=np.asarray(episode_lengths, dtype=np.int32),
-            episode_indices=np.asarray(episode_indices, dtype=np.int32),
+            episode_indices=np.asarray(stitched_episode_indices, dtype=np.int32),
         )
 
     def build_full_mip_start(self, result: MISOCPResult) -> dict[str, np.ndarray]:

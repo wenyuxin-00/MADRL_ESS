@@ -132,7 +132,13 @@ def _uses_precomputed_shared_data(cfg) -> bool:
     return shared_data_dir not in (None, "")
 
 
-def evaluate_runner(runner, cfg, n_episodes: int = 1, deterministic: bool = True) -> dict:
+def evaluate_runner(
+    runner,
+    cfg,
+    n_episodes: int = 1,
+    deterministic: bool = True,
+    episode_indices: list[int] | None = None,
+) -> dict:
     from scripts.utils.grid_notebook_workflow import ensure_forecast_ready
 
     if _uses_precomputed_shared_data(cfg):
@@ -142,11 +148,20 @@ def evaluate_runner(runner, cfg, n_episodes: int = 1, deterministic: bool = True
     eval_env = build_env(cfg, mode="test")
     controller = MADRLController(runner.agent_n, noise_std=runner.noise_std)
     try:
+        effective_episode_indices = (
+            [int(index) for index in episode_indices]
+            if episode_indices is not None
+            else (
+                [int(index) for index in list(getattr(cfg.runtime, "selected_episode_indices", []) or [])]
+                or None
+            )
+        )
         return evaluate_controller(
             env=eval_env,
             controller=controller,
             n_episodes=n_episodes,
             deterministic=deterministic,
+            episode_indices=effective_episode_indices,
             record_history=True,
         )
     finally:

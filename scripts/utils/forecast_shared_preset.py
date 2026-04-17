@@ -5,39 +5,39 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+from configs.experiment_config import ExperimentConfig
 from predictors.artifacts import get_default_lstm_artifact_dir
 
-_DEFAULT_SIGNAL_TRAINING_OVERRIDES: dict[str, dict[str, object]] = {
-    "price": {
-        "hidden_size": 128,
-        "num_layers": 2,
-        "dropout": 0.10,
-        "batch_size": 1024,
-        "epochs": 20,
-        "lr": 1e-3,
-    },
-    "load": {
-        "hidden_size": 96,
-        "num_layers": 2,
-        "dropout": 0.10,
-        "batch_size": 1024,
-        "epochs": 20,
-        "lr": 1e-3,
-    },
-    "pv": {
-        "hidden_size": 96,
-        "num_layers": 1,
-        "dropout": 0.00,
-        "batch_size": 1024,
-        "epochs": 20,
-        "lr": 8e-4,
-    },
-}
+
+def _default_cfg() -> ExperimentConfig:
+    return ExperimentConfig()
 
 
 def get_managed_lstm_signal_training_overrides() -> dict[str, dict[str, object]]:
     """Return the canonical per-signal LSTM overrides shared by notebooks."""
-    return deepcopy(_DEFAULT_SIGNAL_TRAINING_OVERRIDES)
+    cfg = _default_cfg()
+    return deepcopy(dict(cfg.forecast.signal_training_overrides))
+
+
+def merge_managed_forecast_controls(
+    canonical: dict[str, object],
+    override: dict[str, object] | None,
+) -> dict[str, object]:
+    """Merge metadata or notebook overrides onto canonical forecast defaults."""
+    resolved = deepcopy(dict(canonical))
+    incoming = dict(override or {})
+    incoming_signal_overrides = deepcopy(dict(incoming.pop("signal_training_overrides", {}) or {}))
+    resolved.update(incoming)
+
+    canonical_signal_overrides = deepcopy(dict(canonical.get("signal_training_overrides", {}) or {}))
+    merged_signal_overrides: dict[str, dict[str, object]] = {}
+    signal_names = set(canonical_signal_overrides) | set(incoming_signal_overrides)
+    for signal_name in signal_names:
+        base = deepcopy(dict(canonical_signal_overrides.get(signal_name, {}) or {}))
+        base.update(dict(incoming_signal_overrides.get(signal_name, {}) or {}))
+        merged_signal_overrides[str(signal_name)] = base
+    resolved["signal_training_overrides"] = merged_signal_overrides
+    return resolved
 
 
 def get_managed_lstm_forecast_controls(
@@ -46,20 +46,21 @@ def get_managed_lstm_forecast_controls(
     auto_train_missing: bool = False,
 ) -> dict[str, object]:
     """Return the canonical managed-LSTM controls shared by notebooks."""
+    cfg = _default_cfg()
     root = Path(artifact_root).resolve() if artifact_root is not None else get_default_lstm_artifact_dir()
     return {
         "artifact_root": str(root),
-        "target_signals": ["price", "load", "pv"],
-        "future_horizon": 24,
-        "history_window": 96 * 3,
-        "load_model_mode": "per_agent",
-        "load_component_split": True,
-        "load_scaler_type": "robust",
-        "load_time_feature_mode": "hour_week_year",
-        "pv_time_feature_mode": "hour_week_year",
-        "load_hybrid_mode": "baseline_blend",
-        "load_baseline_mode": "last_value",
-        "pv_postprocess_mode": "physical_clip",
+        "target_signals": list(cfg.forecast.target_signals),
+        "future_horizon": int(cfg.env.future_horizon),
+        "history_window": int(cfg.forecast.history_window),
+        "load_model_mode": str(cfg.forecast.load_model_mode),
+        "load_component_split": bool(cfg.forecast.load_component_split),
+        "load_scaler_type": str(cfg.forecast.load_scaler_type),
+        "load_time_feature_mode": str(cfg.forecast.load_time_feature_mode),
+        "pv_time_feature_mode": str(cfg.forecast.pv_time_feature_mode),
+        "load_hybrid_mode": str(cfg.forecast.load_hybrid_mode),
+        "load_baseline_mode": str(cfg.forecast.load_baseline_mode),
+        "pv_postprocess_mode": str(cfg.forecast.pv_postprocess_mode),
         "auto_train_missing": bool(auto_train_missing),
         "signal_training_overrides": get_managed_lstm_signal_training_overrides(),
     }
@@ -68,4 +69,5 @@ def get_managed_lstm_forecast_controls(
 __all__ = [
     "get_managed_lstm_forecast_controls",
     "get_managed_lstm_signal_training_overrides",
+    "merge_managed_forecast_controls",
 ]
