@@ -15,7 +15,7 @@ def _default_device() -> torch.device:
 def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]:
     return {
         "price": {
-            "hidden_size": 128,
+            "hidden_size": 64,
             "num_layers": 2,
             "dropout": 0.10,
             "batch_size": 1024,
@@ -23,7 +23,7 @@ def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]
             "lr": 1e-3,
         },
         "load": {
-            "hidden_size": 96,
+            "hidden_size": 64,
             "num_layers": 2,
             "dropout": 0.10,
             "batch_size": 1024,
@@ -31,9 +31,9 @@ def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]
             "lr": 1e-3,
         },
         "pv": {
-            "hidden_size": 96,
+            "hidden_size": 64,
             "num_layers": 1,
-            "dropout": 0.00,
+            "dropout": 0.1,
             "batch_size": 1024,
             "epochs": 20,
             "lr": 8e-4,
