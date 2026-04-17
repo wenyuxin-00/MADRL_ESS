@@ -98,7 +98,7 @@ class EnvConfig:
 class RewardConfig:
     """Reward weights for the default NormalReward."""
 
-    w_soc_pen: float = 10.0
+    w_soc_pen: float = 1.0
     export_subsidy_eur_per_kwh: float = 0.079
     import_price_adder_eur_per_kwh: float = 0.20
     w_voltage_pen: float = 500.0

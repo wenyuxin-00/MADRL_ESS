@@ -450,6 +450,8 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
     recorded_modes: list[str] = []
     recorded_subsidies: list[float] = []
     recorded_agent_indices: list[int] = []
+    recorded_solve_calls: list[dict[str, np.ndarray | float | int]] = []
+    recorded_actions: list[np.ndarray] = []
 
     def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
         assert controller is None
@@ -474,9 +476,18 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             agent_c_bat = np.array([4.0, 4.0], dtype=np.float32)
             agent_p_max = np.array([2.0, 2.0], dtype=np.float32)
             reward_fn = type("_DummyReward", (), {"export_subsidy_eur_per_kwh": 0.079})()
+            import_price_adder_eur_per_kwh = 0.2
             _grid_core = _DummyGridCore()
             _single_agent_mpc_solver_cache = {}
             _single_agent_mpc_stats = {}
+
+            @staticmethod
+            def get_signal_step(signal_name: str):
+                if signal_name == "load":
+                    return np.array([1.0, 1.2], dtype=np.float32)
+                if signal_name == "pv":
+                    return np.array([0.6, 0.4], dtype=np.float32)
+                raise KeyError(signal_name)
 
         action_result = action_fn(
             _DummyEnv(),
@@ -488,6 +499,8 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
         )
         actions = action_result[0] if isinstance(action_result, tuple) else action_result
         assert len(actions) == 2
+        action_array = np.stack([np.asarray(action, dtype=np.float32) for action in actions], axis=0)
+        recorded_actions.append(action_array.copy())
         for action in actions:
             value = float(np.asarray(action, dtype=np.float32)[0])
             assert -1.0 <= value <= 1.0
@@ -511,12 +524,22 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             self.agent_idx = agent_idx
 
         def solve_full_horizon(self, *, price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw=None):
-            del price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw
+            recorded_solve_calls.append(
+                {
+                    "agent_idx": int(self.agent_idx),
+                    "price_seq": np.asarray(price_seq, dtype=np.float32).copy(),
+                    "load_seq": np.asarray(load_seq, dtype=np.float32).copy(),
+                    "pv_seq": np.asarray(pv_seq, dtype=np.float32).copy(),
+                    "soc": float(soc),
+                    "pv_curtail_upper_kw": np.asarray(pv_curtail_upper_kw, dtype=np.float32).copy(),
+                }
+            )
             return type(
                 "_SolveResult",
                 (),
                 {
                     "signed_battery_kw": np.array([0.5, 0.0], dtype=np.float32),
+                    "pv_curtail_kw": np.array([0.25, 0.0], dtype=np.float32),
                     "feasible": True,
                     "solve_time_sec": 0.01,
                     "used_guarded_fallback": False,
@@ -552,9 +575,79 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
 
     assert perfect_rollout.meta["controller"] == "MPC (oracle_eval)"
     assert normal_rollout.meta["controller"] == "MPC (forecast_eval)"
+    assert perfect_rollout.meta["single_agent_mpc_price_mode"] == "import_adjusted"
+    assert normal_rollout.meta["single_agent_mpc_price_mode"] == "import_adjusted"
+    assert perfect_rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
+    assert normal_rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
     assert recorded_modes == ["perfect", "lstm"]
     assert recorded_subsidies == [0.079, 0.079, 0.079, 0.079]
     assert recorded_agent_indices == [0, 1, 0, 1]
+    assert len(recorded_solve_calls) == 4
+    for call in recorded_solve_calls:
+        np.testing.assert_allclose(call["price_seq"], np.array([0.4, 0.4], dtype=np.float32))
+        np.testing.assert_allclose(call["pv_curtail_upper_kw"], call["pv_seq"])
+    assert len(recorded_actions) == 2
+    for action_array in recorded_actions:
+        np.testing.assert_allclose(action_array[:, 1], np.array([0.16666663, -0.25], dtype=np.float32), atol=1e-5)
+
+
+def test_collect_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monkeypatch):
+    case_dir = make_case_dir(tmp_path, "grid_rollout_mpc_objective")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
+        del local_cfg, controller, controller_builder, action_fn
+        step_df = pd.DataFrame(
+            [
+                {
+                    "controller": label,
+                    "purchase_cost_total": 3.0,
+                    "export_subsidy_total": 5.0,
+                    "objective_total": 9.0,
+                }
+            ]
+        )
+        agent_df = pd.DataFrame(
+            [
+                {
+                    "controller": label,
+                    "agent_profile": "agent_0",
+                    "purchase_cost": 1.0,
+                    "export_subsidy": 2.5,
+                    "objective_total": 4.0,
+                }
+            ]
+        )
+        summary = pd.DataFrame(
+            [
+                {
+                    "controller": label,
+                    "agent_profile": "agent_0",
+                    "purchase_cost": 1.0,
+                    "export_subsidy": 2.5,
+                    "objective_total": 4.0,
+                }
+            ]
+        )
+        return RolloutResult(
+            step_df=step_df,
+            agent_df=agent_df,
+            grid_df=pd.DataFrame(),
+            summary=summary,
+            meta={"controller": label},
+        )
+
+    monkeypatch.setattr(
+        "scripts.utils.grid_notebook_workflow.collect_controller_rollout",
+        _fake_collect_controller_rollout,
+    )
+
+    rollout = collect_mpc_rollout(cfg, prediction_mode="normal", label="MPC (forecast_eval)")
+
+    assert rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
+    assert float(rollout.step_df.loc[0, "objective_total"]) == pytest.approx(-2.0)
+    assert float(rollout.agent_df.loc[0, "objective_total"]) == pytest.approx(-1.5)
+    assert float(rollout.summary.loc[0, "objective_total"]) == pytest.approx(-1.5)
 
 
 def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
@@ -1183,18 +1276,32 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
 
     assert len(price_fig.axes) == 1
     assert len(price_fig.axes[0].lines) == 2
+    assert price_fig.axes[0].title.get_fontsize() == pytest.approx(18)
+    assert price_fig.axes[0].xaxis.label.get_size() == pytest.approx(16)
+    assert price_fig.axes[0].yaxis.label.get_size() == pytest.approx(16)
+    assert any(label.get_fontsize() == pytest.approx(14) for label in price_fig.axes[0].get_xticklabels())
+    assert any(label.get_fontsize() == pytest.approx(14) for label in price_fig.axes[0].get_yticklabels())
     assert len(voltage_fig.axes) == 3
     assert voltage_fig.axes[0].get_legend() is not None
     assert all(axis.get_legend() is None for axis in voltage_fig.axes[1:])
+    assert voltage_fig.axes[0].get_shared_y_axes().joined(voltage_fig.axes[0], voltage_fig.axes[1])
+    assert voltage_fig.axes[0].title.get_fontsize() == pytest.approx(18)
+    assert voltage_fig.axes[0].yaxis.label.get_size() == pytest.approx(16)
+    assert all(text.get_fontsize() == pytest.approx(14) for text in voltage_fig.axes[0].get_legend().get_texts())
     assert len(net_load_fig.axes) == 3
+    assert net_load_fig.axes[0].get_shared_y_axes().joined(net_load_fig.axes[0], net_load_fig.axes[1])
     assert len(power_fig.axes) == 3
     assert all(len(axis.patches) > 0 for axis in power_fig.axes)
+    assert power_fig.axes[0].get_shared_y_axes().joined(power_fig.axes[0], power_fig.axes[1])
+    assert all(text.get_fontsize() == pytest.approx(14) for text in power_fig.axes[0].get_legend().get_texts())
     soc_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "SoC"]
     power_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "Battery Power [kW]"]
     assert len(power_axes) == 3
     assert len(soc_axes) == 3
     assert all(len(axis.patches) > 0 for axis in power_axes)
     assert all(len(axis.lines) >= 3 for axis in soc_axes)
+    assert power_axes[0].get_shared_y_axes().joined(power_axes[0], power_axes[1])
+    assert all(axis.get_ylim() == (0.0, 1.0) for axis in soc_axes)
 
 
 def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_components():
@@ -1272,7 +1379,7 @@ def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_s
     assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
 
 
-def test_plot_price_prediction_comparison_raises_when_forecast_rollouts_disagree():
+def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_rollouts_disagree():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
 
     def _rollout(label: str, predicted: list[float]) -> RolloutResult:
@@ -1294,11 +1401,62 @@ def test_plot_price_prediction_comparison_raises_when_forecast_rollouts_disagree
             },
         )
 
-    with pytest.raises(ValueError, match="share the same adjusted price prediction"):
-        plot_price_prediction_comparison(
-            _rollout("A", [0.10, 0.20]),
-            _rollout("B", [0.11, 0.21]),
-        )
+    figure = plot_price_prediction_comparison(
+        _rollout("A", [0.10, 0.20]),
+        _rollout("B", [0.11, 0.21]),
+    )
+
+    assert len(figure.axes) == 1
+    assert len(figure.axes[0].lines) == 3
+    labels = [line.get_label() for line in figure.axes[0].lines]
+    assert labels[0] == "Price"
+    assert "Predicted price (A)" in labels
+    assert "Predicted price (B)" in labels
+
+
+def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+
+    rollout_a = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.30, 0.40],
+                "import_price_pred": [0.30, 0.40],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "ADMM MPC",
+            "prediction_mode": "normal",
+            "import_price_adder_eur_per_kwh": 0.2,
+        },
+    )
+    rollout_b = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.10, 0.20],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Single-Agent MPC",
+            "prediction_mode": "normal",
+            "import_price_adder_eur_per_kwh": 0.2,
+        },
+    )
+
+    figure = plot_price_prediction_comparison(rollout_a, rollout_b)
+
+    predicted_line = figure.axes[0].lines[1]
+    assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
 
 
 def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp_path):

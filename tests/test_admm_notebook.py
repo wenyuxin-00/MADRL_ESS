@@ -18,6 +18,7 @@ def test_admm_notebook_code_cells_compile():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_path = repo_root / "notebooks" / "madrl" / "ADMM.ipynb"
     assert not (repo_root / "notebooks" / "madrl" / "Dual_test.ipynb").exists()
+    assert not (repo_root / "notebooks" / "madrl" / "Dual_mpc.ipynb").exists()
     code_cells = _load_code_cells(notebook_path)
 
     assert len(code_cells) >= 6
@@ -34,6 +35,8 @@ def test_admm_notebook_contains_direct_day_calls_and_string_dates():
     assert "TEST_END_DATE = \"2020-06-05\"" in joined_source
     assert re.search(r'TEST_START_DATE\s*=\s*"\d{4}-\d{2}-\d{2}"', joined_source)
     assert re.search(r'TEST_END_DATE\s*=\s*"\d{4}-\d{2}-\d{2}"', joined_source)
+    assert "admm_direct_notebook_helpers as direct_nb" in joined_source
+    assert "dual_direct_notebook_helpers" not in joined_source
     assert "build_direct_day_problem_data(" in joined_source
     assert "build_direct_day_trafo_surrogate(" in joined_source
     assert "solve_direct_day_centralized(" in joined_source

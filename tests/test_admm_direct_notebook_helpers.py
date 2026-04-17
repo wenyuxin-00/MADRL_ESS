@@ -9,7 +9,7 @@ import pytest
 
 from envs.rewards.NormalReward import NormalReward
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils import dual_direct_notebook_helpers as direct_nb
+from scripts.utils import admm_direct_notebook_helpers as direct_nb
 
 HAS_GUROBI = importlib.util.find_spec("gurobipy") is not None
 
@@ -19,7 +19,7 @@ def _has_working_gurobi_license() -> bool:
         return False
     try:
         gp, _ = direct_nb._load_gurobi()
-        model = direct_nb._create_model(gp, "dual_direct_test")
+        model = direct_nb._create_model(gp, "admm_direct_test")
         dispose = getattr(model, "dispose", None)
         if callable(dispose):
             dispose()
@@ -154,7 +154,7 @@ def _make_synthetic_problem(T: int = 16, n_agents: int = 3):
     )
     alpha = np.ones((n_agents, T), dtype=np.float32)
     baseline_root = np.sum(load_kw - pv_kw, axis=0).astype(np.float32)
-    surrogate = direct_nb.DualTrafoSurrogate(
+    surrogate = direct_nb.GridTrafoSurrogate(
         trafo_limit_kw=1.0,
         alpha_netload_kw=np.ones((n_agents,), dtype=np.float32),
         alpha_netload_window_kw=alpha,

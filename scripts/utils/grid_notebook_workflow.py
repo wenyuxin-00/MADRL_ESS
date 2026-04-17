@@ -655,7 +655,11 @@ def _get_single_agent_mpc_solver(
 
 def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
     requested_battery_kw = np.zeros((env.n,), dtype=np.float32)
-    price_seq = np.asarray(obs["price_seq"], dtype=np.float32)
+    requested_pv_curtail_kw = np.zeros((env.n,), dtype=np.float32)
+    import_price_adder = float(getattr(env, "import_price_adder_eur_per_kwh", 0.0))
+    price_seq = (
+        np.asarray(obs["price_seq"], dtype=np.float32) + np.float32(import_price_adder)
+    ).astype(np.float32, copy=False)
     load_seq = np.asarray(obs["load_seq"], dtype=np.float32)
     pv_seq = np.asarray(obs["pv_seq"], dtype=np.float32)
     export_subsidy_eur_per_kwh = float(getattr(env.reward_fn, "export_subsidy_eur_per_kwh", 0.079))
@@ -677,7 +681,7 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
             load_seq=load_seq[agent_idx],
             pv_seq=pv_seq[agent_idx],
             soc=float(env.soc[agent_idx]),
-            pv_curtail_upper_kw=np.zeros_like(pv_seq[agent_idx], dtype=np.float32),
+            pv_curtail_upper_kw=np.maximum(pv_seq[agent_idx], 0.0).astype(np.float32, copy=False),
         )
         if not bool(solve_result.feasible):
             raise RuntimeError(
@@ -696,31 +700,16 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
         requested_battery_kw[agent_idx] = (
             np.float32(solve_result.signed_battery_kw[0]) if solve_result.signed_battery_kw.size else np.float32(0.0)
         )
-    if hasattr(env, "get_signal_step"):
-        actions, action_array = _assemble_global_oracle_actions(
-            env,
-            battery_power_kw=requested_battery_kw,
-            pv_curtail_kw=np.zeros((env.n,), dtype=np.float32),
+        requested_pv_curtail_kw[agent_idx] = (
+            np.float32(solve_result.pv_curtail_kw[0]) if solve_result.pv_curtail_kw.size else np.float32(0.0)
         )
-    else:
-        clipped_battery_kw = _clip_global_oracle_battery_power_kw(env, requested_battery_kw)
-        p_max_kw = np.maximum(np.asarray(env.agent_p_max, dtype=np.float32), 1e-6)
-        battery_action = np.clip(clipped_battery_kw / p_max_kw, -1.0, 1.0).astype(np.float32)
-        action_array = np.stack(
-            [battery_action, np.ones((env.n,), dtype=np.float32)],
-            axis=-1,
-        ).astype(np.float32)
-        actions = [action_array[agent_idx].copy() for agent_idx in range(env.n)]
-    load_raw = (
-        np.asarray(env.get_signal_step("load"), dtype=np.float32)
-        if hasattr(env, "get_signal_step")
-        else np.asarray(load_seq[:, 0], dtype=np.float32)
+    actions, action_array = _assemble_global_oracle_actions(
+        env,
+        battery_power_kw=requested_battery_kw,
+        pv_curtail_kw=requested_pv_curtail_kw,
     )
-    pv_raw = (
-        np.asarray(env.get_signal_step("pv"), dtype=np.float32)
-        if hasattr(env, "get_signal_step")
-        else np.asarray(pv_seq[:, 0], dtype=np.float32)
-    )
+    load_raw = np.asarray(env.get_signal_step("load"), dtype=np.float32)
+    pv_raw = np.asarray(env.get_signal_step("pv"), dtype=np.float32)
     action_info = compute_action_gap_metrics_numpy(
         build_safety_local_numpy(
             soc=np.asarray(env.soc, dtype=np.float32),
@@ -1237,11 +1226,29 @@ def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) 
     comparison_cfg = build_comparison_cfg(cfg, prediction_mode=prediction_mode)
     resolved_mode = normalize_prediction_mode(prediction_mode)
     rollout_label = label or f"MPC ({resolve_evaluation_mode(resolved_mode)})"
-    return collect_controller_rollout(
+    rollout = collect_controller_rollout(
         comparison_cfg,
         label=rollout_label,
         action_fn=_mpc_policy,
     )
+    if not rollout.step_df.empty and {"purchase_cost_total", "export_subsidy_total"}.issubset(rollout.step_df.columns):
+        rollout.step_df["objective_total"] = (
+            rollout.step_df["purchase_cost_total"].astype(float)
+            - rollout.step_df["export_subsidy_total"].astype(float)
+        )
+    if not rollout.agent_df.empty and {"purchase_cost", "export_subsidy"}.issubset(rollout.agent_df.columns):
+        rollout.agent_df["objective_total"] = (
+            rollout.agent_df["purchase_cost"].astype(float)
+            - rollout.agent_df["export_subsidy"].astype(float)
+        )
+    if not rollout.summary.empty and {"purchase_cost", "export_subsidy"}.issubset(rollout.summary.columns):
+        rollout.summary["objective_total"] = (
+            rollout.summary["purchase_cost"].astype(float)
+            - rollout.summary["export_subsidy"].astype(float)
+        )
+    rollout.meta["single_agent_mpc_price_mode"] = "import_adjusted"
+    rollout.meta["single_agent_mpc_objective_mode"] = "economic_only"
+    return rollout
 
 
 def collect_global_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) -> RolloutResult:
@@ -3087,14 +3094,15 @@ def plot_voltage_profile_comparison(
         1,
         figsize=figsize or (20.0, max(4.0 * n_rows, 5.6)),
         sharex=True,
+        sharey=True,
     )
     axes = np.atleast_1d(axes)
     muted_color = "#cbd5e1"
     highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
-    title_fontsize = 14
-    label_fontsize = 12
-    tick_fontsize = 11
-    legend_fontsize = 11
+    title_fontsize = 18
+    label_fontsize = 16
+    tick_fontsize = 14
+    legend_fontsize = 14
 
     for axis_idx, (axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         grid_df = rollout.grid_df
@@ -3165,10 +3173,10 @@ def plot_price_prediction_comparison(
     if not rollouts:
         raise ValueError("At least one rollout is required.")
 
-    title_fontsize = 14
-    label_fontsize = 12
-    tick_fontsize = 11
-    legend_fontsize = 11
+    title_fontsize = 18
+    label_fontsize = 16
+    tick_fontsize = 14
+    legend_fontsize = 14
 
     reference_rollout = next(
         (rollout for rollout in rollouts if str(rollout.meta.get("prediction_mode", "")) == NORMAL_PREDICTION_MODE),
@@ -3187,9 +3195,14 @@ def plot_price_prediction_comparison(
         label="Price",
     )
 
+    def _resolve_adjusted_price_prediction(step_df: pd.DataFrame, *, price_adder: float) -> np.ndarray:
+        if "import_price_pred" in step_df.columns:
+            return step_df["import_price_pred"].to_numpy(dtype=np.float64)
+        return step_df["price_pred"].to_numpy(dtype=np.float64) + float(price_adder)
+
     reference_price_adder = float(reference_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
-    reference_timestamps = pd.to_datetime(reference_step_df["timestamp"]).to_numpy()
-    reference_pred = reference_step_df["price_pred"].to_numpy(dtype=np.float64) + reference_price_adder
+    reference_pred = _resolve_adjusted_price_prediction(reference_step_df, price_adder=reference_price_adder)
+    prediction_groups: list[dict[str, object]] = []
     for rollout in rollouts:
         if str(rollout.meta.get("prediction_mode", "")) != NORMAL_PREDICTION_MODE:
             continue
@@ -3200,25 +3213,57 @@ def plot_price_prediction_comparison(
             )
         price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
         candidate_timestamps = pd.to_datetime(step_df["timestamp"]).to_numpy()
-        candidate_pred = step_df["price_pred"].to_numpy(dtype=np.float64) + price_adder
-        if (
-            candidate_timestamps.shape != reference_timestamps.shape
-            or not np.array_equal(candidate_timestamps, reference_timestamps)
-            or candidate_pred.shape != reference_pred.shape
-            or not np.allclose(candidate_pred, reference_pred, equal_nan=True)
-        ):
-            raise ValueError(
-                "Compare price plotting expects all forecast/LSTM rollouts to share the same adjusted price prediction."
+        candidate_pred = _resolve_adjusted_price_prediction(step_df, price_adder=price_adder)
+        controller_name = str(rollout.meta.get("controller", "unknown"))
+        matched_group = None
+        for group in prediction_groups:
+            group_timestamps = group["timestamps"]
+            group_pred = group["pred"]
+            if (
+                candidate_timestamps.shape == group_timestamps.shape
+                and np.array_equal(candidate_timestamps, group_timestamps)
+                and candidate_pred.shape == group_pred.shape
+                and np.allclose(candidate_pred, group_pred, equal_nan=True)
+            ):
+                matched_group = group
+                break
+        if matched_group is None:
+            prediction_groups.append(
+                {
+                    "timestamps": candidate_timestamps,
+                    "pred": candidate_pred,
+                    "controllers": [controller_name],
+                }
             )
+        else:
+            matched_group["controllers"].append(controller_name)
 
-    axis.plot(
-        reference_step_df["timestamp"],
-        reference_pred,
-        color="#dc2626",
-        linewidth=1.8,
-        linestyle="--",
-        label="Predicted price",
-    )
+    if not prediction_groups:
+        prediction_groups.append(
+            {
+                "timestamps": pd.to_datetime(reference_step_df["timestamp"]).to_numpy(),
+                "pred": reference_pred,
+                "controllers": [str(reference_rollout.meta.get("controller", "unknown"))],
+            }
+        )
+
+    prediction_palette = ["#dc2626", "#ea580c", "#16a34a", "#7c3aed", "#0891b2"]
+    for group_idx, group in enumerate(prediction_groups):
+        controllers = list(dict.fromkeys(str(name) for name in group["controllers"]))
+        if len(prediction_groups) == 1:
+            label = "Predicted price"
+        elif len(controllers) == 1:
+            label = f"Predicted price ({controllers[0]})"
+        else:
+            label = f"Predicted price ({controllers[0]} +{len(controllers) - 1})"
+        axis.plot(
+            group["timestamps"],
+            group["pred"],
+            color=prediction_palette[group_idx % len(prediction_palette)],
+            linewidth=1.8,
+            linestyle="--",
+            label=label,
+        )
 
     axis.set_title("Price And Adjusted Forecast", fontsize=title_fontsize)
     axis.set_ylabel("EUR/kWh", fontsize=label_fontsize)
@@ -3243,12 +3288,13 @@ def plot_net_load_comparison(
         1,
         figsize=figsize or (20.0, max(4.2 * n_rows, 5.8)),
         sharex=True,
+        sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 14
-    label_fontsize = 12
-    tick_fontsize = 11
-    legend_fontsize = 11
+    title_fontsize = 18
+    label_fontsize = 16
+    tick_fontsize = 14
+    legend_fontsize = 14
 
     for axis_idx, (feeder_axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         step_df = _prepare_compare_net_load_frame(
@@ -3337,12 +3383,13 @@ def plot_power_balance_comparison(
         1,
         figsize=figsize or (20.0, max(4.0 * n_rows, 5.6)),
         sharex=True,
+        sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 14
-    label_fontsize = 12
-    tick_fontsize = 11
-    legend_fontsize = 11
+    title_fontsize = 18
+    label_fontsize = 16
+    tick_fontsize = 14
+    legend_fontsize = 14
     positive_specs = [
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
@@ -3424,12 +3471,13 @@ def plot_battery_power_and_soc_comparison(
         1,
         figsize=figsize or (20.0, max(4.2 * n_rows, 6.5)),
         sharex=True,
+        sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 14
-    label_fontsize = 12
-    tick_fontsize = 11
-    legend_fontsize = 11
+    title_fontsize = 18
+    label_fontsize = 16
+    tick_fontsize = 14
+    legend_fontsize = 14
     discharge_color = "#dc2626"
     charge_color = "#2563eb"
     soc_agent_color = "#94a3b8"

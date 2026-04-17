@@ -13,10 +13,10 @@ import pandas as pd
 
 from scripts.builder import build_env
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils.dual_distributed_notebook_helpers import (
-    DualTrafoSurrogate,
+from scripts.utils.grid_surrogate_notebook_helpers import (
+    GridTrafoSurrogate,
     _battery_to_netload_sensitivity,
-    _get_dual_projector,
+    _get_grid_projector,
     _projector_to_numpy,
 )
 
@@ -178,7 +178,7 @@ def _baseline_net_load_kw(data: DirectDayProblemData) -> np.ndarray:
     )
 
 
-def _surrogate_root_offset_kw(data: DirectDayProblemData, surrogate: DualTrafoSurrogate) -> np.ndarray:
+def _surrogate_root_offset_kw(data: DirectDayProblemData, surrogate: GridTrafoSurrogate) -> np.ndarray:
     baseline_net_load = _baseline_net_load_kw(data)
     alpha_window = _coerce_2d(surrogate.alpha_netload_window_kw, name="alpha_netload_window_kw")
     baseline_root = _coerce_1d(surrogate.baseline_root_p_kw, name="baseline_root_p_kw")
@@ -190,7 +190,7 @@ def _surrogate_root_offset_kw(data: DirectDayProblemData, surrogate: DualTrafoSu
 def compute_surrogate_root_p_kw(
     net_load_kw: np.ndarray,
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
 ) -> np.ndarray:
     net_load = _coerce_2d(net_load_kw, name="net_load_kw")
     alpha_window = _coerce_2d(surrogate.alpha_netload_window_kw, name="alpha_netload_window_kw")
@@ -624,7 +624,7 @@ def _build_solution(
     pv_curtail_kw: np.ndarray,
     energy_kwh: np.ndarray,
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     solver_status: str,
     solver_metadata: dict[str, object] | None = None,
     reference_only: bool = False,
@@ -805,8 +805,8 @@ def build_direct_day_trafo_surrogate(
     cfg,
     env,
     data: DirectDayProblemData,
-) -> DualTrafoSurrogate:
-    projector = _get_dual_projector(cfg, env)
+) -> GridTrafoSurrogate:
+    projector = _get_grid_projector(cfg, env)
     alpha_netload_kw = _battery_to_netload_sensitivity(projector)
     alpha_window = np.repeat(alpha_netload_kw[:, None], data.horizon, axis=1).astype(np.float32)
     trafo_base_kw = _projector_to_numpy(getattr(projector, "trafo_power_base_kw")).reshape(-1)
@@ -820,7 +820,7 @@ def build_direct_day_trafo_surrogate(
     trafo_limit_kw = grid_nb._approx_trafo_limit_kw(env, loading_limit_pct=float(cfg.grid.line_max_loading_pct))
     if trafo_limit_kw is None or not np.isfinite(float(trafo_limit_kw)):
         raise ValueError("Unable to resolve a transformer power reference limit for direct day optimization.")
-    return DualTrafoSurrogate(
+    return GridTrafoSurrogate(
         trafo_limit_kw=float(trafo_limit_kw),
         alpha_netload_kw=alpha_netload_kw.astype(np.float32),
         alpha_netload_window_kw=alpha_window,
@@ -832,7 +832,7 @@ def build_direct_day_trafo_surrogate(
 
 def compute_direct_day_baseline(
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
 ) -> DirectDaySolution:
     """Return the no-battery/no-curtailment reference.
 
@@ -861,7 +861,7 @@ def compute_direct_day_baseline(
 
 def _build_centralized_model(
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     *,
     export_only: bool,
 ):
@@ -938,7 +938,7 @@ def _build_centralized_model(
 
 def solve_direct_day_centralized(
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     *,
     export_only: bool = True,
 ) -> DirectDaySolution:
@@ -985,7 +985,7 @@ def solve_direct_day_centralized(
 
 
 class _DirectDayLocalQPSolver:
-    def __init__(self, data: DirectDayProblemData, surrogate: DualTrafoSurrogate, agent_idx: int) -> None:
+    def __init__(self, data: DirectDayProblemData, surrogate: GridTrafoSurrogate, agent_idx: int) -> None:
         self.data = data
         self.surrogate = surrogate
         self.agent_idx = int(agent_idx)
@@ -1117,7 +1117,7 @@ def _compute_gap_metrics(admm_objective_eur: float, centralized_objective_eur: f
 
 def solve_direct_day_admm(
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     *,
     rho_init: float,
     rho_adaptation: str | None,
@@ -1239,7 +1239,7 @@ def solve_direct_day_admm(
 
 def summarize_direct_day_solution(
     solution: DirectDaySolution,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
 ) -> pd.Series:
     root_p_kw = (
         np.asarray(solution.surrogate_root_p_kw, dtype=np.float32)
@@ -1293,7 +1293,7 @@ def plot_direct_day_convergence(admm_result: DirectDayAdmmResult, *, figsize: tu
 def plot_direct_day_root_p_comparison(
     solution: DirectDaySolution,
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     *,
     baseline_solution: DirectDaySolution | None = None,
     env=None,
@@ -1474,7 +1474,7 @@ def plot_direct_day_voltage_profile(
 def plot_direct_day_net_load(
     solution: DirectDaySolution,
     data: DirectDayProblemData,
-    surrogate: DualTrafoSurrogate,
+    surrogate: GridTrafoSurrogate,
     *,
     baseline_solution: DirectDaySolution | None = None,
     centralized_solution: DirectDaySolution | None = None,
@@ -1646,7 +1646,7 @@ __all__ = [
     "DirectDayAdmmResult",
     "DirectDayProblemData",
     "DirectDaySolution",
-    "DualTrafoSurrogate",
+    "GridTrafoSurrogate",
     "build_direct_day_problem_data",
     "build_direct_day_trafo_surrogate",
     "collect_admm_direct_rollout",
