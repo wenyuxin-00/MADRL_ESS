@@ -33,23 +33,23 @@ def test_madrl_training_notebook_configuration_cells_compile(notebook_name: str)
 
 
 @pytest.mark.parametrize(
-    "notebook_name",
+    ("notebook_name", "expected_num_envs"),
     [
-        "train_base.ipynb",
-        "train_base_safe.ipynb",
-        "train_projection_safe.ipynb",
+        ("train_base.ipynb", 4),
+        ("train_base_safe.ipynb", 8),
+        ("train_projection_safe.ipynb", 8),
     ],
 )
-def test_madrl_training_notebooks_expose_expected_defaults(notebook_name: str) -> None:
+def test_madrl_training_notebooks_expose_expected_defaults(notebook_name: str, expected_num_envs: int) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     notebook_path = repo_root / "notebooks" / "madrl" / notebook_name
     code_cells = _load_code_cells(notebook_path)
-    parameter_cell = code_cells[1]
+    notebook_source = "\n".join(code_cells)
 
-    assert "ROLLOUT_TEST_START_DATE" not in parameter_cell
-    assert "ROLLOUT_TEST_END_DATE" not in parameter_cell
-    assert 'test_start_date = None' in parameter_cell
-    assert 'test_end_date = None' in parameter_cell
-    assert '"runtime_controls": {}' in parameter_cell
-    assert "policy_update_freq" in parameter_cell
-    assert "num_envs = recommended_gpu_fast_num_envs()" in parameter_cell
+    assert "ROLLOUT_TEST_START_DATE" not in notebook_source
+    assert "ROLLOUT_TEST_END_DATE" not in notebook_source
+    assert 'test_start_date = "2020-06-01"' in notebook_source
+    assert 'test_end_date = "2020-06-05"' in notebook_source
+    assert '"runtime_controls": {}' in notebook_source
+    assert "policy_update_freq" in notebook_source
+    assert f"num_envs = {expected_num_envs}" in notebook_source

@@ -29,6 +29,16 @@ def _bar_heights(axis, container_index: int) -> np.ndarray:
     )
 
 
+def _bar_lower_boundary(axis, container_index: int) -> np.ndarray:
+    return np.asarray(
+        [
+            min(patch.get_y(), patch.get_y() + patch.get_height())
+            for patch in axis.containers[container_index].patches
+        ],
+        dtype=np.float32,
+    )
+
+
 def _collection_lower_boundary(axis, collection_index: int, x_values) -> np.ndarray:
     path = axis.collections[collection_index].get_paths()[0]
     vertices = np.asarray(path.vertices, dtype=np.float32)
@@ -207,7 +217,7 @@ def test_voltage_and_net_load_dashboard_handles_empty_agent_df():
         ),
         summary=pd.DataFrame(),
         meta={
-            "controller": "MPC (oracle_eval)",
+            "controller": "Local MPC (oracle_eval)",
             "agent_bus_ids": [2],
             "v_min_pu": 0.95,
             "v_max_pu": 1.05,
@@ -449,16 +459,18 @@ def test_power_balance_comparison_uses_same_strict_balance_logic():
     first_labels = figure.axes[0].get_legend_handles_labels()[1]
     assert "Curtailment loss" in first_labels
     assert "PV raw" in first_labels
-    assert len(figure.axes[0].collections) == 7
+    assert len(figure.axes[0].containers) == 7
+    assert len(figure.axes[0].patches) == 14
 
     legacy_axis = figure.axes[1]
     legacy_reconstructed_pv_raw = (
         rollout_legacy.step_df["pv_effective_total"].to_numpy(dtype=np.float32)
         + rollout_legacy.step_df["pv_curtail_total"].to_numpy(dtype=np.float32)
     )
-    assert len(legacy_axis.collections) == 7
+    assert len(legacy_axis.containers) == 7
+    assert len(legacy_axis.patches) == 14
     assert np.allclose(
-        _collection_lower_boundary(legacy_axis, 4, timestamps),
+        _bar_lower_boundary(legacy_axis, 4),
         -legacy_reconstructed_pv_raw,
         atol=1e-4,
     )
@@ -468,7 +480,7 @@ def test_power_balance_comparison_uses_same_strict_balance_logic():
 def test_rollout_comparison_dashboard_renders_six_panels():
     metrics_df = pd.DataFrame(
         {
-            "controller": ["MPC (oracle_eval)", "MPC (forecast_eval)", "DRL (forecast_eval)"],
+            "controller": ["Local MPC (oracle_eval)", "Local MPC (forecast_eval)", "DRL (forecast_eval)"],
             "purchase_cost_total": [1.0, 1.2, 0.9],
             "export_subsidy_total": [0.1, 0.1, 0.2],
             "objective_total": [0.9, 1.3, 0.7],
