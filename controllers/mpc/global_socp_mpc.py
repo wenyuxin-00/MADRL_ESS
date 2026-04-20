@@ -22,6 +22,12 @@ except ModuleNotFoundError:  # pragma: no cover - depends on interpreter
 from controllers.action_feasibility import build_safety_local_numpy, compute_action_gap_metrics_numpy
 from controllers.base import BaseController
 from envs.grid.core.net_builder import build_simbench_net
+from scripts.utils.price_protocol import (
+    IMPORT_PRICE_MARKUP_KEY,
+    WHOLESALE_PRICE_SEQ_FIELD,
+    derive_import_price_seq,
+    get_import_price_markup,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DEBUG_DIR = _PROJECT_ROOT / "artifacts" / "misocp_debug"
@@ -318,7 +324,8 @@ class ModelSize:
 class FullHorizonProblemInput:
     """Assembled full-test-horizon inputs for the offline oracle solve."""
 
-    price_seq: np.ndarray
+    wholesale_price_seq: np.ndarray
+    import_price_seq: np.ndarray
     load_seq: np.ndarray
     pv_seq: np.ndarray
     soc_init: np.ndarray
@@ -329,7 +336,7 @@ class FullHorizonProblemInput:
 
     @property
     def horizon_steps(self) -> int:
-        return int(self.price_seq.shape[0])
+        return int(self.import_price_seq.shape[0])
 
 
 @dataclass(frozen=True)
@@ -439,13 +446,91 @@ class MISOCPResult:
     negative_floor_delta_warn: bool = False
     refinement_status_counts: dict[str, int] | None = None
 
+    @property
+    def first_step_battery_power_kw(self) -> np.ndarray | None:
+        if self.battery_charge_mw is None or self.battery_discharge_mw is None:
+            return None
+        return ((self.battery_charge_mw[:, 0] - self.battery_discharge_mw[:, 0]) * 1000.0).astype(np.float32)
+
+    @property
+    def first_step_battery_charge_kw(self) -> np.ndarray | None:
+        if self.battery_charge_mw is None:
+            return None
+        return (self.battery_charge_mw[:, 0] * 1000.0).astype(np.float32)
+
+    @property
+    def first_step_battery_discharge_kw(self) -> np.ndarray | None:
+        if self.battery_discharge_mw is None:
+            return None
+        return (self.battery_discharge_mw[:, 0] * 1000.0).astype(np.float32)
+
+    @property
+    def first_step_pv_curtail_kw(self) -> np.ndarray | None:
+        if self.pv_curtail_mw is None:
+            return None
+        return (self.pv_curtail_mw[:, 0] * 1000.0).astype(np.float32)
+
+    @property
+    def first_step_vm_pu(self) -> np.ndarray | None:
+        if self.bus_vm_pu is None:
+            return None
+        return np.asarray(self.bus_vm_pu[:, 0], dtype=np.float32)
+
+    @property
+    def first_step_line_loading_pct(self) -> np.ndarray | None:
+        if self.line_loading_pct is None:
+            return None
+        return np.asarray(self.line_loading_pct[:, 0], dtype=np.float32)
+
+    @property
+    def first_step_trafo_loading_pct(self) -> np.ndarray | None:
+        if self.trafo_loading_pct is None:
+            return None
+        return np.asarray(self.trafo_loading_pct[:, 0], dtype=np.float32)
+
+    @property
+    def first_step_root_import_kw(self) -> float:
+        if self.root_import_mw is None:
+            return float("nan")
+        return float(self.root_import_mw[0] * 1000.0)
+
+    @property
+    def first_step_root_export_kw(self) -> float:
+        if self.root_export_mw is None:
+            return float("nan")
+        return float(self.root_export_mw[0] * 1000.0)
+
+    @property
+    def first_step_root_p_kw(self) -> float:
+        if self.root_p_kw is None:
+            return float("nan")
+        return float(self.root_p_kw[0])
+
+    @property
+    def first_step_root_q_kvar(self) -> float:
+        if self.root_q_kvar is None:
+            return float("nan")
+        return float(self.root_q_kvar[0])
+
+    @property
+    def first_step_simultaneous_kw_total(self) -> float:
+        if self.simultaneous_charge_discharge_kw is None:
+            return 0.0
+        return float(np.sum(self.simultaneous_charge_discharge_kw[:, 0]))
+
+    @property
+    def first_step_simultaneous_agent_count(self) -> int:
+        if self.simultaneous_charge_discharge_kw is None:
+            return 0
+        return int(np.sum(self.simultaneous_charge_discharge_kw[:, 0] > 0.0))
+
 
 @dataclass
 class SequenceModelBundle:
     """Reusable solve bundle for stage-1, floor, and stage-2 MISOCP solves."""
 
     model: Any
-    price_seq: np.ndarray
+    import_price_seq: np.ndarray
     load_seq: np.ndarray
     pv_seq: np.ndarray
     soc_init: np.ndarray
@@ -599,7 +684,7 @@ class GlobalMISOCPProblem:
         v_min_sq: float,
         v_max_sq: float,
         export_subsidy_default: float,
-        import_price_adder_eur_per_kwh: float = 0.0,
+        import_price_markup_eur_per_kwh: float = 0.0,
         throughput_regularization_eur_per_kwh: float = _THROUGHPUT_REGULARIZATION_EUR_PER_KWH,
         branch_current_tiebreaker_eur_per_pu_step: float = 0.0,
         physics_refinement_mode: str = "none",
@@ -637,7 +722,7 @@ class GlobalMISOCPProblem:
         self.v_min_sq = float(v_min_sq)
         self.v_max_sq = float(v_max_sq)
         self.export_subsidy_default = float(export_subsidy_default)
-        self.import_price_adder_eur_per_kwh = float(import_price_adder_eur_per_kwh)
+        self.import_price_markup_eur_per_kwh = float(import_price_markup_eur_per_kwh)
         self.throughput_regularization_eur_per_kwh = float(throughput_regularization_eur_per_kwh)
         self.branch_current_tiebreaker_eur_per_pu_step = float(branch_current_tiebreaker_eur_per_pu_step)
         self.physics_refinement_mode = str(physics_refinement_mode)
@@ -704,9 +789,7 @@ class GlobalMISOCPProblem:
             v_min_sq=float(cfg.grid.v_min_pu * cfg.grid.v_min_pu),
             v_max_sq=float(cfg.grid.v_max_pu * cfg.grid.v_max_pu),
             export_subsidy_default=float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
-            import_price_adder_eur_per_kwh=float(
-                getattr(cfg.reward, "import_price_adder_eur_per_kwh", 0.0)
-            ),
+            import_price_markup_eur_per_kwh=float(get_import_price_markup(cfg)),
             throughput_regularization_eur_per_kwh=throughput_regularization_eur_per_kwh,
             branch_current_tiebreaker_eur_per_pu_step=float(
                 getattr(getattr(cfg, "mpc", None), "branch_current_tiebreaker_eur_per_pu_step", 0.0)
@@ -775,11 +858,14 @@ class GlobalMISOCPProblem:
             debug_dir=debug_dir,
         )
 
-    def apply_import_price_adder(self, price_seq: np.ndarray) -> np.ndarray:
-        price_seq = np.asarray(price_seq, dtype=np.float32).reshape(-1)
-        if abs(float(self.import_price_adder_eur_per_kwh)) <= _ROOT_VM_EPS:
-            return price_seq.astype(np.float32, copy=False)
-        return (price_seq + np.float32(self.import_price_adder_eur_per_kwh)).astype(np.float32, copy=False)
+    def apply_import_price_markup(self, wholesale_price_seq: np.ndarray) -> np.ndarray:
+        wholesale_price_seq = np.asarray(wholesale_price_seq, dtype=np.float32).reshape(-1)
+        if abs(float(self.import_price_markup_eur_per_kwh)) <= _ROOT_VM_EPS:
+            return wholesale_price_seq.astype(np.float32, copy=False)
+        return derive_import_price_seq(
+            wholesale_price_seq,
+            markup_eur_per_kwh=float(self.import_price_markup_eur_per_kwh),
+        )
 
     def _resolve_solve_config(
         self,
@@ -1060,7 +1146,7 @@ class GlobalMISOCPProblem:
     def _build_sequence_model(
         self,
         *,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -1073,11 +1159,11 @@ class GlobalMISOCPProblem:
         if gp is None or GRB is None:  # pragma: no cover - depends on interpreter
             raise RuntimeError(f"{_GUROBI_ERROR_PREFIX}: gurobipy import failed")
 
-        price_seq = np.asarray(price_seq, dtype=np.float32).reshape(-1)
+        import_price_seq = np.asarray(import_price_seq, dtype=np.float32).reshape(-1)
         load_seq = np.asarray(load_seq, dtype=np.float32)
         pv_seq = np.asarray(pv_seq, dtype=np.float32)
         soc_init = np.asarray(soc_init, dtype=np.float32).reshape(-1)
-        horizon_steps = int(price_seq.size)
+        horizon_steps = int(import_price_seq.size)
         if load_seq.shape != (self.n_agents, horizon_steps):
             raise ValueError(f"Expected load_seq shape {(self.n_agents, horizon_steps)}, got {load_seq.shape}.")
         if pv_seq.shape != (self.n_agents, horizon_steps):
@@ -1086,11 +1172,11 @@ class GlobalMISOCPProblem:
             raise ValueError(f"Expected soc_init shape {(self.n_agents,)}, got {soc_init.shape}.")
 
         subsidy = float(self.export_subsidy_default if export_subsidy is None else export_subsidy)
-        if float(np.min(price_seq)) <= subsidy:
+        if float(np.min(import_price_seq)) <= subsidy:
             raise ValueError(
                 "Agent-only MISOCP economics requires import prices to stay strictly above "
                 f"the export subsidy for the current absolute-value reformulation, got "
-                f"min(price_seq)={float(np.min(price_seq)):.6f} and subsidy={subsidy:.6f}."
+                f"min(import_price_seq)={float(np.min(import_price_seq)):.6f} and subsidy={subsidy:.6f}."
             )
 
         model = gp.Model(f"global_misocp_{solve_mode}")
@@ -1118,7 +1204,7 @@ class GlobalMISOCPProblem:
 
         objective_terms = []
         for step_idx in range(horizon_steps):
-            price_value = float(price_seq[step_idx])
+            price_value = float(import_price_seq[step_idx])
             objective_terms.append(
                 1000.0
                 * self.dt_hours
@@ -1303,7 +1389,7 @@ class GlobalMISOCPProblem:
 
         return SequenceModelBundle(
             model=model,
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1328,7 +1414,7 @@ class GlobalMISOCPProblem:
     def _run_window_with_retry(
         self,
         *,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -1343,7 +1429,7 @@ class GlobalMISOCPProblem:
         partial_mip_start: dict[str, np.ndarray] | None = None,
     ) -> tuple[MISOCPResult, MISOCPResult, MISOCPResult | None, str]:
         primary_result = self._solve_sequences(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1361,7 +1447,7 @@ class GlobalMISOCPProblem:
         if primary_result.has_solution or retry_solve_config is None:
             refined_primary = self._maybe_apply_physics_refinement(
                 base_result=primary_result,
-                price_seq=price_seq,
+                import_price_seq=import_price_seq,
                 load_seq=load_seq,
                 pv_seq=pv_seq,
                 soc_init=soc_init,
@@ -1376,7 +1462,7 @@ class GlobalMISOCPProblem:
             return refined_primary, refined_primary, None, "primary"
 
         retry_result = self._solve_sequences(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1393,7 +1479,7 @@ class GlobalMISOCPProblem:
         )
         refined_retry = self._maybe_apply_physics_refinement(
             base_result=retry_result,
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1411,7 +1497,7 @@ class GlobalMISOCPProblem:
         self,
         *,
         base_result: MISOCPResult,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -1474,7 +1560,7 @@ class GlobalMISOCPProblem:
 
         refinement_config = self._build_physics_refinement_solve_config(primary_solve_config)
         floor_result = self._solve_sequences(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1673,7 +1759,7 @@ class GlobalMISOCPProblem:
         best_stage2_payload: tuple[MISOCPResult, int, float, dict[str, float]] | None = None
         for tier_idx, slack_cap_eur in enumerate(tier_caps):
             stage2_result = self._solve_sequences(
-                price_seq=price_seq,
+                import_price_seq=import_price_seq,
                 load_seq=load_seq,
                 pv_seq=pv_seq,
                 soc_init=soc_init,
@@ -1825,7 +1911,7 @@ class GlobalMISOCPProblem:
 
     def solve(
         self,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -1839,7 +1925,7 @@ class GlobalMISOCPProblem:
     ) -> MISOCPResult:
         resolved_config = self._resolve_solve_config(solve_config, time_limit_sec=time_limit_sec)
         stage1_result = self._solve_sequences(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1855,7 +1941,7 @@ class GlobalMISOCPProblem:
         )
         return self._maybe_apply_physics_refinement(
             base_result=stage1_result,
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1870,7 +1956,7 @@ class GlobalMISOCPProblem:
 
     def solve_full_horizon(
         self,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -1886,7 +1972,7 @@ class GlobalMISOCPProblem:
         debug_tag: str | None = None,
         partial_mip_start: dict[str, np.ndarray] | None = None,
     ) -> MISOCPResult:
-        horizon_steps = int(np.asarray(price_seq).reshape(-1).shape[0])
+        horizon_steps = int(np.asarray(import_price_seq).reshape(-1).shape[0])
         resolved_offsets = np.asarray(
             [0] if episode_offsets is None else episode_offsets,
             dtype=np.int32,
@@ -1896,7 +1982,7 @@ class GlobalMISOCPProblem:
         if np.any(resolved_offsets < 0) or np.any(np.diff(resolved_offsets) < 0):
             raise ValueError("episode_offsets must be non-decreasing and non-negative.")
         if timestamps is not None and len(tuple(str(value) for value in timestamps)) != horizon_steps:
-            raise ValueError("timestamps length must match full-horizon price_seq length.")
+            raise ValueError("timestamps length must match full-horizon import_price_seq length.")
         if episode_lengths is None:
             resolved_lengths = np.diff(np.append(resolved_offsets, horizon_steps)).astype(np.int32)
         else:
@@ -1908,7 +1994,7 @@ class GlobalMISOCPProblem:
 
         resolved_config = self._resolve_solve_config(solve_config, time_limit_sec=time_limit_sec)
         stage1_result = self._solve_sequences(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -1925,7 +2011,7 @@ class GlobalMISOCPProblem:
         )
         result = self._maybe_apply_physics_refinement(
             base_result=stage1_result,
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -2024,7 +2110,7 @@ class GlobalMISOCPProblem:
 
         if horizon_steps <= int(primary_window_steps):
             single_result, primary_result, retry_result, _ = self._run_window_with_retry(
-                price_seq=full_input.price_seq,
+                import_price_seq=full_input.import_price_seq,
                 load_seq=full_input.load_seq,
                 pv_seq=full_input.pv_seq,
                 soc_init=full_input.soc_init,
@@ -2097,7 +2183,7 @@ class GlobalMISOCPProblem:
 
         for chunk_idx, (start, end) in enumerate(windows):
             chosen_result, primary_result, retry_result, attempt_used = self._run_window_with_retry(
-                price_seq=full_input.price_seq[int(start) : int(end)],
+                import_price_seq=full_input.import_price_seq[int(start) : int(end)],
                 load_seq=full_input.load_seq[:, int(start) : int(end)],
                 pv_seq=full_input.pv_seq[:, int(start) : int(end)],
                 soc_init=current_soc,
@@ -2184,6 +2270,7 @@ class GlobalMISOCPProblem:
                 "Global MISOCP full-horizon stitching only supports contiguous episode index ranges."
             )
 
+        wholesale_price_chunks: list[np.ndarray] = []
         price_chunks: list[np.ndarray] = []
         load_chunks: list[np.ndarray] = []
         pv_chunks: list[np.ndarray] = []
@@ -2196,15 +2283,15 @@ class GlobalMISOCPProblem:
         for episode_idx in requested_episode_indices:
             episode = env._dataset.get_episode(int(episode_idx))
             signals = dict(episode.get("signals", {}))
-            if "price" not in signals or "load" not in signals:
-                raise KeyError("Full-horizon MISOCP requires episode signals['price'] and signals['load'].")
-            wholesale_price = np.asarray(signals["price"], dtype=np.float32).reshape(-1)
-            price = self.apply_import_price_adder(wholesale_price)
+            if "wholesale_price" not in signals or "load" not in signals:
+                raise KeyError("Full-horizon MISOCP requires episode signals['wholesale_price'] and signals['load'].")
+            wholesale_price = np.asarray(signals["wholesale_price"], dtype=np.float32).reshape(-1)
+            import_price = self.apply_import_price_markup(wholesale_price)
             load = np.asarray(signals["load"], dtype=np.float32)
             pv = np.asarray(signals.get("pv", np.zeros_like(load, dtype=np.float32)), dtype=np.float32)
-            if load.shape != (price.size, self.n_agents):
+            if load.shape != (import_price.size, self.n_agents):
                 raise ValueError(
-                    f"Episode {episode_idx} load signal should have shape {(price.size, self.n_agents)}, got {load.shape}."
+                    f"Episode {episode_idx} load signal should have shape {(import_price.size, self.n_agents)}, got {load.shape}."
                 )
             if pv.shape != load.shape:
                 raise ValueError(
@@ -2212,24 +2299,28 @@ class GlobalMISOCPProblem:
                 )
             episode_meta = dict(episode.get("meta", {}))
             episode_timestamps = [str(value) for value in list(episode_meta.get("timestamps") or [])]
-            if episode_timestamps and len(episode_timestamps) != price.size:
+            if episode_timestamps and len(episode_timestamps) != import_price.size:
                 raise ValueError(
-                    f"Episode {episode_idx} timestamps length {len(episode_timestamps)} does not match price length {price.size}."
+                    f"Episode {episode_idx} timestamps length {len(episode_timestamps)} does not match import price length {import_price.size}."
                 )
             if not episode_timestamps:
-                episode_timestamps = [f"episode{episode_idx:03d}_step{step_idx:04d}" for step_idx in range(price.size)]
+                episode_timestamps = [
+                    f"episode{episode_idx:03d}_step{step_idx:04d}" for step_idx in range(import_price.size)
+                ]
 
             episode_offsets.append(cursor)
-            episode_lengths.append(int(price.size))
+            episode_lengths.append(int(import_price.size))
             stitched_episode_indices.append(int(episode_idx))
-            price_chunks.append(price.astype(np.float32, copy=False))
+            wholesale_price_chunks.append(wholesale_price.astype(np.float32, copy=False))
+            price_chunks.append(import_price.astype(np.float32, copy=False))
             load_chunks.append(load.T.astype(np.float32, copy=False))
             pv_chunks.append(pv.T.astype(np.float32, copy=False))
             timestamps.extend(episode_timestamps)
-            cursor += int(price.size)
+            cursor += int(import_price.size)
 
         return FullHorizonProblemInput(
-            price_seq=np.concatenate(price_chunks, axis=0).astype(np.float32, copy=False),
+            wholesale_price_seq=np.concatenate(wholesale_price_chunks, axis=0).astype(np.float32, copy=False),
+            import_price_seq=np.concatenate(price_chunks, axis=0).astype(np.float32, copy=False),
             load_seq=np.concatenate(load_chunks, axis=1).astype(np.float32, copy=False),
             pv_seq=np.concatenate(pv_chunks, axis=1).astype(np.float32, copy=False),
             soc_init=np.asarray(getattr(env, "soc", np.full((self.n_agents,), getattr(env, "init_soc", 0.5))), dtype=np.float32).reshape(self.n_agents),
@@ -2376,7 +2467,7 @@ class GlobalMISOCPProblem:
 
     def _solve_sequences(
         self,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc_init: np.ndarray,
@@ -2395,12 +2486,12 @@ class GlobalMISOCPProblem:
         include_branch_current_tiebreaker_in_primary: bool = True,
         strict_mip_start: bool = False,
     ) -> MISOCPResult:
-        price_seq = np.asarray(price_seq, dtype=np.float32).reshape(-1)
-        horizon_steps = int(price_seq.size)
+        import_price_seq = np.asarray(import_price_seq, dtype=np.float32).reshape(-1)
+        horizon_steps = int(import_price_seq.size)
         if expected_horizon is not None and horizon_steps != int(expected_horizon):
-            raise ValueError(f"Expected price horizon {expected_horizon}, got {horizon_steps}.")
+            raise ValueError(f"Expected import price horizon {expected_horizon}, got {horizon_steps}.")
         bundle = self._build_sequence_model(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc_init=soc_init,
@@ -2561,13 +2652,15 @@ class GlobalMISOCPProblem:
         agent_import_mw = np.clip(agent_net_grid_mw, 0.0, None).astype(np.float32)
         agent_export_mw = np.clip(-agent_net_grid_mw, 0.0, None).astype(np.float32)
         agent_purchase_cost_eur = float(
-            np.sum(1000.0 * self.dt_hours * bundle.price_seq.reshape(1, -1) * agent_import_mw)
+            np.sum(1000.0 * self.dt_hours * bundle.import_price_seq.reshape(1, -1) * agent_import_mw)
         )
         agent_export_subsidy_eur = float(
             np.sum(1000.0 * self.dt_hours * bundle.subsidy * agent_export_mw)
         )
         agent_net_cost_eur = float(agent_purchase_cost_eur - agent_export_subsidy_eur)
-        feeder_purchase_cost_eur = float(np.sum(1000.0 * self.dt_hours * bundle.price_seq * root_import_mw))
+        feeder_purchase_cost_eur = float(
+            np.sum(1000.0 * self.dt_hours * bundle.import_price_seq * root_import_mw)
+        )
         feeder_export_subsidy_eur = float(np.sum(1000.0 * self.dt_hours * bundle.subsidy * root_export_mw))
         feeder_net_cost_eur = float(feeder_purchase_cost_eur - feeder_export_subsidy_eur)
         throughput_regularization_eur = float(
@@ -3155,7 +3248,9 @@ class GlobalSOCPMPCController(BaseController):
         debug_tag = f"{self.debug_tag_prefix}_step{self._solve_counter:04d}" if self.export_debug else None
         self._solve_counter += 1
         return self.problem.solve(
-            price_seq=self.problem.apply_import_price_adder(np.asarray(raw_obs["price_seq"], dtype=np.float32)),
+            import_price_seq=self.problem.apply_import_price_markup(
+                np.asarray(raw_obs[WHOLESALE_PRICE_SEQ_FIELD], dtype=np.float32)
+            ),
             load_seq=np.asarray(raw_obs["load_seq"], dtype=np.float32),
             pv_seq=np.asarray(raw_obs["pv_seq"], dtype=np.float32),
             soc_init=np.asarray(self.env.soc, dtype=np.float32),

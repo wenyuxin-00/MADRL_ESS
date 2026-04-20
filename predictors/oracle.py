@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from predictors.base import Forecaster
+from scripts.utils.price_protocol import WHOLESALE_PRICE_SIGNAL
 
 
 class PerfectForecaster(Forecaster):
@@ -37,7 +38,7 @@ class PerfectForecaster(Forecaster):
         """在 ``env.reset()`` 时注入当前回合的完整信号数据。
 
         参数:
-            episode_signals: 信号字典 ``{name: array}``，或单个数组（默认视为 price）。
+            episode_signals: 信号字典 ``{name: array}``，或单个数组（默认视为 wholesale_price）。
         """
         del episode_meta
         if isinstance(episode_signals, dict):
@@ -47,15 +48,15 @@ class PerfectForecaster(Forecaster):
             }
             return
 
-        # 非字典输入默认作为 price 信号处理
-        self._episode_signals = {"price": np.asarray(episode_signals, dtype=np.float32)}
+        # 非字典输入默认作为 wholesale_price 信号处理
+        self._episode_signals = {WHOLESALE_PRICE_SIGNAL: np.asarray(episode_signals, dtype=np.float32)}
 
     def predict(
         self,
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = WHOLESALE_PRICE_SIGNAL,
         history_timestamps: list[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
         """从预存的真实信号中切片返回未来值。
@@ -63,7 +64,7 @@ class PerfectForecaster(Forecaster):
         参数:
             history: 截至当前时刻的历史信号，用于推断当前时间索引。
             horizon: 需要返回的预测步数。
-            signal_name: 信号名称，如 ``price``、``load``、``pv``。
+            signal_name: 信号名称，如 ``wholesale_price``、``load``、``pv``。
 
         返回:
             一维信号返回 ``(horizon,)``，二维信号返回 ``(n_agents, horizon)``。

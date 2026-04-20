@@ -92,8 +92,8 @@ class PrecomputedObservationBuilder(ObservationBuilder):
             return build_time_features(env.cur_step, env.episode_length, env.n)
         if feature_name == "calendar_time":
             return env.get_precomputed_local_feature("calendar_time")
-        if feature_name == "price":
-            return broadcast_scalar_feature(env.get_signal_step("price"), env.n)
+        if feature_name == "wholesale_price":
+            return broadcast_scalar_feature(env.get_signal_step("wholesale_price"), env.n)
         if feature_name == "load":
             return reshape_agent_scalar_feature(env.get_signal_step("load"))
         if feature_name == "pv":

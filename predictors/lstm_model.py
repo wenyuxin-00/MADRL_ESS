@@ -13,7 +13,7 @@ import torch.nn as nn
 
 
 class LSTMForecastModel(nn.Module):
-    """用于 price / load / pv 标量序列的统一 LSTM 回归主干网络。
+    """用于 wholesale_price / load / pv 标量序列的统一 LSTM 回归主干网络。
 
     该模型采用多层 LSTM 编码输入时间序列，再通过全连接预测头输出多步预测值。
     输入为单变量序列（每个特征维度为 1），适用于电价、负荷、光伏等标量信号。
@@ -76,7 +76,7 @@ class LSTMForecastModel(nn.Module):
 class LSTMPricePredictor(LSTMForecastModel):
     """兼容旧名称的 LSTM 预测模型别名。
 
-    历史上该类仅服务于 ``price`` 信号预测，现在保留旧名字是为了兼容
+    历史上该类主要服务于旧的电价预测流程，现在保留旧名字只是为了兼容
     已有的测试、旧脚本和旧 artifact 加载。新代码应优先使用 ``LSTMForecastModel``。
     """
 

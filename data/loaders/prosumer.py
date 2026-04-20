@@ -273,15 +273,15 @@ class ProsumerDataset(BaseEpisodeDataset):
         _, accessible_mask = self._build_split_masks(frame["timestamp"])
         frame = frame.loc[accessible_mask].copy().set_index("timestamp").sort_index()
         frame = frame.reindex(base_timestamps)
-        price = pd.to_numeric(frame["price"], errors="coerce").to_numpy(dtype=np.float32)
-        if np.isnan(price).any():
-            raise ValueError("Processed prosumer price series contains NaN values after timestamp alignment.")
-        return price
+        wholesale_price = pd.to_numeric(frame["price"], errors="coerce").to_numpy(dtype=np.float32)
+        if np.isnan(wholesale_price).any():
+            raise ValueError("Processed prosumer wholesale price series contains NaN values after timestamp alignment.")
+        return wholesale_price
 
     def _load(self) -> None:
         load_frame, component_frames, active_mask, accessible_source_positions = self._load_components()
         base_timestamps = load_frame["timestamp"].reset_index(drop=True)
-        price = self._load_price(base_timestamps)
+        wholesale_price = self._load_price(base_timestamps)
         pv, pv_peak_kw = self._load_pv(base_timestamps)
 
         load = load_frame.loc[:, self.agent_profiles].to_numpy(dtype=np.float32)
@@ -290,7 +290,7 @@ class ProsumerDataset(BaseEpisodeDataset):
 
         self._timestamps = base_timestamps
         self._signals = {
-            "price": price,
+            "wholesale_price": wholesale_price,
             "load": load,
             "pv": pv,
         }
@@ -316,7 +316,7 @@ class ProsumerDataset(BaseEpisodeDataset):
             "pv_peak_kw": pv_peak_kw.copy(),
             "load_scale": self.load_scale.copy(),
             "pv_scale": self.pv_scale.copy(),
-            "price_unit": "EUR/kWh",
+            "wholesale_price_unit": "EUR/kWh",
             "power_unit": "kW",
             "energy_unit": "kWh",
             "data_dir": str(self.data_dir),
@@ -397,12 +397,12 @@ class ProsumerDataset(BaseEpisodeDataset):
         timestamps = self._timestamps.iloc[start:end].reset_index(drop=True)
         history_timestamps = self._timestamps.iloc[history_start:start].reset_index(drop=True)
         episode_signals = {
-            "price": self._signals["price"][start:end].copy(),
+            "wholesale_price": self._signals["wholesale_price"][start:end].copy(),
             "load": self._signals["load"][start:end, :].copy(),
             "pv": self._signals["pv"][start:end, :].copy(),
         }
         history_signals = {
-            "price": self._signals["price"][history_start:start].copy(),
+            "wholesale_price": self._signals["wholesale_price"][history_start:start].copy(),
             "load": self._signals["load"][history_start:start, :].copy(),
             "pv": self._signals["pv"][history_start:start, :].copy(),
         }
@@ -421,7 +421,7 @@ class ProsumerDataset(BaseEpisodeDataset):
                 "segment_id": int(self.year),
                 "segment_episode_idx": int(episode_idx),
                 "timestamps": timestamps.astype(str).tolist(),
-                "signal_names": ["price", "load", "pv"],
+                "signal_names": ["wholesale_price", "load", "pv"],
                 **self._meta_template,
             },
         }

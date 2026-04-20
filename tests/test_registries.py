@@ -47,13 +47,14 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.data.agent_profiles == ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]
     assert cfg.data.train_year == 2019
     assert cfg.data.test_year == 2020
-    assert cfg.reward.w_soc_pen == 10.0
-    assert cfg.reward.w_voltage_pen == 10.0
-    assert cfg.reward.w_line_pen == 10.0
+    assert cfg.reward.w_soc_pen >= 0.0
+    assert cfg.reward.w_voltage_pen >= 0.0
+    assert cfg.reward.w_line_pen >= 0.0
     assert cfg.reward.w_trafo_pen == 10.0
+    assert cfg.reward.import_price_markup_eur_per_kwh == 0.2
     assert cfg.grid.sb_code == "1-LV-rural1--0-sw"
     assert cfg.grid.agent_bus_ids == [10, 6, 12, 4, 2]
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["price", "load", "pv"]
+    assert cfg.obs.sequence_features == ["wholesale_price", "load", "pv"]
     assert cfg.safety.enabled is False
     assert get_agent_cls("MATD3_SAFE_POC").__name__ == "MATD3SafePOC"

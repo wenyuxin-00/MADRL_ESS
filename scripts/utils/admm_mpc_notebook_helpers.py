@@ -29,6 +29,15 @@ from scripts.utils.rollout_package_utils import (
     save_dataframe_npz,
     table_required_files,
 )
+from scripts.utils.price_protocol import (
+    IMPORT_PRICE_COLUMN,
+    IMPORT_PRICE_MARKUP_KEY,
+    IMPORT_PRICE_PRED_COLUMN,
+    WHOLESALE_PRICE_PRED_COLUMN,
+    WHOLESALE_PRICE_SEQ_FIELD,
+    derive_import_price_seq,
+    get_import_price_markup,
+)
 
 
 _THROUGHPUT_TIEBREAKER_EUR_PER_KWH = 1e-8
@@ -148,7 +157,7 @@ def _expected_rollout_contract(
 
 @dataclass(frozen=True)
 class AdmmMpcWindowData:
-    price_seq: np.ndarray
+    wholesale_price_seq: np.ndarray
     wholesale_price_eur_per_kwh: np.ndarray
     import_price_eur_per_kwh: np.ndarray
     load_seq: np.ndarray
@@ -162,7 +171,7 @@ class AdmmMpcWindowData:
     energy_min_kwh: np.ndarray
     energy_max_kwh: np.ndarray
     export_subsidy_eur_per_kwh: float
-    import_price_adder_eur_per_kwh: float
+    import_price_markup_eur_per_kwh: float
     dt_hours: float
 
     @property
@@ -425,14 +434,17 @@ def build_admm_mpc_surrogate_cache(cfg, env, *, horizon_steps: int) -> AdmmMpcSu
 
 
 def build_admm_mpc_window_data(cfg, env, raw_obs) -> AdmmMpcWindowData:
-    wholesale_price = _coerce_1d(np.asarray(raw_obs["price_seq"], dtype=np.float32), name="price_seq")
+    wholesale_price = _coerce_1d(
+        np.asarray(raw_obs[WHOLESALE_PRICE_SEQ_FIELD], dtype=np.float32),
+        name=WHOLESALE_PRICE_SEQ_FIELD,
+    )
     load_seq = _coerce_2d(np.asarray(raw_obs["load_seq"], dtype=np.float32), name="load_seq")
     pv_seq = _coerce_2d(np.asarray(raw_obs["pv_seq"], dtype=np.float32), name="pv_seq")
     if load_seq.shape != pv_seq.shape:
         raise ValueError(f"load_seq shape {load_seq.shape} must match pv_seq shape {pv_seq.shape}.")
     if load_seq.shape[1] != wholesale_price.size:
         raise ValueError(
-            f"load_seq horizon {load_seq.shape[1]} must match price_seq horizon {wholesale_price.size}."
+            f"load_seq horizon {load_seq.shape[1]} must match {WHOLESALE_PRICE_SEQ_FIELD} horizon {wholesale_price.size}."
         )
     battery_capacity_kwh = _coerce_1d(np.asarray(env.agent_c_bat, dtype=np.float32), name="agent_c_bat")
     p_max_kw = _coerce_1d(np.asarray(env.agent_p_max, dtype=np.float32), name="agent_p_max")
@@ -443,11 +455,14 @@ def build_admm_mpc_window_data(cfg, env, raw_obs) -> AdmmMpcWindowData:
         raise ValueError(
             f"env.soc agent dimension {energy_init_kwh.size} must match load_seq agents {load_seq.shape[0]}."
         )
-    import_price_adder = float(getattr(cfg.reward, "import_price_adder_eur_per_kwh", 0.0))
-    import_price = (wholesale_price + np.float32(import_price_adder)).astype(np.float32, copy=False)
+    import_price_markup = float(get_import_price_markup(cfg))
+    import_price = derive_import_price_seq(
+        wholesale_price,
+        markup_eur_per_kwh=import_price_markup,
+    )
     energy_ref_kwh = (float(cfg.env.soc_target) * battery_capacity_kwh).astype(np.float32, copy=False)
     data = AdmmMpcWindowData(
-        price_seq=wholesale_price.copy(),
+        wholesale_price_seq=wholesale_price.copy(),
         wholesale_price_eur_per_kwh=wholesale_price.copy(),
         import_price_eur_per_kwh=import_price.copy(),
         load_seq=load_seq.copy(),
@@ -461,7 +476,7 @@ def build_admm_mpc_window_data(cfg, env, raw_obs) -> AdmmMpcWindowData:
         energy_min_kwh=(float(env.soc_min) * battery_capacity_kwh).astype(np.float32, copy=False),
         energy_max_kwh=(float(env.soc_max) * battery_capacity_kwh).astype(np.float32, copy=False),
         export_subsidy_eur_per_kwh=float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
-        import_price_adder_eur_per_kwh=import_price_adder,
+        import_price_markup_eur_per_kwh=import_price_markup,
         dt_hours=float(env.dt),
     )
     _validate_prices(data)
@@ -1336,14 +1351,12 @@ def _augment_rollout_with_diagnostics(
         if column not in step_df.columns:
             step_df[column] = default_value
     step_df["admm_converged"] = step_df["admm_converged"].astype(bool)
-    import_price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
-    if "price_pred" in step_df.columns:
-        wholesale_price_pred = step_df["price_pred"].astype(float)
-        step_df["wholesale_price_pred"] = wholesale_price_pred
-        step_df["price_pred"] = wholesale_price_pred + import_price_adder
-        step_df["import_price_pred"] = step_df["price_pred"].astype(float)
-    if "price" in step_df.columns:
-        step_df["import_price"] = step_df["price"].astype(float)
+    import_price_markup = float(rollout.meta.get(IMPORT_PRICE_MARKUP_KEY, 0.0))
+    if WHOLESALE_PRICE_PRED_COLUMN in step_df.columns and IMPORT_PRICE_PRED_COLUMN not in step_df.columns:
+        step_df[IMPORT_PRICE_PRED_COLUMN] = derive_import_price_seq(
+            step_df[WHOLESALE_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64),
+            markup_eur_per_kwh=import_price_markup,
+        )
     step_df["objective_total"] = (
         step_df["purchase_cost_total"].astype(float) - step_df["export_subsidy_total"].astype(float)
     )
@@ -1686,7 +1699,7 @@ def replay_admm_mpc_rollout_package(
             "agent_bus_ids": list(current_cfg_snapshot["agent_bus_ids"]),
             "v_min_pu": float(current_cfg_snapshot["v_min_pu"]),
             "v_max_pu": float(current_cfg_snapshot["v_max_pu"]),
-            "import_price_adder_eur_per_kwh": float(current_cfg_snapshot["import_price_adder_eur_per_kwh"]),
+            IMPORT_PRICE_MARKUP_KEY: float(current_cfg_snapshot[IMPORT_PRICE_MARKUP_KEY]),
             "export_subsidy_eur_per_kwh": float(current_cfg_snapshot["export_subsidy_eur_per_kwh"]),
             "loaded_from_cached_rollout": True,
             "rollout_package_dir": str(Path(target_dir).resolve()),

@@ -14,7 +14,7 @@ from scripts.utils.project_paths import get_forecast_artifact_root, project_root
 
 DEFAULT_LSTM_ARTIFACT_DIR = Path("lstm")
 DEFAULT_PLOT_DIR_NAME = "plots"
-DEFAULT_SUPPORTED_FORECAST_SIGNALS = ("price", "load", "pv")
+DEFAULT_SUPPORTED_FORECAST_SIGNALS = ("wholesale_price", "load", "pv")
 
 
 def project_root() -> Path:
@@ -45,7 +45,7 @@ def get_lstm_horizon_artifact_dir(
 def get_default_lstm_artifact_paths(
     root: str | Path | None = None,
     *,
-    signal_name: str = "price",
+    signal_name: str = "wholesale_price",
     future_horizon: int = 24,
     agent_index: int | None = None,
     component: str | None = None,

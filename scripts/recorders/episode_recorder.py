@@ -14,7 +14,8 @@ import numpy as np
 def init_episode_record(n_agents: int, init_soc: float, reward_metas) -> dict:
     """Create an episode history dict compatible with existing plotting code."""
     history = {
-        "price": [],
+        "wholesale_price": [],
+        "import_price": [],
         "base_net_load": [[] for _ in range(int(n_agents))],
         "e_bat_req": [[] for _ in range(int(n_agents))],
         "e_bat_exec": [[] for _ in range(int(n_agents))],
@@ -31,7 +32,8 @@ def init_episode_record(n_agents: int, init_soc: float, reward_metas) -> dict:
 def append_step_record(history: dict, info: dict, step_total: float, reward_metas) -> None:
     """Append one env step to an episode history dict."""
     n_agents = len(history["e_bat_req"])
-    history["price"].append(float(info.get("price", 0.0)))
+    history["wholesale_price"].append(float(info.get("wholesale_price", 0.0)))
+    history["import_price"].append(float(info.get("import_price", 0.0)))
 
     base_net_load = np.asarray(info.get("base_net_load", np.zeros(n_agents)), dtype=np.float32).reshape(
         n_agents

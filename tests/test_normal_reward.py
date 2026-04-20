@@ -28,7 +28,7 @@ def _make_cfg():
 def _make_env_state(
     n_agents: int = 3,
     *,
-    price_t: float = 0.15,
+    import_price_t: float = 0.15,
     actual_grid_power_t=None,
     dt: float = 0.25,
     v_violation=None,
@@ -42,7 +42,7 @@ def _make_env_state(
         v_violation = np.zeros(n_agents, dtype=np.float32)
 
     return {
-        "price_t": float(price_t),
+        "import_price_t": float(import_price_t),
         "actual_grid_power_t": np.asarray(actual_grid_power_t, dtype=np.float32),
         "dt": float(dt),
         "v_violation": np.asarray(v_violation, dtype=np.float32),

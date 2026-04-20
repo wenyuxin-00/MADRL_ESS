@@ -7,6 +7,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN, IMPORT_PRICE_PRED_COLUMN
 
 
 def plot_voltage_and_net_load_dashboard(
@@ -14,7 +15,7 @@ def plot_voltage_and_net_load_dashboard(
     *,
     title: str | None = None,
 ):
-    """Plot price, voltage, net load, and per-agent storage state for a rollout."""
+    """Plot import price, voltage, net load, and per-agent storage state for a rollout."""
     grid_df = rollout.grid_df.copy()
     step_df = rollout.step_df.copy()
     agent_df = rollout.agent_df.copy()
@@ -48,29 +49,29 @@ def plot_voltage_and_net_load_dashboard(
     axes = np.atleast_1d(axes)
     price_ax, voltage_ax, net_load_ax = axes[:3]
     figure.suptitle(
-        title or f"{meta.get('controller', 'Rollout')} Price, Voltage, Net Load, and Storage State",
+        title or f"{meta.get('controller', 'Rollout')} Import Price, Voltage, Net Load, and Storage State",
         fontsize=14,
     )
 
     timestamps = pd.to_datetime(step_df["timestamp"])
     price_ax.plot(
         timestamps,
-        np.asarray(step_df.get("price", np.zeros(len(step_df))), dtype=np.float32),
+        np.asarray(step_df.get(IMPORT_PRICE_COLUMN, np.zeros(len(step_df))), dtype=np.float32),
         color="#111827",
         linewidth=1.6,
         label="Actual",
     )
-    if "price_pred" in step_df.columns:
+    if IMPORT_PRICE_PRED_COLUMN in step_df.columns:
         price_ax.plot(
             timestamps,
-            np.asarray(step_df["price_pred"], dtype=np.float32),
+            np.asarray(step_df[IMPORT_PRICE_PRED_COLUMN], dtype=np.float32),
             color="#dc2626",
             linewidth=1.4,
             linestyle="--",
             label="Forecast",
         )
-    price_ax.set_ylabel("Price")
-    price_ax.set_title("Electricity Price")
+    price_ax.set_ylabel("Import Price")
+    price_ax.set_title("Electricity Import Price")
     price_ax.grid(True, linestyle=":", alpha=0.45)
     price_ax.legend(loc="best")
 

@@ -14,7 +14,7 @@ def _default_device() -> torch.device:
 
 def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]:
     return {
-        "price": {
+        "wholesale_price": {
             "hidden_size": 64,
             "num_layers": 2,
             "dropout": 0.10,
@@ -127,9 +127,9 @@ class EnvConfig:
 class RewardConfig:
     """Reward weights for the default NormalReward."""
 
-    w_soc_pen: float = 2
+    w_soc_pen: float = 0.5
     export_subsidy_eur_per_kwh: float = 0.079
-    import_price_adder_eur_per_kwh: float = 0.20
+    import_price_markup_eur_per_kwh: float = 0.20
     w_voltage_pen: float = 400.0
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
@@ -167,16 +167,16 @@ class ObsConfig:
     """Observation-builder settings."""
 
     local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
-    sequence_features: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
+    sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
     adjacency_type: str = "identity"
     normalization_enabled: bool = True
-    price_normalization: str = "robust_tanh"
+    wholesale_price_normalization: str = "robust_tanh"
     load_normalization: str = "robust_tanh"
     pv_normalization: str = "capacity"
     soc_normalization: str = "linear_pm1"
     normalization_clip_low_quantile: float = 0.01
     normalization_clip_high_quantile: float = 0.99
-    price_tanh_scale: float = 2.0
+    wholesale_price_tanh_scale: float = 2.0
     load_tanh_scale: float = 3.0
     pv_tanh_scale: float = 2.0
 
@@ -214,7 +214,7 @@ class ForecastConfig:
     """Forecasting settings."""
 
     type: str = "perfect"
-    target_signals: list[str] = field(default_factory=lambda: ["price", "load", "pv"])
+    target_signals: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
     history_window: int = 96 * 3
     load_model_mode: str = "per_agent"
     load_time_feature_mode: str = "hour_week_year"

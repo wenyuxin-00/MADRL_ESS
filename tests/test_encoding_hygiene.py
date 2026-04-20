@@ -64,6 +64,10 @@ def test_notebook_defaults_stay_portable():
     assert 'overly aggressive selector' in forecast_text
     assert 'signals_to_train = [signal_name for signal_name in signal_order if signal_name not in results]' in forecast_text
     assert 'retraining missing or incompatible signals' in forecast_text
+    assert 'full_test_view_signals = ["wholesale_price"]' in forecast_text
+    assert 'legacy_aliases = {"price": "wholesale_price"}' in forecast_text
+    assert 'set `full_test_view_signals = ["wholesale_price"]`' in forecast_text
+    assert 'confirm only `wholesale_price` is plotted for that date window' in forecast_text
 
     assert 'single_day_component_focus_start = "2020-01-04 10:00"' in sfh14_text
     assert 'single_day_component_focus_end = "2020-01-04 12:30"' in sfh14_text
@@ -92,4 +96,14 @@ def test_notebook_defaults_stay_portable():
     assert 'build_simbench_net(cfg.grid.sb_code)' in grid_text
     assert 'simbench_2016_full.csv' not in grid_text
     assert 'observation_profile=' not in grid_text
+
+
+def test_forecast_lstm_section3_signal_defaults_match_price_protocol():
+    repo_root = Path(__file__).resolve().parents[1]
+    forecast_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb")
+
+    assert 'full_test_view_signals = ["wholesale_price"]' in forecast_text
+    assert 'legacy_aliases = {"price": "wholesale_price"}' in forecast_text
+    assert 'set `full_test_view_signals = ["wholesale_price"]`' in forecast_text
+    assert 'confirm only `wholesale_price` is plotted for that date window' in forecast_text
 

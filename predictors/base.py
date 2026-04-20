@@ -22,12 +22,12 @@ class Forecaster(ABC):
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = "wholesale_price",
         history_timestamps: Sequence[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
         """Return the forecast window for one signal.
 
-        Shared signals such as ``price`` use history shaped ``(t + 1,)`` and
+        Shared signals such as ``wholesale_price`` use history shaped ``(t + 1,)`` and
         return ``(horizon,)``. Per-agent signals such as ``load`` and ``pv`` use
         history shaped ``(t + 1, n_agents)`` and return ``(n_agents, horizon)``.
         """

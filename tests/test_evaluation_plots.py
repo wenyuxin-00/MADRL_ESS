@@ -101,7 +101,7 @@ def test_evaluation_plot_helpers_do_not_emit_glyph_warnings_with_english_titles(
 
 def test_voltage_plot_helper_renders_agent_and_background_buses():
     rollout = RolloutResult(
-        step_df=pd.DataFrame({"timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"), "price": [0.1, 0.2], "price_pred": [0.1, 0.2]}),
+        step_df=pd.DataFrame({"timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"), "import_price": [0.1, 0.2], "import_price_pred": [0.1, 0.2]}),
         agent_df=pd.DataFrame({"timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"), "agent_profile": ["A", "A"], "e_bat": [0.0, 0.0], "soc": [0.5, 0.6], "load": [1.0, 1.1], "load_pred": [1.0, 1.1], "pv": [0.2, 0.3], "pv_pred": [0.2, 0.3], "controller": ["DRL", "DRL"], "episode_idx": [0, 0], "step": [0, 1], "agent_id": [0, 0]}),
         grid_df=pd.DataFrame(
             {
@@ -150,8 +150,8 @@ def test_voltage_and_net_load_dashboard_renders_price_voltage_net_load_and_stora
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.10, 0.20, 0.15],
-                "price_pred": [0.12, 0.18, 0.16],
+                "import_price": [0.10, 0.20, 0.15],
+                "import_price_pred": [0.12, 0.18, 0.16],
                 "base_net_load_total": [2.5, 2.7, 2.8],
                 "base_net_load_effective_total": [2.2, 2.4, 2.5],
                 "net_load_total": [2.0, 2.1, 2.3],
@@ -198,7 +198,7 @@ def test_voltage_and_net_load_dashboard_handles_empty_agent_df():
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.10, 0.20, 0.15],
+                "import_price": [0.10, 0.20, 0.15],
                 "base_net_load_total": [2.5, 2.7, 2.8],
                 "base_net_load_effective_total": [2.2, 2.4, 2.5],
                 "net_load_total": [2.0, 2.1, 2.3],
@@ -236,8 +236,8 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
     step_df = pd.DataFrame(
         {
             "timestamp": timestamps,
-            "price": [0.10, 0.20, 0.15],
-            "price_pred": [0.12, 0.18, 0.16],
+            "import_price": [0.10, 0.20, 0.15],
+            "import_price_pred": [0.12, 0.18, 0.16],
             "base_net_load_total": [2.40, 2.55, 2.70],
             "base_net_load_effective_total": [2.00, 2.15, 2.30],
             "net_load_total": [2.10, 2.20, 2.35],

@@ -29,7 +29,7 @@ class NormalReward(RewardFn):
         ]
 
     def compute(self, env_state: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        price_t = float(env_state["price_t"])
+        import_price_t = float(env_state["import_price_t"])
         actual_grid_power_t = np.asarray(
             env_state.get("actual_grid_power_t", env_state.get("net_load_t")),
             dtype=np.float32,
@@ -45,7 +45,7 @@ class NormalReward(RewardFn):
 
         grid_import = np.maximum(actual_grid_power_t, 0.0).astype(np.float32)
         grid_export = np.maximum(-actual_grid_power_t, 0.0).astype(np.float32)
-        r_purchase_cost = (grid_import * np.float32(dt) * np.float32(price_t)).astype(np.float32)
+        r_purchase_cost = (grid_import * np.float32(dt) * np.float32(import_price_t)).astype(np.float32)
         r_export_subsidy = (
             grid_export * np.float32(dt) * np.float32(self.export_subsidy_eur_per_kwh)
         ).astype(np.float32)

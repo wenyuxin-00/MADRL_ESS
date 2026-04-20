@@ -73,7 +73,8 @@ def _make_mock_problem() -> SimpleNamespace:
 def _make_mock_full_input() -> SimpleNamespace:
     timestamps = pd.date_range("2020-06-01", periods=2, freq="15min")
     return SimpleNamespace(
-        price_seq=np.asarray([0.10, 0.20], dtype=np.float32),
+        wholesale_price_seq=np.asarray([-0.10, 0.00], dtype=np.float32),
+        import_price_seq=np.asarray([0.10, 0.20], dtype=np.float32),
         load_seq=np.asarray([[10.0, 8.0], [6.0, 7.0]], dtype=np.float32),
         pv_seq=np.asarray([[4.0, 3.0], [1.0, 2.0]], dtype=np.float32),
         soc_init=np.asarray([0.5, 0.4], dtype=np.float32),
@@ -193,7 +194,8 @@ def _make_mock_result() -> SimpleNamespace:
 def _make_real_full_input() -> FullHorizonProblemInput:
     mock = _make_mock_full_input()
     return FullHorizonProblemInput(
-        price_seq=np.asarray(mock.price_seq, dtype=np.float32),
+        wholesale_price_seq=np.asarray(mock.wholesale_price_seq, dtype=np.float32),
+        import_price_seq=np.asarray(mock.import_price_seq, dtype=np.float32),
         load_seq=np.asarray(mock.load_seq, dtype=np.float32),
         pv_seq=np.asarray(mock.pv_seq, dtype=np.float32),
         soc_init=np.asarray(mock.soc_init, dtype=np.float32),
@@ -332,7 +334,7 @@ def _make_real_problem_fixture(tmp_path: Path):
         np.sum(
             1000.0
             * float(problem.dt_hours)
-            * np.asarray(full_input.price_seq, dtype=np.float32).reshape(1, -1)
+            * np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(1, -1)
             * agent_import_mw
         )
     )
@@ -341,7 +343,7 @@ def _make_real_problem_fixture(tmp_path: Path):
         np.sum(
             1000.0
             * float(problem.dt_hours)
-            * np.asarray(full_input.price_seq, dtype=np.float32)
+            * np.asarray(full_input.import_price_seq, dtype=np.float32)
             * (root_import_kw / 1000.0)
         )
     )
@@ -479,7 +481,8 @@ def test_build_full_horizon_step_df_returns_expected_columns_and_values():
         "timestamp",
         "episode_idx",
         "global_step",
-        "price",
+        "wholesale_price",
+        "import_price",
         "fixed_load_kw",
         "fixed_generation_kw",
         "agent_load_kw",
@@ -865,10 +868,10 @@ def test_plan_package_round_trip_reconstructs_real_dataclasses(tmp_path):
 
     assert isinstance(loaded["full_input"], FullHorizonProblemInput)
     assert isinstance(loaded["result"], MISOCPResult)
-    assert loaded["manifest"]["plan_package_version"] == 11
+    assert loaded["manifest"]["plan_package_version"] == 12
     assert loaded["manifest"]["diagnostics_stage"] == "commit4_adaptive_refinement_ladder"
-    assert loaded["manifest"]["cfg_snapshot"]["import_price_adder_eur_per_kwh"] == pytest.approx(
-        cfg.reward.import_price_adder_eur_per_kwh
+    assert loaded["manifest"]["cfg_snapshot"]["import_price_markup_eur_per_kwh"] == pytest.approx(
+        cfg.reward.import_price_markup_eur_per_kwh
     )
     assert loaded["manifest"]["validation_root_power_source"] == "trafo_p_signed_kw"
     assert loaded["manifest"]["agent_q_base_zeroed"] is True
@@ -929,7 +932,7 @@ def test_replay_misocp_plan_package_returns_compare_ready_rollout(tmp_path):
     assert not rollout.agent_df.empty
     assert not rollout.grid_df.empty
     assert rollout.meta["loaded_from_cached_plan"] is True
-    assert rollout.meta["plan_package_version"] == 11
+    assert rollout.meta["plan_package_version"] == 12
     assert rollout.meta["diagnostics_stage"] == "commit4_adaptive_refinement_ladder"
     assert rollout.meta["physics_refinement_mode"] == "two_stage_min_branch_l"
     assert rollout.meta["no_retry_or_fallback_used"] is True
@@ -943,8 +946,8 @@ def test_replay_misocp_plan_package_returns_compare_ready_rollout(tmp_path):
     assert rollout.meta["physics_refinement_attempt_caps_eur"] == [2.0]
     assert rollout.meta["refinement_status_counts"] == {"refined": 1}
     assert "is_near_optimal" in rollout.meta
-    assert rollout.meta["import_price_adder_eur_per_kwh"] == pytest.approx(
-        cfg.reward.import_price_adder_eur_per_kwh
+    assert rollout.meta["import_price_markup_eur_per_kwh"] == pytest.approx(
+        cfg.reward.import_price_markup_eur_per_kwh
     )
     assert replay["validation_df"].shape[0] == rollout.step_df.shape[0]
 
@@ -970,7 +973,7 @@ def test_misocp_plan_package_rejects_version_and_cfg_mismatches(tmp_path):
     with pytest.raises(ValueError, match="adaptive slack ladder / tiered floor accept / floor-distance gate / time-budget refinement semantics"):
         load_misocp_plan_package(saved_dir)
 
-    manifest["plan_package_version"] = 11
+    manifest["plan_package_version"] = 12
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     cfg.grid.agent_bus_ids = list(reversed(cfg.grid.agent_bus_ids))
     with pytest.raises(ValueError, match="agent_bus_ids"):
@@ -1094,7 +1097,7 @@ def test_misocp_notebook_plot_helpers_return_figures():
 
 def test_misocp_global_notebook_code_cells_compile():
     repo_root = Path(__file__).resolve().parents[1]
-    notebook_path = repo_root / "notebooks" / "madrl" / "MISOCP_global.ipynb"
+    notebook_path = repo_root / "notebooks" / "madrl" / "global_MISOCP.ipynb"
     code_cells = _load_code_cells(notebook_path)
     notebook_text = notebook_path.read_text(encoding="utf-8")
 

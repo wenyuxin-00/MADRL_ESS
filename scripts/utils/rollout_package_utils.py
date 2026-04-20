@@ -10,9 +10,10 @@ import numpy as np
 import pandas as pd
 
 from scripts.utils import grid_notebook_workflow as grid_nb
+from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY, PRICE_PROTOCOL_VERSION
 
 
-ROLLOUT_PACKAGE_VERSION = 1
+ROLLOUT_PACKAGE_VERSION = 2
 _CFG_FLOAT_RTOL = 1e-6
 _CFG_FLOAT_ATOL = 1e-6
 
@@ -106,8 +107,9 @@ def build_rollout_cfg_snapshot_from_cfg(cfg: Any, *, prediction_mode: str | None
         "episode_limit": int(getattr(getattr(cfg, "env", None), "episode_limit", 0)),
         "v_min_pu": float(getattr(getattr(cfg, "grid", None), "v_min_pu", np.nan)),
         "v_max_pu": float(getattr(getattr(cfg, "grid", None), "v_max_pu", np.nan)),
-        "import_price_adder_eur_per_kwh": float(
-            getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+        IMPORT_PRICE_MARKUP_KEY: float(
+            getattr(getattr(cfg, "reward", None), IMPORT_PRICE_MARKUP_KEY, 0.0)
         ),
         "export_subsidy_eur_per_kwh": float(
             getattr(getattr(cfg, "reward", None), "export_subsidy_eur_per_kwh", np.nan)
@@ -128,6 +130,7 @@ def assert_rollout_cfg_snapshot_matches(
         "forecast_backend",
         "future_horizon",
         "episode_limit",
+        "price_protocol_version",
     ):
         _assert_strict_match(mismatch_prefix, field_name, expected_snapshot[field_name], actual_snapshot[field_name])
     _assert_str_sequence_match(
@@ -170,7 +173,7 @@ def assert_rollout_cfg_snapshot_matches(
     for field_name in (
         "v_min_pu",
         "v_max_pu",
-        "import_price_adder_eur_per_kwh",
+        IMPORT_PRICE_MARKUP_KEY,
         "export_subsidy_eur_per_kwh",
     ):
         _assert_float_match(mismatch_prefix, field_name, expected_snapshot[field_name], actual_snapshot[field_name])

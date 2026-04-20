@@ -40,7 +40,7 @@ class BaseController(ABC):
 
         参数:
             obs: 环境返回的结构化观测字典，包含键如
-                ``"local"``（局部观测）、``"price_seq"``（电价序列）、
+                ``"local"``（局部观测）、``"wholesale_price_seq"``（批发电价序列）、
                 ``"adjacency"``（邻接矩阵）等。
             deterministic: 若为 True，则抑制探索噪声，使用确定性策略。
 

@@ -19,14 +19,15 @@ def _make_cfg(tmp_path, label: str):
     case_dir = make_case_dir(tmp_path, label)
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.forecast.type = "perfect"
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
     cfg.mpc.physics_refinement_mode = "none"
     return cfg
 
 
 def _mock_window_input(problem: GlobalMISOCPProblem, horizon_steps: int) -> FullHorizonProblemInput:
     return FullHorizonProblemInput(
-        price_seq=np.zeros((horizon_steps,), dtype=np.float32),
+        wholesale_price_seq=np.zeros((horizon_steps,), dtype=np.float32),
+        import_price_seq=np.zeros((horizon_steps,), dtype=np.float32),
         load_seq=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
         pv_seq=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
         soc_init=np.full((problem.n_agents,), 0.5, dtype=np.float32),
@@ -158,16 +159,16 @@ def test_solve_adaptive_full_horizon_keeps_single_window_when_primary_has_incumb
         full_input = _mock_window_input(problem, horizon_steps=8)
         call_log: list[dict[str, object]] = []
 
-        def _fake_solve_sequences(*, price_seq, solve_config, solve_mode, **kwargs):
+        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
             call_log.append(
                 {
-                    "horizon_steps": int(np.asarray(price_seq).shape[0]),
+                    "horizon_steps": int(np.asarray(import_price_seq).shape[0]),
                     "solve_mode": str(solve_mode),
                     "cuts": solve_config.cuts,
                     "heuristics": solve_config.heuristics,
                 }
             )
-            return _solution_result(problem, int(np.asarray(price_seq).shape[0]), solve_mode=str(solve_mode))
+            return _solution_result(problem, int(np.asarray(import_price_seq).shape[0]), solve_mode=str(solve_mode))
 
         monkeypatch.setattr(problem, "_solve_sequences", _fake_solve_sequences)
 
@@ -210,8 +211,8 @@ def test_solve_adaptive_full_horizon_falls_back_to_chunked_window_and_uses_retry
             ]
         )
 
-        def _fake_solve_sequences(*, price_seq, solve_config, solve_mode, **kwargs):
-            horizon_steps = int(np.asarray(price_seq).shape[0])
+        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
+            horizon_steps = int(np.asarray(import_price_seq).shape[0])
             call_log.append(
                 {
                     "horizon_steps": horizon_steps,

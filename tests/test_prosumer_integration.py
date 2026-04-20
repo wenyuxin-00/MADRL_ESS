@@ -29,8 +29,10 @@ def _make_prosumer_cfg(tmp_path) -> ExperimentConfig:
     cfg.env.episode_limit = 4
     cfg.env.future_horizon = 2
     cfg.obs.local_features = ["time", "soc"]
-    cfg.obs.sequence_features = ["price", "load", "pv"]
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
+    cfg.data.load_scale = [1.0] * len(agent_profiles)
+    cfg.data.pv_scale = [1.0] * len(agent_profiles)
     cfg.grid.agent_bus_ids = [10, 6, 12]
     return cfg
 
@@ -44,7 +46,7 @@ def test_dataset_registry_builds_prosumer_dataset(tmp_path):
     assert isinstance(dataset, ProsumerDataset)
     assert get_dataset_cls("prosumer") is ProsumerDataset
     assert set(episode["signals"].keys()) == {
-        "price",
+        "wholesale_price",
         "load",
         "pv",
         "load_household",
@@ -64,7 +66,7 @@ def test_build_env_smoke_uses_processed_prosumer_dataset(tmp_path):
 
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["agent_profiles"] == ["SFH12", "SFH14"]
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
     finally:

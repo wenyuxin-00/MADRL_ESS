@@ -32,7 +32,7 @@ def _make_cfg(
             soc_target=0.5,
         ),
         reward=SimpleNamespace(
-            import_price_adder_eur_per_kwh=0.2,
+            import_price_markup_eur_per_kwh=0.2,
             export_subsidy_eur_per_kwh=0.079,
             w_soc_pen=10.0,
             w_voltage_pen=10.0,
@@ -71,8 +71,10 @@ def _make_cached_rollout(
                 "step": 0,
                 "global_step": 0,
                 "timestamp": timestamp,
-                "price": 0.3,
-                "price_pred": 0.5,
+                "wholesale_price": 0.1,
+                "import_price": 0.3,
+                "wholesale_price_pred": 0.3,
+                "import_price_pred": 0.5,
                 "purchase_cost_total": 0.33,
                 "export_subsidy_total": 0.0,
                 "objective_total": 0.33,
@@ -186,7 +188,7 @@ def _make_cached_rollout(
             "forecast_backend": forecast_backend,
             "local_mpc_price_mode": local_mpc_nb.DEFAULT_LOCAL_MPC_PRICE_MODE,
             "local_mpc_objective_mode": local_mpc_nb.DEFAULT_LOCAL_MPC_OBJECTIVE_MODE,
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
             "export_subsidy_eur_per_kwh": 0.079,
         },
     )
@@ -209,7 +211,7 @@ def test_local_mpc_rollout_package_round_trip(tmp_path):
     saved_dir = local_mpc_nb.save_local_mpc_rollout_package(package, tmp_path / "cached_rollout")
     loaded = local_mpc_nb.load_local_mpc_rollout_package(saved_dir)
 
-    assert int(loaded["manifest"]["rollout_package_version"]) == 1
+    assert int(loaded["manifest"]["rollout_package_version"]) == 2
     assert loaded["diagnostics"]["avg_local_mpc_solve_time_sec"] == pytest.approx(0.01)
     assert pd.api.types.is_datetime64_any_dtype(loaded["step_df"]["timestamp"])
     assert list(loaded["agent_df"]["agent_profile"]) == ["agent_0", "agent_1"]

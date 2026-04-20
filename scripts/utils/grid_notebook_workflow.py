@@ -26,6 +26,17 @@ from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
 from predictors.training import ensure_lstm_artifacts
 from scripts.utils.forecast_shared_preset import merge_managed_forecast_controls
+from scripts.utils.price_protocol import (
+    IMPORT_PRICE_COLUMN,
+    IMPORT_PRICE_MARKUP_KEY,
+    IMPORT_PRICE_PRED_COLUMN,
+    IMPORT_PRICE_SEQ_FIELD,
+    WHOLESALE_PRICE_PRED_COLUMN,
+    WHOLESALE_PRICE_SEQ_FIELD,
+    derive_import_price,
+    derive_import_price_seq,
+    get_import_price_markup,
+)
 
 PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
@@ -214,8 +225,8 @@ def apply_notebook_experiment_settings(
     test_year: int | None = None,
 ) -> dict[str, object]:
     cfg.obs.local_features = ["calendar_time", "soc"]
-    cfg.obs.sequence_features = ["price", "load", "pv"]
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.obs.sequence_features = [WHOLESALE_PRICE_SEQ_FIELD.removesuffix("_seq"), "load", "pv"]
+    cfg.forecast.target_signals = [WHOLESALE_PRICE_SEQ_FIELD.removesuffix("_seq"), "load", "pv"]
 
     cfg.data.agent_profiles = list(cfg.data.agent_profiles if agent_profiles is None else agent_profiles)
     cfg.env.num_agents = int(len(cfg.data.agent_profiles))
@@ -364,7 +375,7 @@ def _purchase_cost_per_agent(info: dict[str, object], dt: float) -> np.ndarray:
         info.get("grid_import_kw", np.maximum(np.asarray(info["net_load"], dtype=np.float32), 0.0)),
         dtype=np.float32,
     )
-    return (grid_import * np.float32(dt) * np.float32(info["price"])).astype(np.float32)
+    return (grid_import * np.float32(dt) * np.float32(info[IMPORT_PRICE_COLUMN])).astype(np.float32)
 
 
 def _export_subsidy_per_agent(info: dict[str, object], dt: float, subsidy_rate: float) -> np.ndarray:
@@ -593,7 +604,7 @@ def _power_to_full_action(power_kw: float, power_limit_kw: float, *, pv_action: 
 
 def _solve_local_mpc_action(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -606,7 +617,7 @@ def _solve_local_mpc_action(
     export_subsidy_eur_per_kwh: float,
 ) -> float:
     return solve_local_gurobi_mpc_action(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,
@@ -641,7 +652,7 @@ def _get_local_mpc_solver(
     env,
     *,
     agent_idx: int,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     battery_capacity_kwh: float,
     p_max_kw: float,
     dt_hours: float,
@@ -652,7 +663,7 @@ def _get_local_mpc_solver(
 ):
     cache, stats = _ensure_local_mpc_cache_state(env)
     use_guarded_fallback = False
-    horizon = int(np.asarray(price_seq, dtype=np.float32).reshape(-1).size)
+    horizon = int(np.asarray(import_price_seq, dtype=np.float32).reshape(-1).size)
     cache_key = (
         int(agent_idx),
         int(horizon),
@@ -688,10 +699,11 @@ def _get_local_mpc_solver(
 def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
     requested_battery_kw = np.zeros((env.n,), dtype=np.float32)
     requested_pv_curtail_kw = np.zeros((env.n,), dtype=np.float32)
-    import_price_adder = float(getattr(env, "import_price_adder_eur_per_kwh", 0.0))
-    price_seq = (
-        np.asarray(obs["price_seq"], dtype=np.float32) + np.float32(import_price_adder)
-    ).astype(np.float32, copy=False)
+    wholesale_price_seq = np.asarray(obs[WHOLESALE_PRICE_SEQ_FIELD], dtype=np.float32)
+    import_price_seq = derive_import_price_seq(
+        wholesale_price_seq,
+        markup_eur_per_kwh=float(getattr(env, "import_price_markup_eur_per_kwh", get_import_price_markup(env))),
+    )
     load_seq = np.asarray(obs["load_seq"], dtype=np.float32)
     pv_seq = np.asarray(obs["pv_seq"], dtype=np.float32)
     export_subsidy_eur_per_kwh = float(getattr(env.reward_fn, "export_subsidy_eur_per_kwh", 0.079))
@@ -699,7 +711,7 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
         solver, solver_stats = _get_local_mpc_solver(
             env,
             agent_idx=agent_idx,
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             battery_capacity_kwh=float(env.agent_c_bat[agent_idx]),
             p_max_kw=float(env.agent_p_max[agent_idx]),
             dt_hours=float(env.dt),
@@ -709,7 +721,7 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
             export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh,
         )
         solve_result = solver.solve_full_horizon(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq[agent_idx],
             pv_seq=pv_seq[agent_idx],
             soc=float(env.soc[agent_idx]),
@@ -847,7 +859,13 @@ def collect_controller_rollout(
             step_in_episode = 0
 
             while not done:
-                price_pred = _aligned_prediction(previous_raw_obs, raw_obs, "price_seq")
+                wholesale_price_pred = _aligned_prediction(previous_raw_obs, raw_obs, WHOLESALE_PRICE_SEQ_FIELD)
+                import_price_pred = float(
+                    derive_import_price(
+                        wholesale_price_pred,
+                        markup_eur_per_kwh=float(getattr(env, "import_price_markup_eur_per_kwh", get_import_price_markup(env))),
+                    )
+                )
                 load_pred = _aligned_prediction(previous_raw_obs, raw_obs, "load_seq")
                 pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
                 timestamp = _step_timestamp(reset_info, step_in_episode)
@@ -1011,8 +1029,10 @@ def collect_controller_rollout(
                         "episode_idx": episode_idx,
                         "step": step_in_episode,
                         "timestamp": timestamp,
-                        "price": float(info["price"]),
-                        "price_pred": float(price_pred),
+                        "wholesale_price": float(info["wholesale_price"]),
+                        IMPORT_PRICE_COLUMN: float(info[IMPORT_PRICE_COLUMN]),
+                        WHOLESALE_PRICE_PRED_COLUMN: float(wholesale_price_pred),
+                        IMPORT_PRICE_PRED_COLUMN: import_price_pred,
                         "base_net_load_total": float(np.sum(base_net_load)),
                         "base_net_load_effective_total": float(np.sum(base_net_load_effective)),
                         "net_load_total": float(np.sum(net_load)),
@@ -1199,8 +1219,8 @@ def collect_controller_rollout(
                 "loading_limit_pct": loading_limit_pct,
                 "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079)),
-                "import_price_adder_eur_per_kwh": float(
-                    getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+                IMPORT_PRICE_MARKUP_KEY: float(
+                    getattr(getattr(cfg, "reward", None), IMPORT_PRICE_MARKUP_KEY, 0.0)
                 ),
                 "local_mpc_solver_build_count": int(
                     float(getattr(env, "_local_mpc_stats", {}).get("solver_build_count", 0.0))
@@ -1409,7 +1429,13 @@ def collect_global_full_horizon_rollout(
             for step_in_episode in range(episode_length):
                 global_step = episode_offset + step_in_episode
                 timestamp = _step_timestamp(reset_info, step_in_episode)
-                price_pred = _aligned_prediction(previous_raw_obs, raw_obs, "price_seq")
+                wholesale_price_pred = _aligned_prediction(previous_raw_obs, raw_obs, WHOLESALE_PRICE_SEQ_FIELD)
+                import_price_pred = float(
+                    derive_import_price(
+                        wholesale_price_pred,
+                        markup_eur_per_kwh=float(getattr(env, "import_price_markup_eur_per_kwh", get_import_price_markup(env))),
+                    )
+                )
                 load_pred = _aligned_prediction(previous_raw_obs, raw_obs, "load_seq")
                 pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
 
@@ -1575,8 +1601,10 @@ def collect_global_full_horizon_rollout(
                         "episode_idx": int(episode_idx),
                         "step": step_in_episode,
                         "timestamp": timestamp,
-                        "price": float(info["price"]),
-                        "price_pred": float(price_pred),
+                        "wholesale_price": float(info["wholesale_price"]),
+                        IMPORT_PRICE_COLUMN: float(info[IMPORT_PRICE_COLUMN]),
+                        WHOLESALE_PRICE_PRED_COLUMN: float(wholesale_price_pred),
+                        IMPORT_PRICE_PRED_COLUMN: import_price_pred,
                         "base_net_load_total": agent_raw_net_load_kw,
                         "base_net_load_effective_total": agent_effective_net_load_kw,
                         "net_load_total": agent_post_action_net_load_kw,
@@ -1796,8 +1824,8 @@ def collect_global_full_horizon_rollout(
                 "loading_limit_pct": loading_limit_pct,
                 "trafo_loading_limit_pct": loading_limit_pct,
                 "export_subsidy_eur_per_kwh": export_subsidy,
-                "import_price_adder_eur_per_kwh": float(
-                    getattr(getattr(comparison_cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
+                IMPORT_PRICE_MARKUP_KEY: float(
+                    getattr(getattr(comparison_cfg, "reward", None), IMPORT_PRICE_MARKUP_KEY, 0.0)
                 ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "continuous",
@@ -2467,8 +2495,8 @@ def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
         float(step_df["trafo_penalty_total"].sum()) if "trafo_penalty_total" in step_df.columns else 0.0
     )
     price_mae = (
-        float(np.abs(step_df["price"] - step_df["price_pred"]).mean())
-        if not step_df.empty
+        float(np.abs(step_df[IMPORT_PRICE_COLUMN] - step_df[IMPORT_PRICE_PRED_COLUMN]).mean())
+        if not step_df.empty and {IMPORT_PRICE_COLUMN, IMPORT_PRICE_PRED_COLUMN}.issubset(step_df.columns)
         else float("nan")
     )
     load_mae = (
@@ -2752,29 +2780,32 @@ def _prepare_shared_price_frame(
     controller_label: str,
     require_predicted: bool = False,
 ) -> pd.DataFrame:
-    required_columns = {"timestamp", "price"}
+    required_columns = {"timestamp", "wholesale_price", IMPORT_PRICE_COLUMN}
     if require_predicted:
-        required_columns.add("price_pred")
+        required_columns.add(WHOLESALE_PRICE_PRED_COLUMN)
     if step_df.empty or not required_columns.issubset(step_df.columns):
         missing = sorted(required_columns.difference(step_df.columns))
         raise ValueError(
             f"Rollout '{controller_label}' is missing shared price columns required for compare plotting: {missing}"
         )
-    columns = ["timestamp", "price"]
-    if "price_pred" in step_df.columns:
-        columns.append("price_pred")
-    if "import_price_pred" in step_df.columns:
-        columns.append("import_price_pred")
+    columns = ["timestamp", "wholesale_price", IMPORT_PRICE_COLUMN]
+    if WHOLESALE_PRICE_PRED_COLUMN in step_df.columns:
+        columns.append(WHOLESALE_PRICE_PRED_COLUMN)
+    if IMPORT_PRICE_PRED_COLUMN in step_df.columns:
+        columns.append(IMPORT_PRICE_PRED_COLUMN)
     frame = step_df.loc[:, columns].copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     frame = frame.sort_values(["timestamp"]).drop_duplicates(subset=["timestamp"], keep="first").reset_index(drop=True)
     return frame
 
 
-def _resolve_adjusted_price_prediction(step_df: pd.DataFrame, *, price_adder: float) -> np.ndarray:
-    if "import_price_pred" in step_df.columns:
-        return step_df["import_price_pred"].to_numpy(dtype=np.float64)
-    return step_df["price_pred"].to_numpy(dtype=np.float64) + float(price_adder)
+def _resolve_adjusted_price_prediction(step_df: pd.DataFrame, *, price_markup: float) -> np.ndarray:
+    if IMPORT_PRICE_PRED_COLUMN in step_df.columns:
+        return step_df[IMPORT_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64)
+    return derive_import_price_seq(
+        step_df[WHOLESALE_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64),
+        markup_eur_per_kwh=float(price_markup),
+    )
 
 
 def _prepare_shared_agent_signal_frame(
@@ -2873,7 +2904,7 @@ def _select_shared_forecast_reference_rollout(*rollouts: RolloutResult) -> Rollo
             continue
         step_df = rollout.step_df
         agent_df = rollout.agent_df
-        if {"timestamp", "price", "price_pred"}.issubset(step_df.columns) and {
+        if {"timestamp", "wholesale_price", IMPORT_PRICE_COLUMN, WHOLESALE_PRICE_PRED_COLUMN}.issubset(step_df.columns) and {
             "timestamp",
             "agent_profile",
             "load",
@@ -2930,9 +2961,9 @@ def plot_shared_forecast_vs_actual(
             price_reference,
             price_candidate,
             key_columns=["timestamp"],
-            value_column="price",
+            value_column=IMPORT_PRICE_COLUMN,
             controller_label=controller_label,
-            signal_label="price",
+            signal_label="import_price",
         )
         load_reference, _ = _align_shared_actual_frames(
             load_reference,
@@ -2974,9 +3005,9 @@ def plot_shared_forecast_vs_actual(
         price_reference,
         price_prediction,
         key_columns=["timestamp"],
-        value_column="price",
+        value_column=IMPORT_PRICE_COLUMN,
         controller_label=prediction_label,
-        signal_label="price",
+        signal_label="import_price",
     )
     load_reference, load_prediction = _align_shared_actual_frames(
         load_reference,
@@ -2999,23 +3030,23 @@ def plot_shared_forecast_vs_actual(
     price_axis, load_axis, pv_axis = np.atleast_1d(axes)
     price_axis.plot(
         price_reference["timestamp"],
-        price_reference["price"],
+        price_reference[IMPORT_PRICE_COLUMN],
         color="#111827",
         linewidth=1.9,
-        label="Actual",
+        label="Actual import price",
     )
     price_axis.plot(
         price_prediction["timestamp"],
         _resolve_adjusted_price_prediction(
             price_prediction,
-            price_adder=float(prediction_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0)),
+            price_markup=float(prediction_rollout.meta.get(IMPORT_PRICE_MARKUP_KEY, 0.0)),
         ),
         color="#dc2626",
         linewidth=1.8,
         linestyle="--",
-        label=f"Predicted ({prediction_label})",
+        label=f"Predicted import price ({prediction_label})",
     )
-    price_axis.set_title("Price Forecast vs Actual", fontsize=title_fontsize)
+    price_axis.set_title("Import Price Forecast vs Actual", fontsize=title_fontsize)
     price_axis.set_ylabel("EUR/kWh", fontsize=label_fontsize)
     price_axis.grid(True, alpha=0.25)
     price_axis.tick_params(axis="both", labelsize=tick_fontsize)
@@ -3093,16 +3124,22 @@ def plot_rollout_dashboard(
     axes = np.atleast_1d(axes)
     palette = ["#0f172a", "#2563eb", "#16a34a", "#ea580c", "#dc2626", "#7c3aed"]
 
-    axes[0].plot(step_df["timestamp"], step_df["price"], color="#111827", linewidth=1.6, label="Actual")
     axes[0].plot(
         step_df["timestamp"],
-        step_df["price_pred"],
+        step_df[IMPORT_PRICE_COLUMN],
+        color="#111827",
+        linewidth=1.6,
+        label="Actual",
+    )
+    axes[0].plot(
+        step_df["timestamp"],
+        step_df[IMPORT_PRICE_PRED_COLUMN],
         color="#dc2626",
         linewidth=1.4,
         linestyle="--",
         label="Forecast",
     )
-    axes[0].set_ylabel("Price")
+    axes[0].set_ylabel("Import Price")
     axes[0].set_title(f"Test Rollout Dashboard - {rollout.meta['controller']}")
     axes[0].grid(True, alpha=0.25)
     axes[0].legend(loc="upper right")
@@ -3354,16 +3391,22 @@ def plot_test_rollout(rollout: RolloutResult, *, figsize: tuple[float, float] | 
     axes = np.atleast_1d(axes)
     palette = ["#0f172a", "#2563eb", "#16a34a", "#ea580c", "#dc2626", "#7c3aed"]
 
-    axes[0].plot(step_df["timestamp"], step_df["price"], color="#111827", linewidth=1.6, label="Actual")
     axes[0].plot(
         step_df["timestamp"],
-        step_df["price_pred"],
+        step_df[IMPORT_PRICE_COLUMN],
+        color="#111827",
+        linewidth=1.6,
+        label="Actual",
+    )
+    axes[0].plot(
+        step_df["timestamp"],
+        step_df[IMPORT_PRICE_PRED_COLUMN],
         color="#dc2626",
         linewidth=1.4,
         linestyle="--",
         label="Forecast",
     )
-    axes[0].set_ylabel("Price")
+    axes[0].set_ylabel("Import Price")
     axes[0].set_title(f"Test Rollout - {rollout.meta['controller']}")
     axes[0].grid(True, alpha=0.25)
     axes[0].legend(loc="upper right")
@@ -3560,32 +3603,33 @@ def plot_price_prediction_comparison(
         rollouts[0],
     )
     reference_step_df = reference_rollout.step_df.copy()
-    if reference_step_df.empty or not {"timestamp", "price", "price_pred"}.issubset(reference_step_df.columns):
-        raise ValueError("Rollouts must contain timestamp, price, and price_pred columns.")
+    required_columns = {"timestamp", IMPORT_PRICE_COLUMN, WHOLESALE_PRICE_PRED_COLUMN}
+    if reference_step_df.empty or not required_columns.issubset(reference_step_df.columns):
+        raise ValueError("Rollouts must contain timestamp, import_price, and wholesale_price_pred columns.")
 
     figure, axis = plt.subplots(1, 1, figsize=figsize)
     axis.plot(
         reference_step_df["timestamp"],
-        reference_step_df["price"],
+        reference_step_df[IMPORT_PRICE_COLUMN],
         color="#111827",
         linewidth=1.8,
-        label="Price",
+        label="Actual import price",
     )
 
-    reference_price_adder = float(reference_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
-    reference_pred = _resolve_adjusted_price_prediction(reference_step_df, price_adder=reference_price_adder)
+    reference_price_markup = float(reference_rollout.meta.get(IMPORT_PRICE_MARKUP_KEY, 0.0))
+    reference_pred = _resolve_adjusted_price_prediction(reference_step_df, price_markup=reference_price_markup)
     prediction_groups: list[dict[str, object]] = []
     for rollout in rollouts:
         if str(rollout.meta.get("prediction_mode", "")) != NORMAL_PREDICTION_MODE:
             continue
         step_df = rollout.step_df.copy()
-        if step_df.empty or "price_pred" not in step_df.columns:
+        if step_df.empty or WHOLESALE_PRICE_PRED_COLUMN not in step_df.columns:
             raise ValueError(
-                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing price_pred for compare plotting."
+                f"Rollout '{rollout.meta.get('controller', 'unknown')}' is missing wholesale_price_pred for compare plotting."
             )
-        price_adder = float(rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
+        price_markup = float(rollout.meta.get(IMPORT_PRICE_MARKUP_KEY, 0.0))
         candidate_timestamps = pd.to_datetime(step_df["timestamp"]).to_numpy()
-        candidate_pred = _resolve_adjusted_price_prediction(step_df, price_adder=price_adder)
+        candidate_pred = _resolve_adjusted_price_prediction(step_df, price_markup=price_markup)
         controller_name = str(rollout.meta.get("controller", "unknown"))
         matched_group = None
         for group in prediction_groups:
@@ -3623,11 +3667,11 @@ def plot_price_prediction_comparison(
     for group_idx, group in enumerate(prediction_groups):
         controllers = list(dict.fromkeys(str(name) for name in group["controllers"]))
         if len(prediction_groups) == 1:
-            label = "Predicted price"
+            label = "Predicted import price"
         elif len(controllers) == 1:
-            label = f"Predicted price ({controllers[0]})"
+            label = f"Predicted import price ({controllers[0]})"
         else:
-            label = f"Predicted price ({controllers[0]} +{len(controllers) - 1})"
+            label = f"Predicted import price ({controllers[0]} +{len(controllers) - 1})"
         axis.plot(
             group["timestamps"],
             group["pred"],
@@ -3637,7 +3681,7 @@ def plot_price_prediction_comparison(
             label=label,
         )
 
-    axis.set_title("Price And Adjusted Forecast", fontsize=title_fontsize)
+    axis.set_title("Import Price And Derived Forecast", fontsize=title_fontsize)
     axis.set_ylabel("EUR/kWh", fontsize=label_fontsize)
     axis.set_xlabel("Timestamp", fontsize=label_fontsize)
     axis.grid(True, alpha=0.25)

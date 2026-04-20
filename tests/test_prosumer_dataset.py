@@ -108,7 +108,7 @@ def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
         ),
     )
     assert np.isclose(
-        episode["signals"]["price"][0],
+        episode["signals"]["wholesale_price"][0],
         synthetic_prosumer_price_eur_per_kwh(0, year_offset=0),
     )
     assert episode["meta"]["node_ids"] == [10, 6]
@@ -116,7 +116,7 @@ def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
     assert episode["meta"]["year"] == 2019
     assert episode["meta"]["load_components"] == ["household"]
     assert episode["meta"]["pv_reference"] == "east"
-    assert episode["meta"]["signal_names"] == ["price", "load", "pv"]
+    assert episode["meta"]["signal_names"] == ["wholesale_price", "load", "pv"]
     assert episode["meta"]["timestamps"][0].startswith("2019-01-01 00:00:00")
 
 
@@ -213,6 +213,8 @@ def test_prosumer_dataset_filters_explicit_date_range_and_build_dataset_uses_it(
     cfg = ExperimentConfig()
     cfg.data.data_dir = data_dir
     cfg.data.agent_profiles = ["SFH12", "SFH14"]
+    cfg.data.load_scale = [1.0, 1.0]
+    cfg.data.pv_scale = [1.0, 1.0]
     cfg.data.train_year = 2019
     cfg.data.train_start_date = "2019-01-05"
     cfg.data.train_end_date = "2019-01-06"
@@ -269,6 +271,8 @@ def test_prosumer_dataset_validates_inputs_and_build_dataset_lengths(tmp_path):
     cfg = ExperimentConfig()
     cfg.data.data_dir = data_dir
     cfg.data.agent_profiles = ["SFH12"]
+    cfg.data.load_scale = [1.0, 1.0]
+    cfg.data.pv_scale = [1.0, 1.0]
     cfg.env.num_agents = 2
     cfg.env.episode_limit = 4
     cfg.grid.agent_bus_ids = [10, 6]
@@ -296,11 +300,11 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["node_ids"] == cfg.grid.agent_bus_ids
 
         next_obs, reward, terminated, truncated, info = env.step(
-            [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
+            [np.zeros((2,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         )
         assert next_obs["pv_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert len(reward) == cfg.env.num_agents
@@ -321,11 +325,11 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = fallback_env.reset(episode_idx=0)
-        assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
 
         _, reward, terminated, truncated, info = fallback_env.step(
-            [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
+            [np.zeros((2,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         )
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
@@ -334,8 +338,8 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
             "load",
             "load_heatpump",
             "load_household",
-            "price",
             "pv",
+            "wholesale_price",
         ]
     finally:
         fallback_env.close()

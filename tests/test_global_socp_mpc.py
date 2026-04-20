@@ -1,3 +1,4 @@
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +20,33 @@ from scripts.builder import build_env
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
+HAS_GUROBI = importlib.util.find_spec("gurobipy") is not None
+
+
+def _has_working_gurobi_license() -> bool:
+    if not HAS_GUROBI:
+        return False
+    try:
+        import gurobipy as gp
+
+        model = gp.Model("global_misocp_test")
+        model.Params.OutputFlag = 0
+        dispose = getattr(model, "dispose", None)
+        if callable(dispose):
+            dispose()
+        return True
+    except Exception:
+        return False
+
+
+HAS_WORKING_GUROBI_LICENSE = _has_working_gurobi_license()
+
+
 def _make_global_mpc_cfg(tmp_path, label: str):
     case_dir = make_case_dir(tmp_path, label)
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.forecast.type = "perfect"
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
     cfg.mpc.physics_refinement_mode = "none"
     return cfg
 
@@ -81,7 +104,8 @@ def _no_solution_result() -> MISOCPResult:
 
 def _mock_window_input(problem: GlobalMISOCPProblem, horizon_steps: int) -> FullHorizonProblemInput:
     return FullHorizonProblemInput(
-        price_seq=np.zeros((horizon_steps,), dtype=np.float32),
+        wholesale_price_seq=np.zeros((horizon_steps,), dtype=np.float32),
+        import_price_seq=np.zeros((horizon_steps,), dtype=np.float32),
         load_seq=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
         pv_seq=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
         soc_init=np.full((problem.n_agents,), 0.5, dtype=np.float32),
@@ -176,6 +200,7 @@ def test_network_model_extracts_tree_and_agent_reactive_background_is_zeroed(tmp
     assert np.any(np.abs(np.asarray(network.q_base_mvar, dtype=np.float32)[non_agent_mask]) > 0.0)
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_problem_uses_only_grid_binaries_and_returns_solution(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_problem")
     env = build_env(cfg, mode="test")
@@ -184,7 +209,7 @@ def test_global_misocp_problem_uses_only_grid_binaries_and_returns_solution(tmp_
         obs, _ = env.reset(episode_idx=0)
         raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
         result = problem.solve(
-            price_seq=raw_obs["price_seq"],
+            import_price_seq=problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]),
             load_seq=raw_obs["load_seq"],
             pv_seq=raw_obs["pv_seq"],
             soc_init=np.asarray(env.soc, dtype=np.float32),
@@ -221,7 +246,7 @@ def test_build_full_horizon_input_stitches_all_test_episodes(tmp_path):
         problem = GlobalMISOCPProblem.from_env(env, cfg)
         full_input = problem.build_full_horizon_input(env)
         raw_episode = env._dataset.get_episode(0)
-        raw_price_seq = np.asarray(raw_episode["signals"]["price"], dtype=np.float32)
+        raw_wholesale_price_seq = np.asarray(raw_episode["signals"]["wholesale_price"], dtype=np.float32)
 
         assert isinstance(full_input, FullHorizonProblemInput)
         assert full_input.horizon_steps > problem.horizon
@@ -232,8 +257,13 @@ def test_build_full_horizon_input_stitches_all_test_episodes(tmp_path):
         assert tuple(full_input.episode_offsets.tolist()) == expected_offsets
         assert tuple(full_input.episode_lengths.tolist()) == expected_lengths
         np.testing.assert_allclose(
-            full_input.price_seq[: raw_price_seq.size],
-            raw_price_seq + np.float32(cfg.reward.import_price_adder_eur_per_kwh),
+            full_input.wholesale_price_seq[: raw_wholesale_price_seq.size],
+            raw_wholesale_price_seq,
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            full_input.import_price_seq[: raw_wholesale_price_seq.size],
+            raw_wholesale_price_seq + np.float32(cfg.reward.import_price_markup_eur_per_kwh),
             rtol=1e-6,
         )
     finally:
@@ -248,6 +278,7 @@ def test_build_full_horizon_input_stitches_all_test_episodes(tmp_path):
         (0.16, 0.079, 0.25),
     ],
 )
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_agent_abs_grid_formulation_pins_abs_value_at_optimum(price, subsidy, g_value):
     import gurobipy as gp
     from gurobipy import GRB
@@ -270,6 +301,7 @@ def test_agent_abs_grid_formulation_pins_abs_value_at_optimum(price, subsidy, g_
     assert abs_var.X == pytest.approx(abs(float(g_value)), rel=1e-8, abs=1e-8)
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_agent_only_reformulation_rejects_prices_below_export_subsidy(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_price_guard")
     env = build_env(cfg, mode="test")
@@ -278,7 +310,7 @@ def test_agent_only_reformulation_rejects_prices_below_export_subsidy(tmp_path):
         full_input = _mock_window_input(problem, horizon_steps=2)
         with pytest.raises(ValueError, match="requires import prices to stay strictly above the export subsidy"):
             problem.solve_full_horizon(
-                price_seq=np.asarray([0.05, 0.06], dtype=np.float32),
+                import_price_seq=np.asarray([0.05, 0.06], dtype=np.float32),
                 load_seq=full_input.load_seq,
                 pv_seq=full_input.pv_seq,
                 soc_init=full_input.soc_init,
@@ -311,6 +343,7 @@ def test_compute_agent_net_grid_mw_uses_pv_raw_and_curtailment_once():
     assert agent_net_grid_mw[0, 1] == pytest.approx(10.0 / 1000.0 + 0.001)
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_full_horizon_solve_returns_long_plan(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_full_solve")
     env = build_env(cfg, mode="test")
@@ -318,7 +351,7 @@ def test_global_misocp_full_horizon_solve_returns_long_plan(tmp_path):
         problem = GlobalMISOCPProblem.from_env(env, cfg)
         full_input = problem.build_full_horizon_input(env)
         result = problem.solve_full_horizon(
-            price_seq=full_input.price_seq,
+            import_price_seq=full_input.import_price_seq,
             load_seq=full_input.load_seq,
             pv_seq=full_input.pv_seq,
             soc_init=full_input.soc_init,
@@ -347,16 +380,16 @@ def test_solve_adaptive_full_horizon_keeps_single_window_when_primary_has_incumb
         full_input = _mock_window_input(problem, horizon_steps=8)
         call_log: list[dict[str, object]] = []
 
-        def _fake_solve_sequences(*, price_seq, solve_config, solve_mode, **kwargs):
+        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
             call_log.append(
                 {
-                    "horizon_steps": int(np.asarray(price_seq).shape[0]),
+                    "horizon_steps": int(np.asarray(import_price_seq).shape[0]),
                     "solve_mode": str(solve_mode),
                     "cuts": solve_config.cuts,
                     "heuristics": solve_config.heuristics,
                 }
             )
-            return _solution_result(problem, int(np.asarray(price_seq).shape[0]), solve_mode=str(solve_mode))
+            return _solution_result(problem, int(np.asarray(import_price_seq).shape[0]), solve_mode=str(solve_mode))
 
         monkeypatch.setattr(problem, "_solve_sequences", _fake_solve_sequences)
 
@@ -396,8 +429,8 @@ def test_solve_adaptive_full_horizon_falls_back_to_chunked_window_and_uses_retry
             ]
         )
 
-        def _fake_solve_sequences(*, price_seq, solve_config, solve_mode, **kwargs):
-            horizon_steps = int(np.asarray(price_seq).shape[0])
+        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
+            horizon_steps = int(np.asarray(import_price_seq).shape[0])
             call_log.append(
                 {
                     "horizon_steps": horizon_steps,
@@ -435,6 +468,7 @@ def test_solve_adaptive_full_horizon_falls_back_to_chunked_window_and_uses_retry
         env.close()
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_controller_returns_bounded_actions_and_diagnostics(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_actions")
     env = build_env(cfg, mode="test")
@@ -460,6 +494,7 @@ def test_global_misocp_controller_returns_bounded_actions_and_diagnostics(tmp_pa
         env.close()
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_root_trade_is_exclusive_and_simultaneous_metrics_are_small(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_exclusive")
     env = build_env(cfg, mode="test")
@@ -468,7 +503,7 @@ def test_global_misocp_root_trade_is_exclusive_and_simultaneous_metrics_are_smal
         obs, _ = env.reset(episode_idx=0)
         raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
         result = problem.solve(
-            price_seq=raw_obs["price_seq"],
+            import_price_seq=problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]),
             load_seq=raw_obs["load_seq"],
             pv_seq=raw_obs["pv_seq"],
             soc_init=np.asarray(env.soc, dtype=np.float32),
@@ -483,6 +518,7 @@ def test_global_misocp_root_trade_is_exclusive_and_simultaneous_metrics_are_smal
         env.close()
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_enforces_terminal_soc_target(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_terminal_soc")
     cfg.env.soc_target = 0.7
@@ -492,7 +528,7 @@ def test_global_misocp_enforces_terminal_soc_target(tmp_path):
         obs, _ = env.reset(episode_idx=0)
         raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
         result = problem.solve(
-            price_seq=raw_obs["price_seq"],
+            import_price_seq=problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]),
             load_seq=raw_obs["load_seq"],
             pv_seq=raw_obs["pv_seq"],
             soc_init=np.asarray(env.soc, dtype=np.float32),
@@ -507,6 +543,7 @@ def test_global_misocp_enforces_terminal_soc_target(tmp_path):
         env.close()
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_exports_debug_artifacts_when_infeasible(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_infeasible")
     cfg.env.soc_target = 0.95
@@ -517,7 +554,7 @@ def test_global_misocp_exports_debug_artifacts_when_infeasible(tmp_path):
         obs, _ = env.reset(episode_idx=0)
         raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
         result = problem.solve(
-            price_seq=raw_obs["price_seq"],
+            import_price_seq=problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]),
             load_seq=raw_obs["load_seq"],
             pv_seq=raw_obs["pv_seq"],
             soc_init=np.asarray(env.soc, dtype=np.float32),

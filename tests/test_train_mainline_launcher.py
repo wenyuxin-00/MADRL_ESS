@@ -104,14 +104,14 @@ def test_apply_reward_controls_ignores_lambda_throughput(tmp_path):
         cfg,
         {
             "export_subsidy_eur_per_kwh": 0.081,
-            "import_price_adder_eur_per_kwh": 0.205,
+            "import_price_markup_eur_per_kwh": 0.205,
             "lambda_throughput": 0.123,
             "w_soc_pen": 0.0,
         },
     )
 
     assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
-    assert cfg.reward.import_price_adder_eur_per_kwh == pytest.approx(0.205)
+    assert cfg.reward.import_price_markup_eur_per_kwh == pytest.approx(0.205)
     assert cfg.reward.w_soc_pen == pytest.approx(0.0)
 
 

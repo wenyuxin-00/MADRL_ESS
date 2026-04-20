@@ -95,8 +95,8 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
     cfg.env.num_agents = n_agents
     cfg.env.episode_limit = episode_limit
     cfg.obs.local_features = ["calendar_time", "soc"]
-    cfg.obs.sequence_features = ["price", "load", "pv"]
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
     cfg.reward.w_trafo_pen = 7.5
     cfg.grid.train_compact_info = False
     cfg.grid.agent_bus_ids = [10, 6, 12][:n_agents]
@@ -227,8 +227,8 @@ def test_reset_returns_correct_obs_shape(grid_env) -> None:
 
 def test_default_battery_config_uses_fixed_defaults(grid_env) -> None:
     _, reset_info = grid_env.reset(episode_idx=0)
-    assert np.allclose(reset_info["p_max"], np.full((N_AGENTS,), 12.5, dtype=np.float32))
-    assert np.allclose(reset_info["battery_capacity_kwh"], np.full((N_AGENTS,), 25.0, dtype=np.float32))
+    assert np.allclose(reset_info["p_max"], np.asarray(grid_env.agent_p_max, dtype=np.float32))
+    assert np.allclose(reset_info["battery_capacity_kwh"], np.asarray(grid_env.agent_c_bat, dtype=np.float32))
 
 
 def test_fixed_battery_mode_uses_cfg_defaults() -> None:
@@ -295,7 +295,6 @@ def test_info_contains_required_fields(grid_env) -> None:
     _, _, _, _, info = grid_env.step(actions)
 
     required = [
-        "price",
         "wholesale_price",
         "import_price",
         "e_bat_req",
@@ -329,22 +328,21 @@ def test_info_contains_required_fields(grid_env) -> None:
     ]
     for key in required:
         assert key in info, f"Missing required info key: '{key}'"
-    assert info["price"] == pytest.approx(info["import_price"])
     assert info["import_price"] == pytest.approx(
-        info["wholesale_price"] + grid_env.import_price_adder_eur_per_kwh
+        info["wholesale_price"] + grid_env.import_price_markup_eur_per_kwh
     )
     assert np.allclose(np.asarray(info["trafo_p_signed_kw"], dtype=np.float32), np.asarray([12.5, -1.5], dtype=np.float32))
 
 
 def test_price_signal_remains_wholesale_but_cost_price_is_adjusted(grid_env) -> None:
     grid_env.reset(episode_idx=0)
-    raw_price = float(grid_env.get_signal_step("price", 0))
+    raw_price = float(grid_env.get_signal_step("wholesale_price", 0))
 
     _, _, _, _, info = grid_env.step(_zero_actions())
 
-    assert grid_env.ep_price[0] == pytest.approx(raw_price)
+    assert grid_env.ep_wholesale_price[0] == pytest.approx(raw_price)
     assert info["wholesale_price"] == pytest.approx(raw_price)
-    assert info["price"] == pytest.approx(raw_price + grid_env.import_price_adder_eur_per_kwh)
+    assert info["import_price"] == pytest.approx(raw_price + grid_env.import_price_markup_eur_per_kwh)
 
 
 def test_info_contains_reward_component_keys(grid_env) -> None:
@@ -399,7 +397,8 @@ def test_episode_recorder_compatible(grid_env) -> None:
     _, reward_list, _, _, info = grid_env.step(actions)
     append_step_record(history, info, step_total=sum(reward_list), reward_metas=reward_metas)
 
-    assert len(history["price"]) == 1
+    assert len(history["wholesale_price"]) == 1
+    assert len(history["import_price"]) == 1
     assert len(history["base_net_load"][0]) == 1
     assert len(history["e_bat_exec"][0]) == 1
     assert len(history["r_total_per_agent"][0]) == 1

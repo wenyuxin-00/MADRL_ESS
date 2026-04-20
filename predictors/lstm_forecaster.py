@@ -22,6 +22,11 @@ from predictors.time_features import (
     normalize_time_feature_mode,
     pad_history_timestamps_left,
 )
+from scripts.utils.price_protocol import (
+    PRICE_PROTOCOL_VERSION,
+    WHOLESALE_PRICE_SIGNAL,
+    normalize_internal_signal_name,
+)
 
 LSTM_ARTIFACT_FORMAT = "lstm_forecaster_v4"
 LSTM_LOAD_HYBRID_ARTIFACT_FORMAT = "lstm_forecaster_v5"
@@ -46,6 +51,7 @@ LSTM_REQUIRED_META_FIELDS = (
     "input_size",
     "time_feature_mode",
     "model_mode",
+    "price_protocol_version",
 )
 
 
@@ -106,7 +112,7 @@ def save_lstm_forecaster_artifacts(
     hidden_size: int,
     num_layers: int,
     dropout: float,
-    signal_name: str = "price",
+    signal_name: str = WHOLESALE_PRICE_SIGNAL,
     future_horizon: int | None = None,
     normalization_mode: str = PHYSICAL_NORMALIZATION_NONE,
     source_signature: dict[str, object] | None = None,
@@ -133,7 +139,8 @@ def save_lstm_forecaster_artifacts(
 
     meta = {
         "artifact_format": str(artifact_format or LSTM_ARTIFACT_FORMAT),
-        "signal_name": str(signal_name),
+        "signal_name": normalize_internal_signal_name(signal_name),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "future_horizon": int(pred_len if future_horizon is None else future_horizon),
         "seq_len": int(seq_len),
         "pred_len": int(pred_len),
@@ -193,6 +200,16 @@ def load_lstm_forecaster_artifacts(
         raise ValueError(
             f"LSTM meta artifact '{meta_path}' is missing required fields: {missing_fields}"
         )
+    if str(meta.get("signal_name", "")).strip().lower() == "price":
+        raise ValueError(
+            f"LSTM meta artifact '{meta_path}' still uses legacy signal_name='price'. "
+            "Rebuild the artifact with the wholesale/import price protocol cutover."
+        )
+    if int(meta.get("price_protocol_version", -1)) != int(PRICE_PROTOCOL_VERSION):
+        raise ValueError(
+            f"LSTM meta artifact '{meta_path}' has unsupported price_protocol_version="
+            f"{meta.get('price_protocol_version')!r}; expected {PRICE_PROTOCOL_VERSION}."
+        )
 
     with scaler_path.open("rb") as handle:
         scaler = pickle.load(handle)
@@ -249,7 +266,7 @@ class LSTMForecaster(Forecaster):
         self.device = torch.device(device)
         if signal_runtimes is None:
             runtime = self._build_runtime(
-                signal_name="price",
+                signal_name=WHOLESALE_PRICE_SIGNAL,
                 model_path=model_path,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
@@ -268,7 +285,7 @@ class LSTMForecaster(Forecaster):
                 optimized_metric=optimized_metric,
                 device=self.device,
             )
-            signal_runtimes = {"price": [runtime]}
+            signal_runtimes = {WHOLESALE_PRICE_SIGNAL: [runtime]}
 
         self.signal_runtimes = {
             str(signal_name): list(runtimes)
@@ -277,17 +294,21 @@ class LSTMForecaster(Forecaster):
         self._set_legacy_attributes()
 
     def _set_legacy_attributes(self) -> None:
-        preferred_signal = "price" if "price" in self.signal_runtimes else next(iter(self.signal_runtimes))
+        preferred_signal = (
+            WHOLESALE_PRICE_SIGNAL
+            if WHOLESALE_PRICE_SIGNAL in self.signal_runtimes
+            else next(iter(self.signal_runtimes))
+        )
         runtime = self.signal_runtimes[preferred_signal][0]
         self.seq_len = int(runtime.seq_len)
         self.pred_len = int(runtime.pred_len)
         self.scaler = runtime.scaler
         self.model = runtime.model
 
-    def _sync_legacy_price_runtime(self) -> None:
-        if "price" not in self.signal_runtimes or not self.signal_runtimes["price"]:
+    def _sync_primary_runtime(self) -> None:
+        if WHOLESALE_PRICE_SIGNAL not in self.signal_runtimes or not self.signal_runtimes[WHOLESALE_PRICE_SIGNAL]:
             return
-        runtime = self.signal_runtimes["price"][0]
+        runtime = self.signal_runtimes[WHOLESALE_PRICE_SIGNAL][0]
         runtime.seq_len = int(getattr(self, "seq_len", runtime.seq_len))
         runtime.pred_len = int(getattr(self, "pred_len", runtime.pred_len))
         runtime.scaler = getattr(self, "scaler", runtime.scaler)
@@ -359,7 +380,7 @@ class LSTMForecaster(Forecaster):
         meta_path: str | None = None,
         scaler_path: str | None = None,
         device: str | torch.device = "cpu",
-        signal_name: str = "price",
+        signal_name: str = WHOLESALE_PRICE_SIGNAL,
     ):
         meta, scaler = load_lstm_forecaster_artifacts(
             model_path=model_path,
@@ -445,8 +466,8 @@ class LSTMForecaster(Forecaster):
         return cls(device=device, signal_runtimes=signal_runtimes)
 
     def rename_default_signal(self, signal_name: str):
-        if "price" in self.signal_runtimes and signal_name != "price":
-            self.signal_runtimes[str(signal_name)] = self.signal_runtimes.pop("price")
+        if WHOLESALE_PRICE_SIGNAL in self.signal_runtimes and signal_name != WHOLESALE_PRICE_SIGNAL:
+            self.signal_runtimes[str(signal_name)] = self.signal_runtimes.pop(WHOLESALE_PRICE_SIGNAL)
             for runtime in self.signal_runtimes[str(signal_name)]:
                 runtime.signal_name = str(signal_name)
         self._set_legacy_attributes()
@@ -921,7 +942,7 @@ class LSTMForecaster(Forecaster):
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = WHOLESALE_PRICE_SIGNAL,
         history_timestamps: Sequence[str | pd.Timestamp] | None = None,
     ) -> np.ndarray:
         if signal_name not in self.signal_runtimes:
@@ -932,7 +953,7 @@ class LSTMForecaster(Forecaster):
                     f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {self.available_signals()}"
                 )
 
-        self._sync_legacy_price_runtime()
+        self._sync_primary_runtime()
         runtimes = self.signal_runtimes[signal_name]
         history = np.asarray(history, dtype=np.float32)
 
@@ -974,7 +995,7 @@ class LSTMForecaster(Forecaster):
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = WHOLESALE_PRICE_SIGNAL,
         history_timestamps: Sequence[str | pd.Timestamp] | None = None,
         batch_size: int = 8192,
     ) -> np.ndarray:
@@ -986,7 +1007,7 @@ class LSTMForecaster(Forecaster):
                     f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {self.available_signals()}"
                 )
 
-        self._sync_legacy_price_runtime()
+        self._sync_primary_runtime()
         runtimes = self.signal_runtimes[signal_name]
         history = np.asarray(history, dtype=np.float32)
 

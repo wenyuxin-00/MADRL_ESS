@@ -50,7 +50,7 @@ def _make_cfg(*, future_horizon: int = 4, n_agents: int = 2, test_start_date: st
             soc_target=0.5,
         ),
         reward=SimpleNamespace(
-            import_price_adder_eur_per_kwh=0.2,
+            import_price_markup_eur_per_kwh=0.2,
             export_subsidy_eur_per_kwh=0.079,
             w_soc_pen=10.0,
             w_voltage_pen=10.0,
@@ -79,7 +79,7 @@ def _make_env(*, n_agents: int = 2, future_horizon: int = 4):
     class _ObsBuilder:
         def __init__(self):
             self.raw_obs = {
-                "price_seq": np.asarray([0.10, 0.11, 0.12, 0.13, 0.14], dtype=np.float32)[: future_horizon + 1],
+                "wholesale_price_seq": np.asarray([0.10, 0.11, 0.12, 0.13, 0.14], dtype=np.float32)[: future_horizon + 1],
                 "load_seq": np.asarray(
                     [[1.0, 1.1, 1.2, 1.1, 1.0], [0.8, 0.9, 1.0, 0.9, 0.8]],
                     dtype=np.float32,
@@ -116,7 +116,7 @@ def _make_env(*, n_agents: int = 2, future_horizon: int = 4):
 
 def _make_solver_problem(*, horizon: int = 8, n_agents: int = 2):
     return admm_mpc_nb.AdmmMpcWindowData(
-        price_seq=np.full((horizon,), 0.2, dtype=np.float32),
+        wholesale_price_seq=np.full((horizon,), 0.0, dtype=np.float32),
         wholesale_price_eur_per_kwh=np.full((horizon,), 0.0, dtype=np.float32),
         import_price_eur_per_kwh=np.full((horizon,), 0.2, dtype=np.float32),
         load_seq=np.zeros((n_agents, horizon), dtype=np.float32),
@@ -130,7 +130,7 @@ def _make_solver_problem(*, horizon: int = 8, n_agents: int = 2):
         energy_min_kwh=np.zeros((n_agents,), dtype=np.float32),
         energy_max_kwh=np.full((n_agents,), 4.0, dtype=np.float32),
         export_subsidy_eur_per_kwh=0.05,
-        import_price_adder_eur_per_kwh=0.2,
+        import_price_markup_eur_per_kwh=0.2,
         dt_hours=0.25,
     )
 
@@ -159,8 +159,10 @@ def _make_cached_rollout(
                 "step": 0,
                 "global_step": 0,
                 "timestamp": timestamp,
-                "price": 0.3,
-                "price_pred": 0.5,
+                "wholesale_price": 0.1,
+                "import_price": 0.3,
+                "wholesale_price_pred": 0.3,
+                "import_price_pred": 0.5,
                 "purchase_cost_total": 0.33,
                 "export_subsidy_total": 0.0,
                 "objective_total": 0.33,
@@ -234,7 +236,7 @@ def _make_cached_rollout(
         "v_max_pu": 1.05,
         "prediction_mode": "normal",
         "forecast_backend": forecast_backend,
-        "import_price_adder_eur_per_kwh": 0.2,
+        "import_price_markup_eur_per_kwh": 0.2,
         "export_subsidy_eur_per_kwh": 0.079,
         "economics_scope": "agent_only",
     }
@@ -248,10 +250,10 @@ def test_build_admm_mpc_window_data_shapes_and_import_price():
 
     data = admm_mpc_nb.build_admm_mpc_window_data(cfg, env, raw_obs)
 
-    assert data.price_seq.shape == (5,)
+    assert data.wholesale_price_seq.shape == (5,)
     assert data.load_seq.shape == (2, 5)
     assert data.pv_seq.shape == (2, 5)
-    assert np.allclose(data.import_price_eur_per_kwh, data.price_seq + 0.2)
+    assert np.allclose(data.import_price_eur_per_kwh, data.wholesale_price_seq + 0.2)
     assert np.allclose(data.energy_ref_kwh, np.full((2,), 2.0, dtype=np.float32))
 
 
@@ -418,8 +420,10 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
                     "step": 0,
                     "global_step": 0,
                     "timestamp": timestamp,
-                    "price": 0.3,
-                    "price_pred": 0.3,
+                    "wholesale_price": 0.1,
+                    "import_price": 0.3,
+                    "wholesale_price_pred": 0.3,
+                    "import_price_pred": 0.5,
                     "base_net_load_total": 2.0,
                     "base_net_load_effective_total": 1.9,
                     "net_load_total": 2.2,
@@ -515,7 +519,7 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
             "agent_bus_ids": [1, 2],
             "v_min_pu": 0.95,
             "v_max_pu": 1.05,
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
             "trafo_limit_kw": 10.0,
         }
         return grid_nb.RolloutResult(step_df=step_df, agent_df=agent_df, grid_df=grid_df, summary=summary, meta=meta)
@@ -532,7 +536,6 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
     assert bool(rollout.step_df.loc[0, "admm_converged"])
     assert int(rollout.step_df.loc[0, "admm_iterations"]) == 7
     assert float(rollout.step_df.loc[0, "wholesale_price_pred"]) == pytest.approx(0.3)
-    assert float(rollout.step_df.loc[0, "price_pred"]) == pytest.approx(0.5)
     assert float(rollout.step_df.loc[0, "import_price_pred"]) == pytest.approx(0.5)
     assert float(rollout.step_df.loc[0, "import_price"]) == pytest.approx(0.3)
     assert rollout.step_df.loc[0, "objective_total"] == pytest.approx(
@@ -623,7 +626,7 @@ def test_admm_mpc_controller_falls_back_to_stdout_progress_when_tqdm_unavailable
         admm_mpc_nb,
         "build_admm_mpc_window_data",
         lambda *args, **kwargs: admm_mpc_nb.AdmmMpcWindowData(
-            price_seq=np.asarray([0.3], dtype=np.float32),
+            wholesale_price_seq=np.asarray([0.1], dtype=np.float32),
             wholesale_price_eur_per_kwh=np.asarray([0.1], dtype=np.float32),
             import_price_eur_per_kwh=np.asarray([0.3], dtype=np.float32),
             load_seq=np.zeros((2, 1), dtype=np.float32),
@@ -637,7 +640,7 @@ def test_admm_mpc_controller_falls_back_to_stdout_progress_when_tqdm_unavailable
             energy_min_kwh=np.zeros((2,), dtype=np.float32),
             energy_max_kwh=np.ones((2,), dtype=np.float32),
             export_subsidy_eur_per_kwh=0.079,
-            import_price_adder_eur_per_kwh=0.2,
+            import_price_markup_eur_per_kwh=0.2,
             dt_hours=0.25,
         ),
     )
@@ -728,8 +731,10 @@ def test_plotting_helpers_accept_admm_mpc_style_rollout(monkeypatch):
                             "step": 0,
                         "global_step": 0,
                         "timestamp": pd.Timestamp("2020-06-01 00:00:00"),
-                        "price": 0.3,
-                            "price_pred": 0.3,
+                        "wholesale_price": 0.1,
+                        "import_price": 0.3,
+                            "wholesale_price_pred": 0.3,
+                            "import_price_pred": 0.5,
                             "base_net_load_total": 1.9,
                             "net_load_total": 2.2,
                             "agent_raw_net_load_kw": 1.9,
@@ -830,12 +835,16 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
     def _fake_collect_controller_rollout(local_cfg, *, label, **kwargs):
         del kwargs
         if "ADMM MPC" in str(label):
-            price_pred = [0.10, 0.20]
-            price = [0.30, 0.40]
+            wholesale_price_pred = [0.10, 0.20]
+            import_price_pred = [0.30, 0.40]
+            wholesale_price = [-0.10, 0.00]
+            import_price = [0.10, 0.20]
             controller = admm_mpc_nb.ADMM_MPC_LSTM_LABEL
         else:
-            price_pred = [0.10, 0.20]
-            price = [0.30, 0.40]
+            wholesale_price_pred = [0.10, 0.20]
+            import_price_pred = [0.30, 0.40]
+            wholesale_price = [-0.10, 0.00]
+            import_price = [0.10, 0.20]
             controller = "Local MPC + LSTM Forecast"
 
         step_df = pd.DataFrame(
@@ -845,8 +854,10 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                 "step": [0, 1],
                 "global_step": [0, 1],
                 "timestamp": timestamps,
-                "price": price,
-                "price_pred": price_pred,
+                "wholesale_price": wholesale_price,
+                "import_price": import_price,
+                "wholesale_price_pred": wholesale_price_pred,
+                "import_price_pred": import_price_pred,
                 "base_net_load_total": [2.0, 2.1],
                 "base_net_load_effective_total": [1.9, 2.0],
                 "net_load_total": [1.6, 1.7],
@@ -942,7 +953,7 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                 "prediction_mode": "normal",
                 "forecast_backend": str(local_cfg.forecast.type),
                 "trafo_limit_kw": 10.0,
-                "import_price_adder_eur_per_kwh": 0.2,
+                "import_price_markup_eur_per_kwh": 0.2,
             },
         )
 
@@ -1000,7 +1011,7 @@ def test_admm_mpc_rollout_package_round_trip(tmp_path):
     saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, tmp_path / "cached_rollout")
     loaded = admm_mpc_nb.load_admm_mpc_rollout_package(saved_dir)
 
-    assert int(loaded["manifest"]["rollout_package_version"]) == 1
+    assert int(loaded["manifest"]["rollout_package_version"]) == 2
     assert loaded["diagnostics"]["convergence_rate"] == pytest.approx(1.0)
     assert pd.api.types.is_datetime64_any_dtype(loaded["step_df"]["timestamp"])
     assert list(loaded["agent_df"]["agent_profile"]) == ["agent_0", "agent_1"]

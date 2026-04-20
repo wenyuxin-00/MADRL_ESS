@@ -40,13 +40,13 @@ def _wrap_gurobi_error(detail: str, exc: Exception) -> RuntimeError:
 
 
 def _requires_grid_direction_binary(prices: np.ndarray, export_subsidy_eur_per_kwh: float) -> bool:
-    price_seq = np.asarray(prices, dtype=np.float32).reshape(-1)
-    if price_seq.size == 0:
+    import_price_seq = np.asarray(prices, dtype=np.float32).reshape(-1)
+    if import_price_seq.size == 0:
         return False
     export_subsidy = float(export_subsidy_eur_per_kwh)
     return bool(
         np.any(
-            price_seq - export_subsidy + np.float32(GRID_EXPORT_TIEBREAKER_EPS_EUR_PER_KWH)
+            import_price_seq - export_subsidy + np.float32(GRID_EXPORT_TIEBREAKER_EPS_EUR_PER_KWH)
             <= np.float32(0.0)
         )
     )
@@ -96,7 +96,7 @@ class LocalMPCFullHorizonResult:
 
 def _sanitize_problem_inputs(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -113,7 +113,7 @@ def _sanitize_problem_inputs(
     if capacity <= 0.0 or power_limit <= 0.0 or dt <= 0.0:
         return None
 
-    prices = np.asarray(price_seq, dtype=np.float32).reshape(-1)
+    prices = np.asarray(import_price_seq, dtype=np.float32).reshape(-1)
     load = np.asarray(load_seq, dtype=np.float32).reshape(-1)
     pv = np.asarray(pv_seq, dtype=np.float32).reshape(-1)
     horizon = int(min(len(prices), len(load), len(pv)))
@@ -652,14 +652,14 @@ class _ReusableLocalMPCSolver:
     def solve_full_horizon(
         self,
         *,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc: float,
         pv_curtail_upper_kw: np.ndarray | None = None,
     ) -> LocalMPCFullHorizonResult:
         prepared = _sanitize_problem_inputs(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc=soc,
@@ -678,7 +678,7 @@ class _ReusableLocalMPCSolver:
     def solve_full_horizon_with_netload_floor(
         self,
         *,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc: float,
@@ -686,7 +686,7 @@ class _ReusableLocalMPCSolver:
         pv_curtail_upper_kw: np.ndarray | None = None,
     ) -> LocalMPCFullHorizonResult:
         prepared = _sanitize_problem_inputs(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc=soc,
@@ -706,13 +706,13 @@ class _ReusableLocalMPCSolver:
     def solve(
         self,
         *,
-        price_seq: np.ndarray,
+        import_price_seq: np.ndarray,
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc: float,
     ) -> _LocalMPCSolveResult:
         full_horizon = self.solve_full_horizon(
-            price_seq=price_seq,
+            import_price_seq=import_price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc=soc,
@@ -786,7 +786,7 @@ def _build_full_horizon_solver(
 
 def _solve_local_gurobi_mpc_full_horizon(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -802,7 +802,7 @@ def _solve_local_gurobi_mpc_full_horizon(
     pv_curtail_upper_kw: np.ndarray | None = None,
 ) -> LocalMPCFullHorizonResult:
     prepared = _sanitize_problem_inputs(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,
@@ -843,7 +843,7 @@ def _solve_local_gurobi_mpc_full_horizon(
     )
     try:
         solve_kwargs = {
-            "price_seq": prepared["prices"],
+            "import_price_seq": prepared["prices"],
             "load_seq": np.asarray(load_seq, dtype=np.float32)[: int(prepared["horizon"])],
             "pv_seq": np.asarray(pv_seq, dtype=np.float32)[: int(prepared["horizon"])],
             "soc": soc,
@@ -865,7 +865,7 @@ def _solve_local_gurobi_mpc_full_horizon(
 
 def _solve_local_gurobi_mpc(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -879,7 +879,7 @@ def _solve_local_gurobi_mpc(
     force_guarded_fallback: bool | None = None,
 ) -> _LocalMPCSolveResult:
     full_horizon = _solve_local_gurobi_mpc_full_horizon(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,
@@ -935,7 +935,7 @@ def _solve_local_gurobi_mpc(
 
 def solve_local_gurobi_mpc_action(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -953,7 +953,7 @@ def solve_local_gurobi_mpc_action(
     """
 
     result = _solve_local_gurobi_mpc(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,
@@ -970,7 +970,7 @@ def solve_local_gurobi_mpc_action(
 
 def solve_local_gurobi_mpc_full_horizon(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -984,7 +984,7 @@ def solve_local_gurobi_mpc_full_horizon(
     pv_curtail_upper_kw: np.ndarray | None = None,
 ) -> LocalMPCFullHorizonResult:
     return _solve_local_gurobi_mpc_full_horizon(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,
@@ -1001,7 +1001,7 @@ def solve_local_gurobi_mpc_full_horizon(
 
 def solve_local_gurobi_mpc_full_horizon_with_netload_floor(
     *,
-    price_seq: np.ndarray,
+    import_price_seq: np.ndarray,
     load_seq: np.ndarray,
     pv_seq: np.ndarray,
     soc: float,
@@ -1016,7 +1016,7 @@ def solve_local_gurobi_mpc_full_horizon_with_netload_floor(
     pv_curtail_upper_kw: np.ndarray | None = None,
 ) -> LocalMPCFullHorizonResult:
     return _solve_local_gurobi_mpc_full_horizon(
-        price_seq=price_seq,
+        import_price_seq=import_price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
         soc=soc,

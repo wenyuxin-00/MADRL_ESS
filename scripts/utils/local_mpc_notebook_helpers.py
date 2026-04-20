@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from scripts.utils import grid_notebook_workflow as grid_nb
+from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY
 from scripts.utils.rollout_package_utils import (
     ROLLOUT_PACKAGE_VERSION,
     assert_rollout_cfg_snapshot_matches,
@@ -334,7 +335,7 @@ def replay_local_mpc_rollout_package(
             "agent_bus_ids": list(current_cfg_snapshot["agent_bus_ids"]),
             "v_min_pu": float(current_cfg_snapshot["v_min_pu"]),
             "v_max_pu": float(current_cfg_snapshot["v_max_pu"]),
-            "import_price_adder_eur_per_kwh": float(current_cfg_snapshot["import_price_adder_eur_per_kwh"]),
+            IMPORT_PRICE_MARKUP_KEY: float(current_cfg_snapshot[IMPORT_PRICE_MARKUP_KEY]),
             "export_subsidy_eur_per_kwh": float(current_cfg_snapshot["export_subsidy_eur_per_kwh"]),
             "loaded_from_cached_rollout": True,
             "rollout_package_dir": str(Path(target_dir).resolve()),

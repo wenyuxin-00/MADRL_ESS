@@ -42,7 +42,7 @@ class RewardFn(ABC):
         soc_next   (N,)  鈥?鏈缁撴潫鍚庣殑 SoC
         e_t        (N,)  鈥?鏈寮€濮嬫椂鐨勫偍鑳介噺 = soc_t * c_bat
         e_next     (N,)  鈥?鏈缁撴潫鍚庣殑鍌ㄨ兘閲?= soc_next * c_bat
-        price_t    float 鈥?褰撳墠鐢典环
+        import_price_t    float 鈥?褰撳墠璐數缁撶畻浠锋牸
         load_t     (N,)  鈥?褰撳墠璐熻嵎
         mu_t       float 鈥?鏈潵 K 姝ュ钩鍧囩數浠凤紙褰撳墠姝ワ級
         mu_next    float 鈥?鏈潵 K 姝ュ钩鍧囩數浠凤紙涓嬩竴姝ワ級

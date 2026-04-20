@@ -65,7 +65,8 @@ def test_testcompare_notebook_contains_compare_calls():
     assert "compose_experiment_config(" in joined_source
     assert "grid_nb.apply_notebook_experiment_settings(" in joined_source
     assert "base_cfg.env.episode_limit = int(round(24.0 / base_cfg.env.dt))" in joined_source
-    assert "base_cfg.reward.w_soc_pen =" in joined_source
+    assert "W_SOC_PEN =" not in joined_source
+    assert "base_cfg.reward.w_soc_pen =" not in joined_source
     assert "base_cfg.reward.w_voltage_pen =" in joined_source
     assert "base_cfg.reward.w_line_pen =" in joined_source
     assert "base_cfg.reward.w_trafo_pen =" in joined_source

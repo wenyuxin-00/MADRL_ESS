@@ -202,7 +202,7 @@ register_local_feature(
         description="Absolute hour-of-day and day-of-year sin/cos encodings.",
     )
 )
-register_local_feature(_current_shared_signal_feature("price", "Current electricity price."))
+register_local_feature(_current_shared_signal_feature("wholesale_price", "Current wholesale electricity price."))
 register_local_feature(_current_per_agent_signal_feature("load", "Current per-agent load."))
 register_local_feature(_current_per_agent_signal_feature("pv", "Current per-agent PV output."))
 register_local_feature(
@@ -217,7 +217,7 @@ register_local_feature(
 )
 
 register_sequence_feature(
-    _shared_signal_sequence_feature("price", "Future shared price window.", use_forecaster=True)
+    _shared_signal_sequence_feature("wholesale_price", "Future shared wholesale price window.", use_forecaster=True)
 )
 register_sequence_feature(
     _per_agent_signal_sequence_feature("load", "Future per-agent load window.", use_forecaster=True)

@@ -88,7 +88,7 @@ class SpyForecaster:
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = "wholesale_price",
         history_timestamps=None,
     ) -> np.ndarray:
         del signal_name
@@ -636,19 +636,18 @@ def test_old_heatpump_rmse_first_meta_is_marked_incompatible(tmp_path) -> None:
 def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path)
     cfg.forecast.type = "lstm"
-    cfg.forecast.target_signals = ["price", "pv"]
-    cfg.obs.sequence_features = ["price", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "pv"]
     cfg.forecast.lstm_artifact_root = tmp_path / "artifacts" / "forecast" / "lstm"
     cfg.forecast.history_window = 4
     cfg.env.future_horizon = 2
     cfg.forecast.lstm_epochs = 1
     cfg.forecast.lstm_batch_size = 4
-    cfg.forecast.lstm_hidden_size = 8
-    cfg.forecast.lstm_num_layers = 1
-    cfg.forecast.lstm_dropout = 0.0
+    cfg.forecast.lstm_num_layers = 2
+    cfg.forecast.lstm_dropout = 0.1
     cfg.forecast.auto_train_missing = False
 
-    train_signal_lstm(cfg, "price", show_progress=False)
+    train_signal_lstm(cfg, "wholesale_price", show_progress=False)
 
     pv_paths = _managed_lstm_artifact_paths(cfg, "pv")
     pv_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
@@ -668,13 +667,14 @@ def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> N
     assert {"input_size", "time_feature_mode", "postprocess_mode"} <= set(validation["mismatches"])
 
     inventory_before = _collect_lstm_artifact_inventory(cfg)
-    assert "price" in inventory_before["artifacts"]
+    assert "wholesale_price" in inventory_before["artifacts"]
     assert "pv" in inventory_before["mismatched_signals"]
 
+    cfg.forecast.lstm_num_layers = 1
     train_signal_lstm(cfg, "pv", show_progress=False)
 
     inventory_after = _collect_lstm_artifact_inventory(cfg)
-    assert set(inventory_after["artifacts"]) == {"price", "pv"}
+    assert set(inventory_after["artifacts"]) == {"wholesale_price", "pv"}
     assert "pv" not in inventory_after["invalid_artifacts"]
 
 

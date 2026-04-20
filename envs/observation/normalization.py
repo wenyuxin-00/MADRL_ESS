@@ -115,13 +115,13 @@ def _normalization_signature(cfg) -> dict[str, object]:
         "num_agents": int(cfg.env.num_agents),
         "local_features": list(cfg.obs.local_features),
         "sequence_features": list(cfg.obs.sequence_features),
-        "price_normalization": str(cfg.obs.price_normalization),
+        "wholesale_price_normalization": str(cfg.obs.wholesale_price_normalization),
         "load_normalization": str(cfg.obs.load_normalization),
         "pv_normalization": str(cfg.obs.pv_normalization),
         "soc_normalization": str(cfg.obs.soc_normalization),
         "clip_low": float(cfg.obs.normalization_clip_low_quantile),
         "clip_high": float(cfg.obs.normalization_clip_high_quantile),
-        "price_tanh_scale": float(cfg.obs.price_tanh_scale),
+        "wholesale_price_tanh_scale": float(cfg.obs.wholesale_price_tanh_scale),
         "load_tanh_scale": float(cfg.obs.load_tanh_scale),
         "pv_tanh_scale": float(cfg.obs.pv_tanh_scale),
     }
@@ -131,18 +131,18 @@ def fit_observation_normalization_state(cfg, dataset) -> dict[str, object]:
     low_quantile = float(cfg.obs.normalization_clip_low_quantile)
     high_quantile = float(cfg.obs.normalization_clip_high_quantile)
 
-    price_values = _extract_signal_values(dataset, "price")
+    wholesale_price_values = _extract_signal_values(dataset, "wholesale_price")
     load_values = _extract_signal_values(dataset, "load")
     pv_values = _extract_signal_values(dataset, "pv")
     pv_denominator = _extract_pv_denominator(dataset)
 
     return {
         "signature": _normalization_signature(cfg),
-        "price": {
-            "method": str(cfg.obs.price_normalization),
+        "wholesale_price": {
+            "method": str(cfg.obs.wholesale_price_normalization),
             "scope": "shared",
-            "tanh_scale": float(cfg.obs.price_tanh_scale),
-            **_fit_robust_stats(price_values, low_quantile=low_quantile, high_quantile=high_quantile),
+            "tanh_scale": float(cfg.obs.wholesale_price_tanh_scale),
+            **_fit_robust_stats(wholesale_price_values, low_quantile=low_quantile, high_quantile=high_quantile),
         },
         "load": {
             "method": str(cfg.obs.load_normalization),

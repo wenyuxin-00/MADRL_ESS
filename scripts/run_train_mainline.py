@@ -142,7 +142,7 @@ def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
     _DEPRECATED_REWARD_KEYS = {"lambda_throughput"}
     _KNOWN_REWARD_KEYS = {
         "export_subsidy_eur_per_kwh",
-        "import_price_adder_eur_per_kwh",
+        "import_price_markup_eur_per_kwh",
         "w_soc_pen",
         "w_action_pen",
         "w_voltage_pen",
@@ -161,7 +161,7 @@ def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
         cfg.reward.w_soc_pen = float(controls["w_action_pen"])
     numeric_fields = (
         "export_subsidy_eur_per_kwh",
-        "import_price_adder_eur_per_kwh",
+        "import_price_markup_eur_per_kwh",
         "w_voltage_pen",
         "w_line_pen",
         "w_trafo_pen",

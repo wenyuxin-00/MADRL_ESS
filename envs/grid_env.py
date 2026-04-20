@@ -19,6 +19,12 @@ except ModuleNotFoundError as exc:
 from scripts.utils.madrl_shared_data import PrecomputedObservationStore
 from controllers.action_feasibility import build_safety_local_numpy, validate_executed_actions_numpy
 from envs.grid.deployments import resolve_fixed_battery_spec
+from scripts.utils.price_protocol import (
+    IMPORT_PRICE_MARKUP_KEY,
+    WHOLESALE_PRICE_SIGNAL,
+    derive_import_price,
+    get_import_price_markup,
+)
 
 
 class GridEnv(gym.Env):
@@ -79,9 +85,7 @@ class GridEnv(gym.Env):
         from envs.rewards import NormalReward
 
         self.reward_fn = reward_fn if reward_fn is not None else NormalReward(cfg)
-        self.import_price_adder_eur_per_kwh = float(
-            getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
-        )
+        self.import_price_markup_eur_per_kwh = get_import_price_markup(cfg)
 
         if dataset is None:
             from data.loaders.registry import build_dataset
@@ -139,7 +143,7 @@ class GridEnv(gym.Env):
             else PrecomputedObservationStore(self._precomputed_data_dir)
         )
         self._episode_precomputed: dict[str, np.ndarray] = {}
-        self.ep_price = np.zeros((self.episode_length,), dtype=np.float32)
+        self.ep_wholesale_price = np.zeros((self.episode_length,), dtype=np.float32)
         self.ep_load = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self._local_mpc_solver_cache: dict[tuple[object, ...], Any] = {}
@@ -231,8 +235,10 @@ class GridEnv(gym.Env):
         episode_data = self._dataset.get_episode(episode_idx)
         raw_signals = episode_data.get("signals", {})
         raw_history_signals = dict(episode_data.get("history_signals", {}))
-        if "price" not in raw_signals or "load" not in raw_signals:
-            raise KeyError("Environment requires signals['price'] and signals['load'].")
+        if WHOLESALE_PRICE_SIGNAL not in raw_signals or "load" not in raw_signals:
+            raise KeyError(
+                f"Environment requires signals['{WHOLESALE_PRICE_SIGNAL}'] and signals['load']."
+            )
 
         self.signals = {
             name: self._canonicalize_signal(name, signal)
@@ -255,21 +261,23 @@ class GridEnv(gym.Env):
             raise ValueError(
                 f"history_length={history_length} should match history_timestamps size={len(self.history_timestamps)}"
             )
-        if history_length != int(self.history_signals["price"].shape[0]):
+        if history_length != int(self.history_signals[WHOLESALE_PRICE_SIGNAL].shape[0]):
             raise ValueError(
                 "history_length should match history_signals length, "
-                f"got {history_length} vs {self.history_signals['price'].shape[0]}"
+                f"got {history_length} vs {self.history_signals[WHOLESALE_PRICE_SIGNAL].shape[0]}"
             )
 
-        self.ep_price = self.get_signal("price")
+        self.ep_wholesale_price = self.get_signal(WHOLESALE_PRICE_SIGNAL)
         self.ep_load = self.get_signal("load")
         self.ep_pv = (
             self.get_signal("pv")
             if "pv" in self.signals
             else np.zeros((self.episode_length, self.n), dtype=np.float32)
         )
-        if self.ep_price.ndim != 1:
-            raise ValueError(f"signals['price'] must have shape (T,), got {self.ep_price.shape}")
+        if self.ep_wholesale_price.ndim != 1:
+            raise ValueError(
+                f"signals['{WHOLESALE_PRICE_SIGNAL}'] must have shape (T,), got {self.ep_wholesale_price.shape}"
+            )
         if self.ep_load.shape != (self.episode_length, self.n):
             raise ValueError(
                 f"signals['load'] must have shape {(self.episode_length, self.n)}, "
@@ -343,10 +351,10 @@ class GridEnv(gym.Env):
         start = t + 1
         end = min(t + 1 + self.future_horizon, self.episode_length)
         if start >= self.episode_length:
-            return float(self.ep_price[min(t, self.episode_length - 1)])
-        seg = self.ep_price[start:end]
+            return float(self.ep_wholesale_price[min(t, self.episode_length - 1)])
+        seg = self.ep_wholesale_price[start:end]
         if seg.size == 0:
-            return float(self.ep_price[min(t, self.episode_length - 1)])
+            return float(self.ep_wholesale_price[min(t, self.episode_length - 1)])
         return float(np.mean(seg))
 
     def _future_mean_price_next(self, t: int) -> float:
@@ -360,7 +368,7 @@ class GridEnv(gym.Env):
             "available_signals": sorted(self.signals),
             "battery_capacity_kwh": self.agent_c_bat.astype(np.float32).copy(),
             "p_max": self.agent_p_max.astype(np.float32).copy(),
-            "import_price_adder_eur_per_kwh": float(self.import_price_adder_eur_per_kwh),
+            IMPORT_PRICE_MARKUP_KEY: float(self.import_price_markup_eur_per_kwh),
             "episode_meta": dict(self.episode_meta),
             "n_buses": int(getattr(self._grid_core, "n_buses", 0)),
             "n_lines": int(getattr(self._grid_core, "n_lines", 0)),
@@ -540,8 +548,13 @@ class GridEnv(gym.Env):
         signal_state["base_net_load_effective"] = base_net_load_effective
 
     def _build_signal_state(self, t: int, pv_action: np.ndarray) -> dict[str, Any]:
-        wholesale_price_t = float(self.get_signal_step("price", t))
-        import_price_t = float(wholesale_price_t + self.import_price_adder_eur_per_kwh)
+        wholesale_price_t = float(self.get_signal_step(WHOLESALE_PRICE_SIGNAL, t))
+        import_price_t = float(
+            derive_import_price(
+                wholesale_price_t,
+                markup_eur_per_kwh=self.import_price_markup_eur_per_kwh,
+            )
+        )
         load_t = np.asarray(self.get_signal_step("load", t), dtype=np.float32)
         pv_raw = np.asarray(self.ep_pv[t], dtype=np.float32)
         pv_utilization_req = self._pv_action_to_utilization(pv_action)
@@ -551,7 +564,6 @@ class GridEnv(gym.Env):
         signal_state = {
             "wholesale_price_t": wholesale_price_t,
             "import_price_t": import_price_t,
-            "price_t": import_price_t,
             "load_t": load_t,
             "pv_raw": pv_raw,
             "pv_utilization_req": pv_utilization_req.astype(np.float32),
@@ -649,7 +661,6 @@ class GridEnv(gym.Env):
             "pv_effective": step_state["pv_effective"],
             "pv_raw": step_state["pv_raw"],
             "p_max": step_state["p_max"],
-            "price_t": step_state["import_price_t"],
             "wholesale_price_t": step_state["wholesale_price_t"],
             "import_price_t": step_state["import_price_t"],
             "net_load_t": step_state["base_net_load_raw"],
@@ -689,7 +700,6 @@ class GridEnv(gym.Env):
         info: dict[str, Any] = {
             "episode_done": done,
             "t": step_state["t"],
-            "price": float(step_state["import_price_t"]),
             "wholesale_price": float(step_state["wholesale_price_t"]),
             "import_price": float(step_state["import_price_t"]),
             "load": step_state["load_t"].astype(np.float32),

@@ -49,6 +49,7 @@ from predictors.time_features import (
     normalize_time_feature_mode,
     time_feature_dim,
 )
+from scripts.utils.price_protocol import WHOLESALE_PRICE_SIGNAL, normalize_internal_signal_name
 
 DEFAULT_WEEK_STEPS = 96 * 7
 SIGNAL_TRAINING_OVERRIDE_FIELDS = {
@@ -356,7 +357,7 @@ class SignalForecastEvaluation:
 
 
 def _normalize_signal_name(signal_name: str) -> str:
-    return str(signal_name).strip().lower()
+    return normalize_internal_signal_name(signal_name)
 
 
 def configured_forecast_signals(cfg) -> list[str]:
@@ -609,8 +610,8 @@ def validate_lstm_artifact(
 
 def _signal_columns_from_header(columns: list[str], signal_name: str) -> list[str]:
     signal_name = _normalize_signal_name(signal_name)
-    if signal_name == "price":
-        return ["price"] if "price" in columns else []
+    if signal_name == WHOLESALE_PRICE_SIGNAL:
+        return [WHOLESALE_PRICE_SIGNAL] if WHOLESALE_PRICE_SIGNAL in columns else []
 
     return [
         column
@@ -665,14 +666,14 @@ def _resolve_prosumer_dataset_kwargs(cfg, data_dir: Path, split: str) -> dict[st
 
 def _prosumer_value_columns(agent_profiles: Sequence[str], signal_name: str) -> tuple[str, ...]:
     signal_name = _normalize_signal_name(signal_name)
-    if signal_name == "price":
-        return ("price",)
+    if signal_name == WHOLESALE_PRICE_SIGNAL:
+        return (WHOLESALE_PRICE_SIGNAL,)
     return tuple(f"{signal_name}_{profile}" for profile in agent_profiles)
 
 
 def _resolve_prosumer_signal_source(cfg, data_dir: Path, signal_name: str) -> SignalCsvSource | None:
     known_components = {f"load_{comp}" for comp in cfg.data.load_components}
-    if signal_name not in {"price", "load", "pv"} and signal_name not in known_components:
+    if signal_name not in {WHOLESALE_PRICE_SIGNAL, "load", "pv"} and signal_name not in known_components:
         return None
     agent_profiles = [str(profile) for profile in cfg.data.agent_profiles]
     base_signal = "load" if signal_name in known_components else signal_name
@@ -707,8 +708,8 @@ def _load_prosumer_signal_frame_from_source(
     signal_values = np.asarray(dataset._signals[dataset_signal_key], dtype=np.float32)
 
     if signal_values.ndim == 1:
-        value_columns = ("price",)
-        frame = pd.DataFrame({"timestamp": timestamps, "price": signal_values})
+        value_columns = (WHOLESALE_PRICE_SIGNAL,)
+        frame = pd.DataFrame({"timestamp": timestamps, WHOLESALE_PRICE_SIGNAL: signal_values})
     else:
         column_indices = tuple(source.column_indices or tuple(range(signal_values.shape[1])))
         signal_values = signal_values[:, list(column_indices)]

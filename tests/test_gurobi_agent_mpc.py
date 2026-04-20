@@ -48,7 +48,7 @@ def test_local_gurobi_solver_raises_clear_error_when_dependency_missing(monkeypa
 
     with pytest.raises(RuntimeError, match="MPC rollout requires a working Gurobi installation/license"):
         gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-            price_seq=np.array([0.2], dtype=np.float32),
+            import_price_seq=np.array([0.2], dtype=np.float32),
             load_seq=np.array([1.0], dtype=np.float32),
             pv_seq=np.array([0.0], dtype=np.float32),
             **{**_base_solver_kwargs(), "efficiency": 0.95},
@@ -66,7 +66,7 @@ def test_local_gurobi_solver_raises_clear_error_when_model_creation_fails(monkey
 
     with pytest.raises(RuntimeError, match="working Gurobi installation/license"):
         gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-            price_seq=np.array([0.2], dtype=np.float32),
+            import_price_seq=np.array([0.2], dtype=np.float32),
             load_seq=np.array([1.0], dtype=np.float32),
             pv_seq=np.array([0.0], dtype=np.float32),
             **{**_base_solver_kwargs(), "efficiency": 0.95},
@@ -79,7 +79,7 @@ def test_local_gurobi_solver_raises_clear_error_when_model_creation_fails(monkey
 )
 def test_local_gurobi_solver_prefers_discharge_for_positive_prices():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.3, 0.3], dtype=np.float32),
+        import_price_seq=np.array([0.3, 0.3], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8},
@@ -95,7 +95,7 @@ def test_local_gurobi_solver_prefers_discharge_for_positive_prices():
 )
 def test_local_gurobi_solver_prefers_charge_for_negative_prices():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([-0.2, -0.2], dtype=np.float32),
+        import_price_seq=np.array([-0.2, -0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **_base_solver_kwargs(),
@@ -111,13 +111,13 @@ def test_local_gurobi_solver_prefers_charge_for_negative_prices():
 )
 def test_local_gurobi_solver_respects_soc_bounds():
     power_at_max_soc = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([-0.2, -0.2], dtype=np.float32),
+        import_price_seq=np.array([-0.2, -0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.9},
     )
     power_at_min_soc = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.2, 0.2], dtype=np.float32),
+        import_price_seq=np.array([0.2, 0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.1},
@@ -173,7 +173,7 @@ def test_shift_primal_solution_start_shifts_controls_and_reuses_penultimate_term
 )
 def test_local_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.0], dtype=np.float32),
+        import_price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8, "export_subsidy_eur_per_kwh": 0.079},
@@ -188,7 +188,7 @@ def test_local_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
 )
 def test_guarded_fallback_prevents_simultaneous_import_and_export():
     result = gurobi_agent_mpc._solve_local_gurobi_mpc(
-        price_seq=np.array([0.0], dtype=np.float32),
+        import_price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8, "export_subsidy_eur_per_kwh": 0.079, "force_guarded_fallback": True},
@@ -207,7 +207,7 @@ def test_guarded_fallback_prevents_simultaneous_import_and_export():
 )
 def test_local_gurobi_solver_does_not_export_without_subsidy_or_load():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.0], dtype=np.float32),
+        import_price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8, "export_subsidy_eur_per_kwh": 0.0},
@@ -222,7 +222,7 @@ def test_local_gurobi_solver_does_not_export_without_subsidy_or_load():
 )
 def test_local_gurobi_solver_handles_price_below_subsidy_guard_path():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.05, 0.05], dtype=np.float32),
+        import_price_seq=np.array([0.05, 0.05], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.6, "export_subsidy_eur_per_kwh": 0.079},
@@ -238,7 +238,7 @@ def test_local_gurobi_solver_handles_price_below_subsidy_guard_path():
 )
 def test_fast_path_export_variable_matches_negative_grid_flow():
     result = gurobi_agent_mpc._solve_local_gurobi_mpc(
-        price_seq=np.array([0.20], dtype=np.float32),
+        import_price_seq=np.array([0.20], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8, "force_guarded_fallback": False},
@@ -255,7 +255,7 @@ def test_fast_path_export_variable_matches_negative_grid_flow():
 )
 def test_fast_path_export_variable_is_zero_for_import_case():
     result = gurobi_agent_mpc._solve_local_gurobi_mpc(
-        price_seq=np.array([0.20], dtype=np.float32),
+        import_price_seq=np.array([0.20], dtype=np.float32),
         load_seq=np.array([1.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.1, "force_guarded_fallback": False},
@@ -271,13 +271,13 @@ def test_fast_path_export_variable_is_zero_for_import_case():
 )
 def test_fast_path_and_guarded_fallback_match_economic_objective_in_overlap_domain():
     fast_result = gurobi_agent_mpc._solve_local_gurobi_mpc(
-        price_seq=np.array([0.20, 0.25], dtype=np.float32),
+        import_price_seq=np.array([0.20, 0.25], dtype=np.float32),
         load_seq=np.array([0.3, 0.4], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.7, "force_guarded_fallback": False},
     )
     fallback_result = gurobi_agent_mpc._solve_local_gurobi_mpc(
-        price_seq=np.array([0.20, 0.25], dtype=np.float32),
+        import_price_seq=np.array([0.20, 0.25], dtype=np.float32),
         load_seq=np.array([0.3, 0.4], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.7, "force_guarded_fallback": True},
@@ -292,13 +292,13 @@ def test_fast_path_and_guarded_fallback_match_economic_objective_in_overlap_doma
 )
 def test_full_horizon_solver_matches_first_step_action():
     full_horizon = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon(
-        price_seq=np.array([0.25, 0.25], dtype=np.float32),
+        import_price_seq=np.array([0.25, 0.25], dtype=np.float32),
         load_seq=np.array([0.6, 0.6], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8},
     )
     first_step = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
-        price_seq=np.array([0.25, 0.25], dtype=np.float32),
+        import_price_seq=np.array([0.25, 0.25], dtype=np.float32),
         load_seq=np.array([0.6, 0.6], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8},
@@ -318,7 +318,7 @@ def test_full_horizon_solver_matches_first_step_action():
 )
 def test_full_horizon_solver_respects_net_load_floor():
     result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
-        price_seq=np.array([0.1, 0.1], dtype=np.float32),
+        import_price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         net_load_floor_kw=np.array([1.0, 0.5], dtype=np.float32),
@@ -335,7 +335,7 @@ def test_full_horizon_solver_respects_net_load_floor():
 )
 def test_full_horizon_solver_marks_infeasible_when_floor_is_unreachable():
     result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
-        price_seq=np.array([0.1, 0.1], dtype=np.float32),
+        import_price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         net_load_floor_kw=np.array([5.0, 5.0], dtype=np.float32),
@@ -351,7 +351,7 @@ def test_full_horizon_solver_marks_infeasible_when_floor_is_unreachable():
 )
 def test_full_horizon_solver_forces_zero_curtailment_when_upper_bound_is_zero():
     result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon(
-        price_seq=np.array([0.1, 0.1], dtype=np.float32),
+        import_price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_curtail_upper_kw=np.zeros((2,), dtype=np.float32),
@@ -370,7 +370,7 @@ def test_full_horizon_solver_forces_zero_curtailment_when_upper_bound_is_zero():
 )
 def test_full_horizon_solver_can_use_curtailment_to_satisfy_net_load_floor():
     result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
-        price_seq=np.array([0.1], dtype=np.float32),
+        import_price_seq=np.array([0.1], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([1.0], dtype=np.float32),
         net_load_floor_kw=np.array([0.0], dtype=np.float32),

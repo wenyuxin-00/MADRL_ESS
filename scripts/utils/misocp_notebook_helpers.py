@@ -11,8 +11,17 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scripts.utils.price_protocol import (
+    IMPORT_PRICE_COLUMN,
+    IMPORT_PRICE_MARKUP_KEY,
+    IMPORT_PRICE_PRED_COLUMN,
+    PRICE_PROTOCOL_VERSION,
+    WHOLESALE_PRICE_PRED_COLUMN,
+    WHOLESALE_PRICE_SEQ_FIELD,
+    derive_import_price,
+)
 
-_PLAN_PACKAGE_VERSION = 11
+_PLAN_PACKAGE_VERSION = 12
 _CFG_FLOAT_RTOL = 1e-6
 _CFG_FLOAT_ATOL = 1e-6
 _SOC_SLACK_EPS = 1e-6
@@ -167,9 +176,8 @@ def _build_cfg_snapshot_from_cfg(cfg: Any) -> dict[str, Any]:
         "export_subsidy_eur_per_kwh": float(
             getattr(getattr(cfg, "reward", None), "export_subsidy_eur_per_kwh", np.nan)
         ),
-        "import_price_adder_eur_per_kwh": float(
-            getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
-        ),
+        IMPORT_PRICE_MARKUP_KEY: float(getattr(getattr(cfg, "reward", None), IMPORT_PRICE_MARKUP_KEY, 0.0)),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "branch_current_tiebreaker_eur_per_pu_step": float(
             getattr(getattr(cfg, "mpc", None), "branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
@@ -247,9 +255,8 @@ def _build_problem_snapshot(problem: Any) -> dict[str, Any]:
         "v_min_sq": float(getattr(problem, "v_min_sq", np.nan)),
         "v_max_sq": float(getattr(problem, "v_max_sq", np.nan)),
         "trafo_limit_mva": float(getattr(problem, "trafo_limit_mva", np.nan)),
-        "import_price_adder_eur_per_kwh": float(
-            getattr(problem, "import_price_adder_eur_per_kwh", 0.0)
-        ),
+        IMPORT_PRICE_MARKUP_KEY: float(getattr(problem, "import_price_markup_eur_per_kwh", 0.0)),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "branch_current_tiebreaker_eur_per_pu_step": float(
             getattr(problem, "branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
@@ -343,7 +350,7 @@ def _build_problem_view(problem_snapshot: dict[str, Any]) -> SimpleNamespace:
         v_min_sq=float(problem_snapshot["v_min_sq"]),
         v_max_sq=float(problem_snapshot["v_max_sq"]),
         trafo_limit_mva=float(problem_snapshot["trafo_limit_mva"]),
-        import_price_adder_eur_per_kwh=float(problem_snapshot.get("import_price_adder_eur_per_kwh", 0.0)),
+        import_price_markup_eur_per_kwh=float(problem_snapshot.get(IMPORT_PRICE_MARKUP_KEY, 0.0)),
         branch_current_tiebreaker_eur_per_pu_step=float(
             problem_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
@@ -455,7 +462,7 @@ def _assert_cfg_snapshot_matches(expected_snapshot: dict[str, Any], actual_snaps
         "soc_max",
         "soc_target",
         "export_subsidy_eur_per_kwh",
-        "import_price_adder_eur_per_kwh",
+        IMPORT_PRICE_MARKUP_KEY,
         "branch_current_tiebreaker_eur_per_pu_step",
         "physics_refinement_slack_ratio",
         "physics_refinement_slack_abs_floor_eur",
@@ -711,15 +718,18 @@ def build_full_horizon_step_df(problem: Any, full_input: Any, result: Any) -> pd
 
     load_seq = np.asarray(full_input.load_seq, dtype=np.float32)
     pv_seq = np.asarray(full_input.pv_seq, dtype=np.float32)
-    price_seq = np.asarray(full_input.price_seq, dtype=np.float32).reshape(-1)
+    wholesale_price_seq = np.asarray(full_input.wholesale_price_seq, dtype=np.float32).reshape(-1)
+    import_price_seq = np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(-1)
     episode_idx = expand_episode_indices(full_input)
     timestamps = _timestamps_from_full_input(full_input)
-    horizon_steps = int(price_seq.shape[0])
+    horizon_steps = int(import_price_seq.shape[0])
 
     if episode_idx.shape[0] != horizon_steps:
         raise ValueError("Expanded episode index series does not match the full-horizon length.")
     if load_seq.shape[1] != horizon_steps or pv_seq.shape[1] != horizon_steps:
         raise ValueError("load_seq and pv_seq must match the full-horizon length.")
+    if wholesale_price_seq.shape[0] != horizon_steps:
+        raise ValueError("wholesale_price_seq must match the full-horizon length.")
 
     battery_charge_mw = _require_solution_matrix(result.battery_charge_mw, "battery_charge_mw")
     battery_discharge_mw = _require_solution_matrix(result.battery_discharge_mw, "battery_discharge_mw")
@@ -788,14 +798,14 @@ def build_full_horizon_step_df(problem: Any, full_input: Any, result: Any) -> pd
         else 0.0
     )
     agent_purchase_cost_eur_step = (
-        agent_import_kw_total * np.float32(problem.dt_hours) * price_seq.astype(np.float32)
+        agent_import_kw_total * np.float32(problem.dt_hours) * import_price_seq.astype(np.float32)
     ).astype(np.float32)
     agent_export_subsidy_eur_step = (
         agent_export_kw_total * np.float32(problem.dt_hours) * np.float32(agent_export_rate)
     ).astype(np.float32)
     agent_net_cost_eur_step = (agent_purchase_cost_eur_step - agent_export_subsidy_eur_step).astype(np.float32)
     feeder_purchase_cost_eur_step = (
-        grid_import_kw * np.float32(problem.dt_hours) * price_seq.astype(np.float32)
+        grid_import_kw * np.float32(problem.dt_hours) * import_price_seq.astype(np.float32)
     ).astype(np.float32)
     feeder_export_subsidy_eur_step = (
         grid_export_kw * np.float32(problem.dt_hours) * np.float32(feeder_export_rate)
@@ -808,7 +818,8 @@ def build_full_horizon_step_df(problem: Any, full_input: Any, result: Any) -> pd
             "timestamp": timestamps,
             "episode_idx": episode_idx,
             "global_step": np.arange(horizon_steps, dtype=np.int32),
-            "price": price_seq.astype(np.float32),
+            "wholesale_price": wholesale_price_seq.astype(np.float32),
+            IMPORT_PRICE_COLUMN: import_price_seq.astype(np.float32),
             "fixed_load_kw": np.full((horizon_steps,), fixed_load_kw, dtype=np.float32),
             "fixed_generation_kw": np.full((horizon_steps,), fixed_generation_kw, dtype=np.float32),
             "agent_load_kw": agent_load_kw,
@@ -1046,7 +1057,7 @@ def build_simultaneous_diagnostic_tables(
     pv_curtail_mw = _require_solution_matrix(result.pv_curtail_mw, "pv_curtail_mw")
     simultaneous_kw = _require_solution_matrix(result.simultaneous_charge_discharge_kw, "simultaneous_charge_discharge_kw")
     energy_mwh = _require_solution_matrix(result.energy_mwh, "energy_mwh")
-    price_seq = np.asarray(full_input.price_seq, dtype=np.float32).reshape(-1)
+    import_price_seq = np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(-1)
     timestamps = _timestamps_from_full_input(full_input)
     episode_idx = expand_episode_indices(full_input)
     resolved_profiles = list(agent_profiles or [f"agent_{idx}" for idx in range(battery_charge_mw.shape[0])])
@@ -1057,8 +1068,8 @@ def build_simultaneous_diagnostic_tables(
         {
             "timestamp": timestamps,
             "episode_idx": episode_idx,
-            "global_step": np.arange(price_seq.size, dtype=np.int32),
-            "price": price_seq.astype(np.float32),
+            "global_step": np.arange(import_price_seq.size, dtype=np.int32),
+            IMPORT_PRICE_COLUMN: import_price_seq.astype(np.float32),
             "charge_kw_total": np.sum(battery_charge_mw, axis=0).astype(np.float32) * 1000.0,
             "discharge_kw_total": np.sum(battery_discharge_mw, axis=0).astype(np.float32) * 1000.0,
             "pv_curtail_kw_total": np.sum(pv_curtail_mw, axis=0).astype(np.float32) * 1000.0,
@@ -1078,7 +1089,7 @@ def build_simultaneous_diagnostic_tables(
     capacity_mwh = np.asarray(problem.capacity_mwh, dtype=np.float32).reshape(-1)
     rows: list[dict[str, object]] = []
     for agent_idx, profile in enumerate(resolved_profiles):
-        for step_idx in range(price_seq.size):
+        for step_idx in range(import_price_seq.size):
             simultaneous_value = float(simultaneous_kw[agent_idx, step_idx])
             if simultaneous_value <= 0.0:
                 continue
@@ -1089,7 +1100,7 @@ def build_simultaneous_diagnostic_tables(
                     "global_step": int(step_idx),
                     "agent_id": int(agent_idx),
                     "agent_profile": str(profile),
-                    "price": float(price_seq[step_idx]),
+                    IMPORT_PRICE_COLUMN: float(import_price_seq[step_idx]),
                     "charge_kw": float(battery_charge_mw[agent_idx, step_idx] * 1000.0),
                     "discharge_kw": float(battery_discharge_mw[agent_idx, step_idx] * 1000.0),
                     "simultaneous_kw": simultaneous_value,
@@ -1113,7 +1124,7 @@ def build_simultaneous_diagnostic_tables(
                 "global_step",
                 "agent_id",
                 "agent_profile",
-                "price",
+                IMPORT_PRICE_COLUMN,
                 "charge_kw",
                 "discharge_kw",
                 "simultaneous_kw",
@@ -1152,7 +1163,7 @@ def build_chunk_boundary_soc_df(
     capacity_mwh = np.asarray(problem.capacity_mwh, dtype=np.float32).reshape(-1, 1)
     soc = energy_mwh / np.maximum(capacity_mwh, 1e-6)
     timestamps = _timestamps_from_full_input(full_input)
-    horizon_steps = int(np.asarray(full_input.price_seq, dtype=np.float32).reshape(-1).size)
+    horizon_steps = int(np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(-1).size)
 
     rows: list[dict[str, object]] = []
     for left_summary, right_summary in zip(chunk_summaries[:-1], chunk_summaries[1:], strict=False):
@@ -1576,7 +1587,13 @@ def build_misocp_validation_artifacts(
         for step_in_episode in range(episode_length):
             global_step = episode_offset + step_in_episode
             timestamp = timestamps[global_step] if global_step < len(timestamps) else _step_timestamp(reset_info, step_in_episode)
-            price_pred = _aligned_prediction(previous_raw_obs, raw_obs, "price_seq")
+            wholesale_price_pred = _aligned_prediction(previous_raw_obs, raw_obs, WHOLESALE_PRICE_SEQ_FIELD)
+            import_price_pred = float(
+                derive_import_price(
+                    wholesale_price_pred,
+                    markup_eur_per_kwh=float(getattr(getattr(env, "_reward_cfg", None), IMPORT_PRICE_MARKUP_KEY, 0.0)),
+                )
+            )
             load_pred = _aligned_prediction(previous_raw_obs, raw_obs, "load_seq")
             pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, "pv_seq")
 
@@ -1716,8 +1733,10 @@ def build_misocp_validation_artifacts(
                     "step": step_in_episode,
                     "global_step": int(global_step),
                     "timestamp": timestamp,
-                    "price": float(info["price"]),
-                    "price_pred": float(price_pred),
+                    "wholesale_price": float(info["wholesale_price"]),
+                    IMPORT_PRICE_COLUMN: float(info[IMPORT_PRICE_COLUMN]),
+                    WHOLESALE_PRICE_PRED_COLUMN: float(wholesale_price_pred),
+                    IMPORT_PRICE_PRED_COLUMN: float(import_price_pred),
                     "base_net_load_total": agent_raw_net_load_kw,
                     "base_net_load_effective_total": agent_effective_net_load_kw,
                     "net_load_total": agent_post_action_net_load_kw,
@@ -1948,6 +1967,7 @@ def build_misocp_plan_package(
         "plan_package_version": int(_PLAN_PACKAGE_VERSION),
         "controller_label": str(controller_label),
         "saved_at_utc": pd.Timestamp.utcnow().isoformat(),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "horizon_steps": int(full_input.horizon_steps),
         "episode_offsets": np.asarray(full_input.episode_offsets, dtype=np.int32).tolist(),
         "episode_lengths": np.asarray(full_input.episode_lengths, dtype=np.int32).tolist(),
@@ -2015,7 +2035,7 @@ def build_misocp_plan_package(
         "sanity_warning": str(getattr(solved_result, "sanity_warning", "")),
         "debug_artifacts": dict(getattr(solved_result, "debug_artifacts", {})),
         "export_subsidy_eur_per_kwh": float(export_subsidy),
-        "import_price_adder_eur_per_kwh": float(cfg_snapshot.get("import_price_adder_eur_per_kwh", 0.0)),
+        IMPORT_PRICE_MARKUP_KEY: float(cfg_snapshot.get(IMPORT_PRICE_MARKUP_KEY, 0.0)),
         "branch_current_tiebreaker_eur_per_pu_step": float(
             cfg_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
         ),
@@ -2136,7 +2156,8 @@ def save_misocp_plan_package(package: dict[str, Any], target_dir: str | Path) ->
     )
     np.savez_compressed(
         target_path / "full_input.npz",
-        price_seq=np.asarray(full_input.price_seq, dtype=np.float32),
+        wholesale_price_seq=np.asarray(full_input.wholesale_price_seq, dtype=np.float32),
+        import_price_seq=np.asarray(full_input.import_price_seq, dtype=np.float32),
         load_seq=np.asarray(full_input.load_seq, dtype=np.float32),
         pv_seq=np.asarray(full_input.pv_seq, dtype=np.float32),
         soc_init=np.asarray(full_input.soc_init, dtype=np.float32),
@@ -2282,7 +2303,8 @@ def load_misocp_plan_package(target_dir: str | Path) -> dict[str, Any]:
 
     with np.load(full_input_path, allow_pickle=False) as full_input_archive:
         full_input = FullHorizonProblemInput(
-            price_seq=np.asarray(full_input_archive["price_seq"], dtype=np.float32),
+            wholesale_price_seq=np.asarray(full_input_archive["wholesale_price_seq"], dtype=np.float32),
+            import_price_seq=np.asarray(full_input_archive["import_price_seq"], dtype=np.float32),
             load_seq=np.asarray(full_input_archive["load_seq"], dtype=np.float32),
             pv_seq=np.asarray(full_input_archive["pv_seq"], dtype=np.float32),
             soc_init=np.asarray(full_input_archive["soc_init"], dtype=np.float32),
@@ -2524,8 +2546,8 @@ def replay_misocp_plan_package(
             "feeder_export_subsidy_eur": float(package["solve_summary"]["feeder_export_subsidy_eur"]),
             "feeder_net_cost_eur": float(package["solve_summary"]["feeder_net_cost_eur"]),
             "export_subsidy_eur_per_kwh": float(package["solve_summary"]["export_subsidy_eur_per_kwh"]),
-            "import_price_adder_eur_per_kwh": float(
-                package["manifest"]["cfg_snapshot"].get("import_price_adder_eur_per_kwh", 0.0)
+            IMPORT_PRICE_MARKUP_KEY: float(
+                package["manifest"]["cfg_snapshot"].get(IMPORT_PRICE_MARKUP_KEY, 0.0)
             ),
             "physical_tiebreaker_weight": float(package["manifest"].get("physical_tiebreaker_weight", 0.0)),
             "physics_refinement_mode": str(package["solve_summary"].get("physics_refinement_mode", "none")),

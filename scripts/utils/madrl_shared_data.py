@@ -26,6 +26,12 @@ from predictors.lstm_forecaster import load_lstm_forecaster_artifacts
 from predictors.registry import build_forecaster
 from predictors.time_features import DEFAULT_LOCAL_TIMEZONE, coerce_timestamp_index
 from predictors.training import ensure_lstm_artifacts
+from scripts.utils.price_protocol import (
+    PRICE_PROTOCOL_VERSION,
+    WHOLESALE_PRICE_SEQ_FIELD,
+    WHOLESALE_PRICE_SIGNAL,
+    assert_no_legacy_price_schema,
+)
 from scripts.utils.project_paths import get_shared_data_root
 
 if TYPE_CHECKING:
@@ -34,7 +40,7 @@ if TYPE_CHECKING:
 _FLOAT_PRECISION = 6
 _LOCK_TIMEOUT_S = 300.0
 _LOCK_POLL_INTERVAL_S = 0.25
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 def _json_default(value: Any):
@@ -173,6 +179,7 @@ def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, objec
         "pv_capacity_kw": list(cfg.data.pv_capacity_kw),
         "load_scale": list(cfg.data.load_scale),
         "pv_scale": list(cfg.data.pv_scale),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "artifacts": artifact_fingerprint,
     }
 
@@ -268,8 +275,8 @@ def _build_calendar_time_matrix(
     return np.broadcast_to(per_step[:, None, :], (len(index), int(n_agents), 4)).astype(np.float32, copy=False)
 
 
-def _compute_future_mean_price(price: np.ndarray, future_horizon: int) -> tuple[np.ndarray, np.ndarray]:
-    values = np.asarray(price, dtype=np.float32).reshape(-1)
+def _compute_future_mean_price(wholesale_price: np.ndarray, future_horizon: int) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(wholesale_price, dtype=np.float32).reshape(-1)
     if values.size == 0:
         return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
 
@@ -329,7 +336,7 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
     split_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "calendar_time": "calendar_time.npy",
-        "price_seq": "price_seq.npy",
+        WHOLESALE_PRICE_SEQ_FIELD: f"{WHOLESALE_PRICE_SEQ_FIELD}.npy",
         "load_seq": "load_seq.npy",
         "pv_seq": "pv_seq.npy",
         "mu_t": "mu_t.npy",
@@ -343,8 +350,8 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
             dtype=np.float32,
             shape=(n_episodes, episode_length, n_agents, 4),
         ),
-        "price_seq": open_memmap(
-            split_dir / files["price_seq"],
+        WHOLESALE_PRICE_SEQ_FIELD: open_memmap(
+            split_dir / files[WHOLESALE_PRICE_SEQ_FIELD],
             mode="w+",
             dtype=np.float32,
             shape=(n_episodes, episode_length, sequence_length),
@@ -403,16 +410,16 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         forecaster.reset()
         forecaster.set_episode(combined_signals, meta)
 
-        mu_t, mu_next = _compute_future_mean_price(signals["price"], int(cfg.env.future_horizon))
+        mu_t, mu_next = _compute_future_mean_price(signals[WHOLESALE_PRICE_SIGNAL], int(cfg.env.future_horizon))
         arrays["mu_t"][episode_idx] = mu_t
         arrays["mu_next"][episode_idx] = mu_next
         arrays["calendar_time"][episode_idx] = _build_calendar_time_matrix(timestamps, n_agents)
 
         if vectorized_forecaster:
-            arrays["price_seq"][episode_idx] = forecaster.predict_episode_matrix(
-                combined_signals["price"],
+            arrays[WHOLESALE_PRICE_SEQ_FIELD][episode_idx] = forecaster.predict_episode_matrix(
+                combined_signals[WHOLESALE_PRICE_SIGNAL],
                 sequence_length,
-                signal_name="price",
+                signal_name=WHOLESALE_PRICE_SIGNAL,
                 history_timestamps=combined_timestamps,
             ).astype(np.float32)[prefix_length:]
             arrays["load_seq"][episode_idx] = forecaster.predict_episode_matrix(
@@ -431,10 +438,10 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
 
         for step_idx in range(episode_length):
             current_history_timestamps = combined_timestamps[: prefix_length + step_idx + 1]
-            arrays["price_seq"][episode_idx, step_idx] = forecaster.predict(
-                combined_signals["price"][: prefix_length + step_idx + 1],
+            arrays[WHOLESALE_PRICE_SEQ_FIELD][episode_idx, step_idx] = forecaster.predict(
+                combined_signals[WHOLESALE_PRICE_SIGNAL][: prefix_length + step_idx + 1],
                 sequence_length,
-                signal_name="price",
+                signal_name=WHOLESALE_PRICE_SIGNAL,
                 history_timestamps=current_history_timestamps,
             ).astype(np.float32)
             arrays["load_seq"][episode_idx, step_idx] = forecaster.predict(
@@ -460,6 +467,7 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
 
     split_manifest = {
         "schema_version": _SCHEMA_VERSION,
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
         "split": str(split),
         "num_episodes": n_episodes,
         "episode_length": episode_length,
@@ -573,6 +581,17 @@ class PrecomputedObservationStore:
     def __init__(self, split_dir: str | Path):
         self.split_dir = Path(split_dir).resolve()
         self.manifest = json.loads((self.split_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert_no_legacy_price_schema(dict(self.manifest.get("files", {})).keys(), context="Shared-data manifest")
+        if int(self.manifest.get("schema_version", -1)) != int(_SCHEMA_VERSION):
+            raise ValueError(
+                f"Unsupported shared-data schema version at '{self.split_dir}': "
+                f"expected={_SCHEMA_VERSION}, actual={self.manifest.get('schema_version')!r}."
+            )
+        if int(self.manifest.get("price_protocol_version", PRICE_PROTOCOL_VERSION)) != int(PRICE_PROTOCOL_VERSION):
+            raise ValueError(
+                f"Unsupported shared-data price protocol version at '{self.split_dir}': "
+                f"expected={PRICE_PROTOCOL_VERSION}, actual={self.manifest.get('price_protocol_version')!r}."
+            )
         self._arrays = {
             name: np.load(self.split_dir / file_name, mmap_mode="r")
             for name, file_name in dict(self.manifest.get("files", {})).items()
@@ -673,6 +692,7 @@ def ensure_madrl_shared_data(
         test_manifest = _write_split_shared_data(cfg, split="test", split_dir=temp_dir / "test")
         manifest = {
             "schema_version": _SCHEMA_VERSION,
+            "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
             "signature_hash": signature_hash,
             "signature": _normalize_for_signature(signature_payload),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

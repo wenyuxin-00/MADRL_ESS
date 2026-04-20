@@ -1,11 +1,33 @@
 import matplotlib
 import json
+import importlib.util
 import numpy as np
 import pandas as pd
 import pytest
 from pathlib import Path
 
 matplotlib.use("Agg")
+
+HAS_GUROBI = importlib.util.find_spec("gurobipy") is not None
+
+
+def _has_working_gurobi_license() -> bool:
+    if not HAS_GUROBI:
+        return False
+    try:
+        import gurobipy as gp
+
+        model = gp.Model("grid_nb_test")
+        model.Params.OutputFlag = 0
+        dispose = getattr(model, "dispose", None)
+        if callable(dispose):
+            dispose()
+        return True
+    except Exception:
+        return False
+
+
+HAS_WORKING_GUROBI_LICENSE = _has_working_gurobi_license()
 
 from configs.experiment_config import ExperimentConfig
 from scripts.utils.grid_notebook_workflow import (
@@ -113,7 +135,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     )
 
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["price", "load", "pv"]
+    assert cfg.obs.sequence_features == ["wholesale_price", "load", "pv"]
     assert cfg.env.future_horizon == 24
     assert cfg.forecast.type == "lstm"
     assert cfg.data.test_start_date == "2019-01-01"
@@ -219,7 +241,7 @@ def test_merge_managed_forecast_controls_backfills_missing_fields_and_deep_merge
         {
             "auto_train_missing": True,
             "signal_training_overrides": {
-                "price": {
+                    "wholesale_price": {
                     "epochs": 99,
                 }
             },
@@ -228,8 +250,11 @@ def test_merge_managed_forecast_controls_backfills_missing_fields_and_deep_merge
 
     assert merged["auto_train_missing"] is True
     assert merged["load_component_split"] == canonical["load_component_split"]
-    assert merged["signal_training_overrides"]["price"]["epochs"] == 99
-    assert merged["signal_training_overrides"]["price"]["hidden_size"] == canonical["signal_training_overrides"]["price"]["hidden_size"]
+    assert merged["signal_training_overrides"]["wholesale_price"]["epochs"] == 99
+    assert (
+        merged["signal_training_overrides"]["wholesale_price"]["hidden_size"]
+        == canonical["signal_training_overrides"]["wholesale_price"]["hidden_size"]
+    )
     assert merged["signal_training_overrides"]["load"] == canonical["signal_training_overrides"]["load"]
 
 
@@ -249,7 +274,7 @@ def test_apply_notebook_experiment_settings_backfills_partial_forecast_controls_
         forecast_controls={
             "auto_train_missing": False,
             "signal_training_overrides": {
-                "price": {
+                    "wholesale_price": {
                     "epochs": 99,
                 }
             },
@@ -262,9 +287,9 @@ def test_apply_notebook_experiment_settings_backfills_partial_forecast_controls_
     assert cfg.forecast.auto_train_missing is False
     assert cfg.forecast.load_component_split is True
     assert cfg.forecast.load_scaler_type == "robust"
-    assert cfg.forecast.signal_training_overrides["price"]["epochs"] == 99
-    assert cfg.forecast.signal_training_overrides["price"]["hidden_size"] == 128
-    assert cfg.forecast.signal_training_overrides["load"]["hidden_size"] == 96
+    assert cfg.forecast.signal_training_overrides["wholesale_price"]["epochs"] == 99
+    assert cfg.forecast.signal_training_overrides["wholesale_price"]["hidden_size"] == 64
+    assert cfg.forecast.signal_training_overrides["load"]["hidden_size"] == 64
 
 
 def test_forecast_lstm_notebook_uses_shared_forecast_preset():
@@ -484,8 +509,8 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
     assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
     assert rollout.meta["v_max_pu"] == cfg.grid.v_max_pu
     assert rollout.meta["trafo_loading_limit_pct"] == cfg.grid.line_max_loading_pct
-    assert rollout.meta["import_price_adder_eur_per_kwh"] == pytest.approx(
-        cfg.reward.import_price_adder_eur_per_kwh
+    assert rollout.meta["import_price_markup_eur_per_kwh"] == pytest.approx(
+        cfg.reward.import_price_markup_eur_per_kwh
     )
 
     aggregated = (
@@ -604,7 +629,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
             agent_c_bat = np.array([4.0, 4.0], dtype=np.float32)
             agent_p_max = np.array([2.0, 2.0], dtype=np.float32)
             reward_fn = type("_DummyReward", (), {"export_subsidy_eur_per_kwh": 0.079})()
-            import_price_adder_eur_per_kwh = 0.2
+            import_price_markup_eur_per_kwh = 0.2
             _grid_core = _DummyGridCore()
             _local_mpc_solver_cache = {}
             _local_mpc_stats = {}
@@ -620,7 +645,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         action_result = action_fn(
             _DummyEnv(),
             {
-                "price_seq": np.array([0.2, 0.2], dtype=np.float32),
+                    "wholesale_price_seq": np.array([0.2, 0.2], dtype=np.float32),
                 "load_seq": np.array([[1.0, 1.0], [1.2, 1.2]], dtype=np.float32),
                 "pv_seq": np.zeros((2, 2), dtype=np.float32),
             },
@@ -651,11 +676,11 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         def __init__(self, agent_idx: int) -> None:
             self.agent_idx = agent_idx
 
-        def solve_full_horizon(self, *, price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw=None):
+        def solve_full_horizon(self, *, import_price_seq, load_seq, pv_seq, soc, pv_curtail_upper_kw=None):
             recorded_solve_calls.append(
                 {
                     "agent_idx": int(self.agent_idx),
-                    "price_seq": np.asarray(price_seq, dtype=np.float32).copy(),
+                    "import_price_seq": np.asarray(import_price_seq, dtype=np.float32).copy(),
                     "load_seq": np.asarray(load_seq, dtype=np.float32).copy(),
                     "pv_seq": np.asarray(pv_seq, dtype=np.float32).copy(),
                     "soc": float(soc),
@@ -678,7 +703,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         env,
         *,
         agent_idx,
-        price_seq,
+        import_price_seq,
         battery_capacity_kwh,
         p_max_kw,
         dt_hours,
@@ -687,7 +712,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         soc_max,
         export_subsidy_eur_per_kwh,
     ):
-        del env, price_seq, battery_capacity_kwh, p_max_kw, dt_hours, efficiency, soc_min, soc_max
+        del env, import_price_seq, battery_capacity_kwh, p_max_kw, dt_hours, efficiency, soc_min, soc_max
         recorded_subsidies.append(float(export_subsidy_eur_per_kwh))
         recorded_agent_indices.append(int(agent_idx))
         return _FakeSolver(int(agent_idx)), {
@@ -712,7 +737,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
     assert recorded_agent_indices == [0, 1, 0, 1]
     assert len(recorded_solve_calls) == 4
     for call in recorded_solve_calls:
-        np.testing.assert_allclose(call["price_seq"], np.array([0.4, 0.4], dtype=np.float32))
+        np.testing.assert_allclose(call["import_price_seq"], np.array([0.4, 0.4], dtype=np.float32))
         np.testing.assert_allclose(call["pv_curtail_upper_kw"], call["pv_seq"])
     assert len(recorded_actions) == 2
     for action_array in recorded_actions:
@@ -803,7 +828,7 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
     solver_a_1, stats = _get_local_mpc_solver(
         env,
         agent_idx=0,
-        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        import_price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
         battery_capacity_kwh=4.0,
         p_max_kw=2.0,
         dt_hours=1.0,
@@ -815,7 +840,7 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
     solver_a_2, stats = _get_local_mpc_solver(
         env,
         agent_idx=0,
-        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        import_price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
         battery_capacity_kwh=4.0,
         p_max_kw=2.0,
         dt_hours=1.0,
@@ -827,7 +852,7 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
     solver_b_1, stats = _get_local_mpc_solver(
         env,
         agent_idx=1,
-        price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
+        import_price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
         battery_capacity_kwh=4.0,
         p_max_kw=2.0,
         dt_hours=1.0,
@@ -936,8 +961,8 @@ def test_collect_global_mpc_rollout_uses_controller_builder(tmp_path, monkeypatc
         )
 
 
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_collect_global_full_horizon_rollout_reports_continuous_soc_mode(tmp_path):
-    pytest.importorskip("gurobipy")
     case_dir = make_case_dir(tmp_path, "grid_rollout_global_oracle")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
@@ -993,8 +1018,10 @@ def test_compare_rollout_metrics_returns_expected_columns():
         step_df = pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.10, 0.20],
-                "price_pred": [0.11, 0.18],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.11, 0.18],
+                "import_price_pred": [0.31, 0.38],
                 "purchase_cost_total": [1.0, 1.1],
                 "export_subsidy_total": [0.1, 0.1],
                 "voltage_penalty_total": [0.0, 0.0],
@@ -1175,13 +1202,16 @@ def test_plot_shared_forecast_vs_actual_renders_shared_reference_predictions():
         price_pred: list[float],
         load_pred_shift: float,
         import_price_pred: list[float] | None = None,
-        price_adder: float = 0.2,
+        price_markup: float = 0.2,
     ) -> RolloutResult:
+        wholesale_price = np.asarray([0.10, 0.20], dtype=np.float32)
+        import_price = wholesale_price + np.float32(price_markup)
         step_df = pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": price_pred,
+                "wholesale_price": wholesale_price,
+                "import_price": import_price,
+                "wholesale_price_pred": price_pred,
             }
         )
         if import_price_pred is not None:
@@ -1203,7 +1233,7 @@ def test_plot_shared_forecast_vs_actual_renders_shared_reference_predictions():
             meta={
                 "controller": label,
                 "prediction_mode": "normal",
-                "import_price_adder_eur_per_kwh": price_adder,
+                "import_price_markup_eur_per_kwh": price_markup,
             },
         )
 
@@ -1216,7 +1246,7 @@ def test_plot_shared_forecast_vs_actual_renders_shared_reference_predictions():
     assert all(axis.title.get_fontsize() == pytest.approx(20) for axis in figure.axes)
     assert figure.axes[0].yaxis.label.get_size() == pytest.approx(18)
     assert any(label.get_fontsize() == pytest.approx(16) for label in figure.axes[-1].get_xticklabels())
-    assert figure.axes[0].lines[1].get_label() == "Predicted (Local MPC)"
+    assert figure.axes[0].lines[1].get_label() == "Predicted import price (Local MPC)"
     assert np.allclose(figure.axes[0].lines[1].get_ydata(), np.asarray([0.51, 0.59], dtype=np.float64))
 
 
@@ -1227,8 +1257,9 @@ def test_plot_shared_forecast_vs_actual_prefers_import_price_pred_when_present()
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.10, 0.20],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.10, 0.20],
                 "import_price_pred": [0.30, 0.40],
             }
         ),
@@ -1247,15 +1278,16 @@ def test_plot_shared_forecast_vs_actual_prefers_import_price_pred_when_present()
         meta={
             "controller": "ADMM MPC",
             "prediction_mode": "normal",
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
     rollout_b = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.11, 0.21],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.11, 0.21],
             }
         ),
         agent_df=rollout_a.agent_df.copy(),
@@ -1264,7 +1296,7 @@ def test_plot_shared_forecast_vs_actual_prefers_import_price_pred_when_present()
         meta={
             "controller": "Local MPC",
             "prediction_mode": "normal",
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
 
@@ -1282,8 +1314,9 @@ def test_plot_shared_forecast_vs_actual_aligns_to_common_time_window():
         step_df=pd.DataFrame(
             {
                 "timestamp": reference_timestamps,
-                "price": [0.20, 0.30, 0.40],
-                "price_pred": [0.21, 0.31, 0.41],
+                "wholesale_price": [0.20, 0.30, 0.40],
+                "import_price": [0.20, 0.30, 0.40],
+                "wholesale_price_pred": [0.21, 0.31, 0.41],
             }
         ),
         agent_df=pd.DataFrame(
@@ -1298,14 +1331,15 @@ def test_plot_shared_forecast_vs_actual_aligns_to_common_time_window():
         ),
         grid_df=pd.DataFrame(),
         summary=pd.DataFrame(),
-        meta={"controller": "ADMM MPC", "prediction_mode": "normal", "import_price_adder_eur_per_kwh": 0.0},
+        meta={"controller": "ADMM MPC", "prediction_mode": "normal", "import_price_markup_eur_per_kwh": 0.0},
     )
     candidate_rollout = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": candidate_timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.35, 0.45],
+                "wholesale_price": [0.30, 0.40],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.35, 0.45],
             }
         ),
         agent_df=pd.DataFrame(
@@ -1320,7 +1354,7 @@ def test_plot_shared_forecast_vs_actual_aligns_to_common_time_window():
         ),
         grid_df=pd.DataFrame(),
         summary=pd.DataFrame(),
-        meta={"controller": "MADRL + No Safety", "prediction_mode": "normal", "import_price_adder_eur_per_kwh": 0.0},
+        meta={"controller": "MADRL + No Safety", "prediction_mode": "normal", "import_price_markup_eur_per_kwh": 0.0},
     )
 
     figure = plot_shared_forecast_vs_actual(reference_rollout, candidate_rollout)
@@ -1338,8 +1372,9 @@ def test_plot_shared_forecast_vs_actual_rejects_mismatched_actual_series():
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.31, 0.39],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.31, 0.39],
             }
         ),
         agent_df=pd.DataFrame(
@@ -1360,8 +1395,9 @@ def test_plot_shared_forecast_vs_actual_rejects_mismatched_actual_series():
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.31, 0.40],
-                "price_pred": [0.31, 0.39],
+                "wholesale_price": [0.11, 0.20],
+                "import_price": [0.31, 0.40],
+                "wholesale_price_pred": [0.31, 0.39],
             }
         ),
         agent_df=reference_rollout.agent_df.copy(),
@@ -1370,7 +1406,7 @@ def test_plot_shared_forecast_vs_actual_rejects_mismatched_actual_series():
         meta={"controller": "ADMM MPC", "prediction_mode": "normal"},
     )
 
-    with pytest.raises(ValueError, match="different actual price values"):
+    with pytest.raises(ValueError, match="different actual import_price values"):
         plot_shared_forecast_vs_actual(reference_rollout, mismatched_rollout)
 
 
@@ -1548,8 +1584,10 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
-                    "price": [0.10, 0.20],
-                    "price_pred": [0.11, 0.21],
+                    "wholesale_price": [0.10, 0.20],
+                    "import_price": [0.30, 0.40],
+                    "wholesale_price_pred": [0.11, 0.21],
+                    "import_price_pred": [0.31, 0.41],
                     "base_net_load_total": [2.0 + offset, 2.1 + offset],
                     "base_net_load_effective_total": [1.8 + offset, 1.9 + offset],
                     "net_load_total": [1.7 + offset, 1.8 + offset],
@@ -1686,7 +1724,7 @@ def test_plot_net_load_comparison_raises_when_feeder_columns_cannot_be_derived()
         plot_net_load_comparison(rollout)
 
 
-def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_shared_line():
+def test_plot_price_prediction_comparison_applies_import_price_markup_and_keeps_shared_line():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
 
     def _rollout(label: str) -> RolloutResult:
@@ -1694,8 +1732,9 @@ def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_s
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
-                    "price": [0.30, 0.40],
-                    "price_pred": [0.10, 0.20],
+                    "wholesale_price": [0.10, 0.20],
+                    "import_price": [0.30, 0.40],
+                    "wholesale_price_pred": [0.10, 0.20],
                 }
             ),
             agent_df=pd.DataFrame(),
@@ -1703,7 +1742,7 @@ def test_plot_price_prediction_comparison_applies_import_price_adder_and_keeps_s
             summary=pd.DataFrame(),
             meta={
                 "controller": label,
-                "import_price_adder_eur_per_kwh": 0.2,
+                "import_price_markup_eur_per_kwh": 0.2,
             },
         )
 
@@ -1723,8 +1762,9 @@ def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_r
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
-                    "price": [0.30, 0.40],
-                    "price_pred": predicted,
+                    "wholesale_price": [0.10, 0.20],
+                    "import_price": [0.30, 0.40],
+                    "wholesale_price_pred": predicted,
                 }
             ),
             agent_df=pd.DataFrame(),
@@ -1733,7 +1773,7 @@ def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_r
             meta={
                 "controller": label,
                 "prediction_mode": "normal",
-                "import_price_adder_eur_per_kwh": 0.2,
+                "import_price_markup_eur_per_kwh": 0.2,
             },
         )
 
@@ -1745,9 +1785,9 @@ def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_r
     assert len(figure.axes) == 1
     assert len(figure.axes[0].lines) == 3
     labels = [line.get_label() for line in figure.axes[0].lines]
-    assert labels[0] == "Price"
-    assert "Predicted price (A)" in labels
-    assert "Predicted price (B)" in labels
+    assert labels[0] == "Actual import price"
+    assert "Predicted import price (A)" in labels
+    assert "Predicted import price (B)" in labels
 
 
 def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present():
@@ -1757,8 +1797,9 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.30, 0.40],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.30, 0.40],
                 "import_price_pred": [0.30, 0.40],
             }
         ),
@@ -1768,15 +1809,16 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         meta={
             "controller": "ADMM MPC",
             "prediction_mode": "normal",
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
     rollout_b = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "price": [0.30, 0.40],
-                "price_pred": [0.10, 0.20],
+                "wholesale_price": [0.10, 0.20],
+                "import_price": [0.30, 0.40],
+                "wholesale_price_pred": [0.10, 0.20],
             }
         ),
         agent_df=pd.DataFrame(),
@@ -1785,7 +1827,7 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         meta={
             "controller": "Local MPC",
             "prediction_mode": "normal",
-            "import_price_adder_eur_per_kwh": 0.2,
+            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
 
