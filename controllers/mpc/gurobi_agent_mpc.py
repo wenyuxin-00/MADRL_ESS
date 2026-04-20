@@ -1,4 +1,4 @@
-"""Single-agent rolling MPC solved with Gurobi."""
+"""Local MPC solved with Gurobi."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _load_gurobi():
 
 
 def _create_model(gp: Any):
-    model = gp.Model("single_agent_mpc")
+    model = gp.Model("local_mpc")
     model.Params.OutputFlag = 0
     return model
 
@@ -53,7 +53,7 @@ def _requires_grid_direction_binary(prices: np.ndarray, export_subsidy_eur_per_k
 
 
 @dataclass(frozen=True)
-class _SingleAgentMPCPrimalSolution:
+class _LocalMPCPrimalSolution:
     charge_kw: np.ndarray
     discharge_kw: np.ndarray
     pv_curtail_kw: np.ndarray
@@ -66,17 +66,17 @@ class _SingleAgentMPCPrimalSolution:
 
 
 @dataclass(frozen=True)
-class _SingleAgentMPCSolveResult:
+class _LocalMPCSolveResult:
     power_kw: float
     objective_eur: float
     solve_time_sec: float
     used_guarded_fallback: bool
     net_grid_kw: np.ndarray
-    solution: _SingleAgentMPCPrimalSolution
+    solution: _LocalMPCPrimalSolution
 
 
 @dataclass(frozen=True)
-class SingleAgentMPCFullHorizonResult:
+class LocalMPCFullHorizonResult:
     charge_kw: np.ndarray
     discharge_kw: np.ndarray
     pv_curtail_kw: np.ndarray
@@ -171,12 +171,12 @@ def _shift_energy_start(values: np.ndarray, current_energy_kwh: float) -> np.nda
 
 
 def _shift_primal_solution_start(
-    solution: _SingleAgentMPCPrimalSolution,
+    solution: _LocalMPCPrimalSolution,
     *,
     current_energy_kwh: float,
     use_guarded_fallback: bool,
-) -> _SingleAgentMPCPrimalSolution:
-    shifted = _SingleAgentMPCPrimalSolution(
+) -> _LocalMPCPrimalSolution:
+    shifted = _LocalMPCPrimalSolution(
         charge_kw=_shift_control_start(solution.charge_kw, 0.0),
         discharge_kw=_shift_control_start(solution.discharge_kw, 0.0),
         pv_curtail_kw=_shift_control_start(solution.pv_curtail_kw, 0.0),
@@ -254,8 +254,8 @@ def _sanitize_pv_curtail_upper(
     return np.minimum(np.maximum(curtail_upper, 0.0), pv_available).astype(np.float32, copy=False)
 
 
-class _ReusableSingleAgentMPCSolver:
-    """Reuse a fixed-horizon single-agent MPC model across rollout steps."""
+class _ReusableLocalMPCSolver:
+    """Reuse a fixed-horizon local MPC model across rollout steps."""
 
     def __init__(
         self,
@@ -281,7 +281,7 @@ class _ReusableSingleAgentMPCSolver:
         self.energy_max = float(np.clip(self.soc_max, 0.0, 1.0)) * self.capacity
         self.export_subsidy_eur_per_kwh = float(export_subsidy_eur_per_kwh)
         self.use_guarded_fallback = bool(use_guarded_fallback)
-        self._last_solution: _SingleAgentMPCPrimalSolution | None = None
+        self._last_solution: _LocalMPCPrimalSolution | None = None
 
         try:
             self._gp, self._grb = _load_gurobi()
@@ -501,7 +501,7 @@ class _ReusableSingleAgentMPCSolver:
             int(self._grb.SUBOPTIMAL),
         }
 
-    def _extract_solution(self) -> _SingleAgentMPCPrimalSolution:
+    def _extract_solution(self) -> _LocalMPCPrimalSolution:
         charge_kw = np.asarray([self.charge[idx].X for idx in range(self.horizon)], dtype=np.float32)
         discharge_kw = np.asarray([self.discharge[idx].X for idx in range(self.horizon)], dtype=np.float32)
         pv_curtail_kw = np.asarray([self.pv_curtail[idx].X for idx in range(self.horizon)], dtype=np.float32)
@@ -516,7 +516,7 @@ class _ReusableSingleAgentMPCSolver:
             dtype=np.float32,
         )
         if self.use_guarded_fallback:
-            return _SingleAgentMPCPrimalSolution(
+            return _LocalMPCPrimalSolution(
                 charge_kw=charge_kw,
                 discharge_kw=discharge_kw,
                 pv_curtail_kw=pv_curtail_kw,
@@ -526,7 +526,7 @@ class _ReusableSingleAgentMPCSolver:
                 grid_export_kw=grid_export_kw,
                 grid_mode=np.asarray([self.grid_mode[idx].X for idx in range(self.horizon)], dtype=np.float32),
             )
-        return _SingleAgentMPCPrimalSolution(
+        return _LocalMPCPrimalSolution(
             charge_kw=charge_kw,
             discharge_kw=discharge_kw,
             pv_curtail_kw=pv_curtail_kw,
@@ -542,11 +542,11 @@ class _ReusableSingleAgentMPCSolver:
         *,
         solve_time_sec: float = 0.0,
         net_load_floor_kw: np.ndarray | None = None,
-    ) -> SingleAgentMPCFullHorizonResult:
+    ) -> LocalMPCFullHorizonResult:
         empty_horizon = np.zeros((max(self.horizon, 0),), dtype=np.float32)
         empty_energy = np.zeros((max(self.horizon + 1, 0),), dtype=np.float32)
         floor = None if net_load_floor_kw is None else np.asarray(net_load_floor_kw, dtype=np.float32).reshape(-1).copy()
-        return SingleAgentMPCFullHorizonResult(
+        return LocalMPCFullHorizonResult(
             charge_kw=empty_horizon.copy(),
             discharge_kw=empty_horizon.copy(),
             pv_curtail_kw=empty_horizon.copy(),
@@ -570,13 +570,13 @@ class _ReusableSingleAgentMPCSolver:
         prepared: dict[str, Any] | None,
         net_load_floor_kw: np.ndarray | None = None,
         pv_curtail_upper_kw: np.ndarray | None = None,
-    ) -> SingleAgentMPCFullHorizonResult:
+    ) -> LocalMPCFullHorizonResult:
         if prepared is None:
             return self._build_empty_full_horizon_result(net_load_floor_kw=net_load_floor_kw)
 
         if int(prepared["horizon"]) != self.horizon:
             raise ValueError(
-                "Reusable single-agent MPC solver was built with a different horizon: "
+                "Reusable local MPC solver was built with a different horizon: "
                 f"expected {self.horizon}, got {prepared['horizon']}."
             )
 
@@ -631,7 +631,7 @@ class _ReusableSingleAgentMPCSolver:
         objective_eur = float(
             np.sum((prices * grid_import_kw - self.export_subsidy_eur_per_kwh * grid_export_kw) * self.dt)
         )
-        return SingleAgentMPCFullHorizonResult(
+        return LocalMPCFullHorizonResult(
             charge_kw=solution.charge_kw.copy(),
             discharge_kw=solution.discharge_kw.copy(),
             pv_curtail_kw=pv_curtail_kw.copy(),
@@ -657,7 +657,7 @@ class _ReusableSingleAgentMPCSolver:
         pv_seq: np.ndarray,
         soc: float,
         pv_curtail_upper_kw: np.ndarray | None = None,
-    ) -> SingleAgentMPCFullHorizonResult:
+    ) -> LocalMPCFullHorizonResult:
         prepared = _sanitize_problem_inputs(
             price_seq=price_seq,
             load_seq=load_seq,
@@ -684,7 +684,7 @@ class _ReusableSingleAgentMPCSolver:
         soc: float,
         net_load_floor_kw: np.ndarray,
         pv_curtail_upper_kw: np.ndarray | None = None,
-    ) -> SingleAgentMPCFullHorizonResult:
+    ) -> LocalMPCFullHorizonResult:
         prepared = _sanitize_problem_inputs(
             price_seq=price_seq,
             load_seq=load_seq,
@@ -710,14 +710,14 @@ class _ReusableSingleAgentMPCSolver:
         load_seq: np.ndarray,
         pv_seq: np.ndarray,
         soc: float,
-    ) -> _SingleAgentMPCSolveResult:
+    ) -> _LocalMPCSolveResult:
         full_horizon = self.solve_full_horizon(
             price_seq=price_seq,
             load_seq=load_seq,
             pv_seq=pv_seq,
             soc=soc,
         )
-        zero_solution = _SingleAgentMPCPrimalSolution(
+        zero_solution = _LocalMPCPrimalSolution(
             charge_kw=np.zeros((max(self.horizon, 0),), dtype=np.float32),
             discharge_kw=np.zeros((max(self.horizon, 0),), dtype=np.float32),
             pv_curtail_kw=np.zeros((max(self.horizon, 0),), dtype=np.float32),
@@ -725,7 +725,7 @@ class _ReusableSingleAgentMPCSolver:
             energy_kwh=np.zeros((max(self.horizon + 1, 0),), dtype=np.float32),
         )
         if not full_horizon.feasible:
-            return _SingleAgentMPCSolveResult(
+            return _LocalMPCSolveResult(
                 power_kw=0.0,
                 objective_eur=float(full_horizon.objective_eur),
                 solve_time_sec=float(full_horizon.solve_time_sec),
@@ -734,7 +734,7 @@ class _ReusableSingleAgentMPCSolver:
                 solution=zero_solution,
             )
         charge_mode = (full_horizon.charge_kw >= np.maximum(full_horizon.discharge_kw, 1e-6)).astype(np.float32)
-        solution = _SingleAgentMPCPrimalSolution(
+        solution = _LocalMPCPrimalSolution(
             charge_kw=full_horizon.charge_kw.copy(),
             discharge_kw=full_horizon.discharge_kw.copy(),
             pv_curtail_kw=full_horizon.pv_curtail_kw.copy(),
@@ -748,7 +748,7 @@ class _ReusableSingleAgentMPCSolver:
         power_kw = float(full_horizon.signed_battery_kw[0]) if full_horizon.signed_battery_kw.size else 0.0
         if abs(power_kw) < 1e-8:
             power_kw = 0.0
-        return _SingleAgentMPCSolveResult(
+        return _LocalMPCSolveResult(
             power_kw=power_kw,
             objective_eur=float(full_horizon.objective_eur),
             solve_time_sec=float(full_horizon.solve_time_sec),
@@ -765,13 +765,13 @@ def _build_full_horizon_solver(
     soc_max: float,
     export_subsidy_eur_per_kwh: float,
     force_guarded_fallback: bool | None = None,
-) -> _ReusableSingleAgentMPCSolver:
+) -> _ReusableLocalMPCSolver:
     use_guarded_fallback = (
         _requires_grid_direction_binary(prepared["prices"], export_subsidy_eur_per_kwh)
         if force_guarded_fallback is None
         else bool(force_guarded_fallback)
     )
-    return _ReusableSingleAgentMPCSolver(
+    return _ReusableLocalMPCSolver(
         horizon=int(prepared["horizon"]),
         battery_capacity_kwh=float(prepared["capacity"]),
         p_max_kw=float(prepared["power_limit"]),
@@ -784,7 +784,7 @@ def _build_full_horizon_solver(
     )
 
 
-def _solve_single_agent_gurobi_mpc_full_horizon(
+def _solve_local_gurobi_mpc_full_horizon(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -800,7 +800,7 @@ def _solve_single_agent_gurobi_mpc_full_horizon(
     force_guarded_fallback: bool | None = None,
     net_load_floor_kw: np.ndarray | None = None,
     pv_curtail_upper_kw: np.ndarray | None = None,
-) -> SingleAgentMPCFullHorizonResult:
+) -> LocalMPCFullHorizonResult:
     prepared = _sanitize_problem_inputs(
         price_seq=price_seq,
         load_seq=load_seq,
@@ -814,7 +814,7 @@ def _solve_single_agent_gurobi_mpc_full_horizon(
         soc_max=soc_max,
     )
     if prepared is None:
-        return SingleAgentMPCFullHorizonResult(
+        return LocalMPCFullHorizonResult(
             charge_kw=np.zeros((0,), dtype=np.float32),
             discharge_kw=np.zeros((0,), dtype=np.float32),
             pv_curtail_kw=np.zeros((0,), dtype=np.float32),
@@ -863,7 +863,7 @@ def _solve_single_agent_gurobi_mpc_full_horizon(
         solver.dispose()
 
 
-def _solve_single_agent_gurobi_mpc(
+def _solve_local_gurobi_mpc(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -877,8 +877,8 @@ def _solve_single_agent_gurobi_mpc(
     soc_max: float,
     export_subsidy_eur_per_kwh: float,
     force_guarded_fallback: bool | None = None,
-) -> _SingleAgentMPCSolveResult:
-    full_horizon = _solve_single_agent_gurobi_mpc_full_horizon(
+) -> _LocalMPCSolveResult:
+    full_horizon = _solve_local_gurobi_mpc_full_horizon(
         price_seq=price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
@@ -892,7 +892,7 @@ def _solve_single_agent_gurobi_mpc(
         export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh,
         force_guarded_fallback=force_guarded_fallback,
     )
-    zero_solution = _SingleAgentMPCPrimalSolution(
+    zero_solution = _LocalMPCPrimalSolution(
         charge_kw=np.zeros((0,), dtype=np.float32),
         discharge_kw=np.zeros((0,), dtype=np.float32),
         pv_curtail_kw=np.zeros((0,), dtype=np.float32),
@@ -900,7 +900,7 @@ def _solve_single_agent_gurobi_mpc(
         energy_kwh=np.zeros((0,), dtype=np.float32),
     )
     if not full_horizon.feasible:
-        return _SingleAgentMPCSolveResult(
+        return _LocalMPCSolveResult(
             power_kw=0.0,
             objective_eur=float(full_horizon.objective_eur),
             solve_time_sec=float(full_horizon.solve_time_sec),
@@ -909,7 +909,7 @@ def _solve_single_agent_gurobi_mpc(
             solution=zero_solution,
         )
     charge_mode = (full_horizon.charge_kw >= np.maximum(full_horizon.discharge_kw, 1e-6)).astype(np.float32)
-    solution = _SingleAgentMPCPrimalSolution(
+    solution = _LocalMPCPrimalSolution(
         charge_kw=full_horizon.charge_kw.copy(),
         discharge_kw=full_horizon.discharge_kw.copy(),
         pv_curtail_kw=full_horizon.pv_curtail_kw.copy(),
@@ -923,7 +923,7 @@ def _solve_single_agent_gurobi_mpc(
     power_kw = float(full_horizon.signed_battery_kw[0]) if full_horizon.signed_battery_kw.size else 0.0
     if abs(power_kw) < 1e-8:
         power_kw = 0.0
-    return _SingleAgentMPCSolveResult(
+    return _LocalMPCSolveResult(
         power_kw=power_kw,
         objective_eur=float(full_horizon.objective_eur),
         solve_time_sec=float(full_horizon.solve_time_sec),
@@ -933,7 +933,7 @@ def _solve_single_agent_gurobi_mpc(
     )
 
 
-def solve_single_agent_gurobi_mpc_action(
+def solve_local_gurobi_mpc_action(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -952,7 +952,7 @@ def solve_single_agent_gurobi_mpc_action(
     Positive power means charging, negative power means discharging.
     """
 
-    result = _solve_single_agent_gurobi_mpc(
+    result = _solve_local_gurobi_mpc(
         price_seq=price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
@@ -968,7 +968,7 @@ def solve_single_agent_gurobi_mpc_action(
     return float(result.power_kw)
 
 
-def solve_single_agent_gurobi_mpc_full_horizon(
+def solve_local_gurobi_mpc_full_horizon(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -982,8 +982,8 @@ def solve_single_agent_gurobi_mpc_full_horizon(
     soc_max: float,
     export_subsidy_eur_per_kwh: float,
     pv_curtail_upper_kw: np.ndarray | None = None,
-) -> SingleAgentMPCFullHorizonResult:
-    return _solve_single_agent_gurobi_mpc_full_horizon(
+) -> LocalMPCFullHorizonResult:
+    return _solve_local_gurobi_mpc_full_horizon(
         price_seq=price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
@@ -999,7 +999,7 @@ def solve_single_agent_gurobi_mpc_full_horizon(
     )
 
 
-def solve_single_agent_gurobi_mpc_full_horizon_with_netload_floor(
+def solve_local_gurobi_mpc_full_horizon_with_netload_floor(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -1014,8 +1014,8 @@ def solve_single_agent_gurobi_mpc_full_horizon_with_netload_floor(
     export_subsidy_eur_per_kwh: float,
     net_load_floor_kw: np.ndarray,
     pv_curtail_upper_kw: np.ndarray | None = None,
-) -> SingleAgentMPCFullHorizonResult:
-    return _solve_single_agent_gurobi_mpc_full_horizon(
+) -> LocalMPCFullHorizonResult:
+    return _solve_local_gurobi_mpc_full_horizon(
         price_seq=price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,

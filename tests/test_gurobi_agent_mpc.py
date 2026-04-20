@@ -40,14 +40,14 @@ def _base_solver_kwargs() -> dict[str, float]:
     }
 
 
-def test_single_agent_gurobi_solver_raises_clear_error_when_dependency_missing(monkeypatch):
+def test_local_gurobi_solver_raises_clear_error_when_dependency_missing(monkeypatch):
     def _raise_missing():
         raise ModuleNotFoundError("No module named 'gurobipy'")
 
     monkeypatch.setattr(gurobi_agent_mpc, "_load_gurobi", _raise_missing)
 
     with pytest.raises(RuntimeError, match="MPC rollout requires a working Gurobi installation/license"):
-        gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+        gurobi_agent_mpc.solve_local_gurobi_mpc_action(
             price_seq=np.array([0.2], dtype=np.float32),
             load_seq=np.array([1.0], dtype=np.float32),
             pv_seq=np.array([0.0], dtype=np.float32),
@@ -56,7 +56,7 @@ def test_single_agent_gurobi_solver_raises_clear_error_when_dependency_missing(m
 
 
 @pytest.mark.skipif(not HAS_GUROBI, reason="gurobipy is required for the model creation failure test")
-def test_single_agent_gurobi_solver_raises_clear_error_when_model_creation_fails(monkeypatch):
+def test_local_gurobi_solver_raises_clear_error_when_model_creation_fails(monkeypatch):
     gp, _ = gurobi_agent_mpc._load_gurobi()
 
     def _raise_model(_gp):
@@ -65,7 +65,7 @@ def test_single_agent_gurobi_solver_raises_clear_error_when_model_creation_fails
     monkeypatch.setattr(gurobi_agent_mpc, "_create_model", _raise_model)
 
     with pytest.raises(RuntimeError, match="working Gurobi installation/license"):
-        gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+        gurobi_agent_mpc.solve_local_gurobi_mpc_action(
             price_seq=np.array([0.2], dtype=np.float32),
             load_seq=np.array([1.0], dtype=np.float32),
             pv_seq=np.array([0.0], dtype=np.float32),
@@ -77,8 +77,8 @@ def test_single_agent_gurobi_solver_raises_clear_error_when_model_creation_fails
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_prefers_discharge_for_positive_prices():
-    power = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_prefers_discharge_for_positive_prices():
+    power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.3, 0.3], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -93,8 +93,8 @@ def test_single_agent_gurobi_solver_prefers_discharge_for_positive_prices():
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_prefers_charge_for_negative_prices():
-    power = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_prefers_charge_for_negative_prices():
+    power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([-0.2, -0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -109,14 +109,14 @@ def test_single_agent_gurobi_solver_prefers_charge_for_negative_prices():
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_respects_soc_bounds():
-    power_at_max_soc = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_respects_soc_bounds():
+    power_at_max_soc = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([-0.2, -0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.9},
     )
-    power_at_min_soc = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+    power_at_min_soc = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.2, 0.2], dtype=np.float32),
         load_seq=np.array([1.0, 1.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -143,7 +143,7 @@ def test_requires_grid_direction_binary_only_when_price_below_subsidy():
 
 
 def test_shift_primal_solution_start_shifts_controls_and_reuses_penultimate_terminal_energy():
-    previous = gurobi_agent_mpc._SingleAgentMPCPrimalSolution(
+    previous = gurobi_agent_mpc._LocalMPCPrimalSolution(
         charge_kw=np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
         discharge_kw=np.asarray([4.0, 5.0, 6.0], dtype=np.float32),
         pv_curtail_kw=np.asarray([0.4, 0.5, 0.6], dtype=np.float32),
@@ -171,8 +171,8 @@ def test_shift_primal_solution_start_shifts_controls_and_reuses_penultimate_term
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
-    power = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
+    power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
@@ -187,7 +187,7 @@ def test_single_agent_gurobi_solver_exports_when_subsidy_makes_last_step_valuabl
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
 def test_guarded_fallback_prevents_simultaneous_import_and_export():
-    result = gurobi_agent_mpc._solve_single_agent_gurobi_mpc(
+    result = gurobi_agent_mpc._solve_local_gurobi_mpc(
         price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
@@ -205,8 +205,8 @@ def test_guarded_fallback_prevents_simultaneous_import_and_export():
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_does_not_export_without_subsidy_or_load():
-    power = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_does_not_export_without_subsidy_or_load():
+    power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
@@ -220,8 +220,8 @@ def test_single_agent_gurobi_solver_does_not_export_without_subsidy_or_load():
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_single_agent_gurobi_solver_handles_price_below_subsidy_guard_path():
-    power = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+def test_local_gurobi_solver_handles_price_below_subsidy_guard_path():
+    power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.05, 0.05], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -237,7 +237,7 @@ def test_single_agent_gurobi_solver_handles_price_below_subsidy_guard_path():
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
 def test_fast_path_export_variable_matches_negative_grid_flow():
-    result = gurobi_agent_mpc._solve_single_agent_gurobi_mpc(
+    result = gurobi_agent_mpc._solve_local_gurobi_mpc(
         price_seq=np.array([0.20], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
@@ -254,7 +254,7 @@ def test_fast_path_export_variable_matches_negative_grid_flow():
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
 def test_fast_path_export_variable_is_zero_for_import_case():
-    result = gurobi_agent_mpc._solve_single_agent_gurobi_mpc(
+    result = gurobi_agent_mpc._solve_local_gurobi_mpc(
         price_seq=np.array([0.20], dtype=np.float32),
         load_seq=np.array([1.0], dtype=np.float32),
         pv_seq=np.array([0.0], dtype=np.float32),
@@ -270,13 +270,13 @@ def test_fast_path_export_variable_is_zero_for_import_case():
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
 def test_fast_path_and_guarded_fallback_match_economic_objective_in_overlap_domain():
-    fast_result = gurobi_agent_mpc._solve_single_agent_gurobi_mpc(
+    fast_result = gurobi_agent_mpc._solve_local_gurobi_mpc(
         price_seq=np.array([0.20, 0.25], dtype=np.float32),
         load_seq=np.array([0.3, 0.4], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.7, "force_guarded_fallback": False},
     )
-    fallback_result = gurobi_agent_mpc._solve_single_agent_gurobi_mpc(
+    fallback_result = gurobi_agent_mpc._solve_local_gurobi_mpc(
         price_seq=np.array([0.20, 0.25], dtype=np.float32),
         load_seq=np.array([0.3, 0.4], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -291,13 +291,13 @@ def test_fast_path_and_guarded_fallback_match_economic_objective_in_overlap_doma
     reason="a working Gurobi license is required for the full-horizon MPC tests",
 )
 def test_full_horizon_solver_matches_first_step_action():
-    full_horizon = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_full_horizon(
+    full_horizon = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon(
         price_seq=np.array([0.25, 0.25], dtype=np.float32),
         load_seq=np.array([0.6, 0.6], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
         **{**_base_solver_kwargs(), "soc": 0.8},
     )
-    first_step = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_action(
+    first_step = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         price_seq=np.array([0.25, 0.25], dtype=np.float32),
         load_seq=np.array([0.6, 0.6], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -317,7 +317,7 @@ def test_full_horizon_solver_matches_first_step_action():
     reason="a working Gurobi license is required for the constrained full-horizon MPC tests",
 )
 def test_full_horizon_solver_respects_net_load_floor():
-    result = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_full_horizon_with_netload_floor(
+    result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
         price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -334,7 +334,7 @@ def test_full_horizon_solver_respects_net_load_floor():
     reason="a working Gurobi license is required for the constrained infeasibility tests",
 )
 def test_full_horizon_solver_marks_infeasible_when_floor_is_unreachable():
-    result = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_full_horizon_with_netload_floor(
+    result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
         price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([0.0, 0.0], dtype=np.float32),
@@ -350,7 +350,7 @@ def test_full_horizon_solver_marks_infeasible_when_floor_is_unreachable():
     reason="a working Gurobi license is required for the curtailment-enabled MPC tests",
 )
 def test_full_horizon_solver_forces_zero_curtailment_when_upper_bound_is_zero():
-    result = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_full_horizon(
+    result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon(
         price_seq=np.array([0.1, 0.1], dtype=np.float32),
         load_seq=np.array([0.0, 0.0], dtype=np.float32),
         pv_seq=np.array([1.0, 1.0], dtype=np.float32),
@@ -369,7 +369,7 @@ def test_full_horizon_solver_forces_zero_curtailment_when_upper_bound_is_zero():
     reason="a working Gurobi license is required for the curtailment-enabled MPC tests",
 )
 def test_full_horizon_solver_can_use_curtailment_to_satisfy_net_load_floor():
-    result = gurobi_agent_mpc.solve_single_agent_gurobi_mpc_full_horizon_with_netload_floor(
+    result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon_with_netload_floor(
         price_seq=np.array([0.1], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
         pv_seq=np.array([1.0], dtype=np.float32),

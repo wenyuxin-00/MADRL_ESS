@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -11,15 +13,21 @@ import pandas as pd
 
 from controllers.action_feasibility import build_safety_local_numpy, compute_action_gap_metrics_numpy
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils.admm_direct_notebook_helpers import (
-    _create_model,
-    _load_gurobi,
-    _wrap_gurobi_error,
-)
 from scripts.utils.grid_surrogate_notebook_helpers import (
     _battery_to_netload_sensitivity,
     _get_grid_projector,
     _projector_to_numpy,
+)
+from scripts.utils.rollout_package_utils import (
+    ROLLOUT_PACKAGE_VERSION as SHARED_ROLLOUT_PACKAGE_VERSION,
+    assert_rollout_cfg_snapshot_matches,
+    assert_solver_fingerprint_matches,
+    build_rollout_cfg_snapshot_from_cfg,
+    json_default,
+    load_dataframe_npz,
+    relabel_rollout_dataframe,
+    save_dataframe_npz,
+    table_required_files,
 )
 
 
@@ -27,8 +35,115 @@ _THROUGHPUT_TIEBREAKER_EUR_PER_KWH = 1e-8
 _NPOS_TIEBREAKER_EUR_PER_KWH = 1e-9
 _ADMM_RESIDUAL_BALANCING_MU = 10.0
 _ADMM_RESIDUAL_BALANCING_TAU = 2.0
+_ROLLOUT_PACKAGE_VERSION = SHARED_ROLLOUT_PACKAGE_VERSION
 ADMM_MPC_LSTM_LABEL = "ADMM MPC + LSTM Forecast"
 ADMM_MPC_PERFECT_LABEL = "ADMM MPC + Perfect Forecast"
+
+_json_default = json_default
+_build_cfg_snapshot_from_cfg = build_rollout_cfg_snapshot_from_cfg
+_table_required_files = table_required_files
+_save_dataframe_npz = save_dataframe_npz
+_load_dataframe_npz = load_dataframe_npz
+_relabel_rollout_dataframe = relabel_rollout_dataframe
+
+
+def _load_gurobi():
+    import gurobipy as gp
+
+    return gp, gp.GRB
+
+
+def _create_model(gp: Any, name: str):
+    model = gp.Model(name)
+    model.Params.OutputFlag = 0
+    return model
+
+
+def _wrap_gurobi_error(detail: str, exc: Exception) -> RuntimeError:
+    error = RuntimeError(f"Direct day optimization requires a working Gurobi installation/license: {detail}: {exc}")
+    error.__cause__ = exc
+    return error
+
+
+def _assert_cfg_snapshot_matches(expected_snapshot: dict[str, Any], actual_snapshot: dict[str, Any]) -> None:
+    assert_rollout_cfg_snapshot_matches(
+        expected_snapshot,
+        actual_snapshot,
+        mismatch_prefix="ADMM MPC rollout package",
+    )
+
+
+def _assert_admm_solver_fingerprint_matches(
+    expected_fingerprint: dict[str, Any],
+    actual_fingerprint: dict[str, Any],
+) -> None:
+    assert_solver_fingerprint_matches(
+        expected_fingerprint,
+        actual_fingerprint,
+        name="admm_solver_fingerprint",
+    )
+
+
+def _build_admm_solver_fingerprint(
+    *,
+    rho_init: float | None,
+    rho_min: float,
+    rho_max: float,
+    rho_adaptation: str | None,
+    max_iters: int,
+    max_iters_first_step: int,
+    primal_tol: float,
+    dual_tol: float,
+    terminal_cost_multiplier: float,
+) -> dict[str, Any]:
+    return {
+        "rho_init": None if rho_init is None else float(rho_init),
+        "rho_min": float(rho_min),
+        "rho_max": float(rho_max),
+        "rho_adaptation": None if rho_adaptation is None else str(rho_adaptation),
+        "max_iters": int(max_iters),
+        "max_iters_first_step": int(max_iters_first_step),
+        "primal_tol": float(primal_tol),
+        "dual_tol": float(dual_tol),
+        "terminal_cost_multiplier": float(terminal_cost_multiplier),
+        "residual_balance_ratio": float(_ADMM_RESIDUAL_BALANCING_MU),
+        "residual_balance_tau": float(_ADMM_RESIDUAL_BALANCING_TAU),
+    }
+
+
+def _expected_rollout_contract(
+    cfg: Any,
+    *,
+    prediction_mode: str | None = None,
+    rho_init: float | None,
+    rho_min: float,
+    rho_max: float,
+    rho_adaptation: str | None,
+    max_iters: int,
+    max_iters_first_step: int,
+    primal_tol: float,
+    dual_tol: float,
+    terminal_cost_multiplier: float,
+) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    resolved_prediction_mode = (
+        grid_nb.normalize_prediction_mode(prediction_mode)
+        if prediction_mode is not None
+        else grid_nb.resolve_prediction_mode_from_forecast_backend(str(getattr(cfg.forecast, "type", "perfect")))
+    )
+    comparison_cfg = grid_nb.build_comparison_cfg(cfg, prediction_mode=resolved_prediction_mode)
+    cfg_snapshot = build_rollout_cfg_snapshot_from_cfg(comparison_cfg, prediction_mode=resolved_prediction_mode)
+    solver_fingerprint = _build_admm_solver_fingerprint(
+        rho_init=rho_init,
+        rho_min=rho_min,
+        rho_max=rho_max,
+        rho_adaptation=rho_adaptation,
+        max_iters=max_iters,
+        max_iters_first_step=max_iters_first_step,
+        primal_tol=primal_tol,
+        dual_tol=dual_tol,
+        terminal_cost_multiplier=terminal_cost_multiplier,
+    )
+    return comparison_cfg, cfg_snapshot, solver_fingerprint
 
 
 @dataclass(frozen=True)
@@ -1050,10 +1165,11 @@ class _AdmmMpcController:
         self.last_action_info: dict[str, np.ndarray] | None = None
         self.diagnostic_rows: list[dict[str, object]] = []
         self.apply_action_penalty = False
+        self._show_progress = bool(show_progress)
         self._episode_idx = -1
         self._global_step = 0
         self._progress_bar = None
-        if bool(show_progress):
+        if self._show_progress:
             try:
                 from tqdm.auto import tqdm
 
@@ -1062,8 +1178,8 @@ class _AdmmMpcController:
                     desc="ADMM MPC rollout",
                     unit="step",
                     # tqdm.auto already chooses a notebook-friendly renderer when available.
-                    disable=not bool(show_progress),
-                    leave=False,
+                    disable=not self._show_progress,
+                    leave=True,
                 )
             except Exception:
                 self._progress_bar = None
@@ -1072,6 +1188,9 @@ class _AdmmMpcController:
         self.warm_start_cache = None
         self.last_action_info = None
         self._episode_idx += 1
+        if self._progress_bar is None and self._show_progress:
+            total_episodes = int(getattr(self.env, "num_available_episodes", 1))
+            print(f"ADMM MPC rollout: starting episode/day {self._episode_idx + 1}/{total_episodes}")
 
     def close(self) -> None:
         if self._progress_bar is not None:
@@ -1086,6 +1205,9 @@ class _AdmmMpcController:
                 if callable(dispose):
                     dispose()
             self.warm_start_cache.local_solvers = None
+        if self._progress_bar is None and self._show_progress:
+            total_steps = int(getattr(self.env, "num_available_episodes", 1)) * int(getattr(self.env, "episode_length", 0))
+            print(f"ADMM MPC rollout complete: processed {self._global_step}/{total_steps} steps.")
 
     def _record_step_diagnostics(self, step_result: AdmmMpcStepResult) -> None:
         self.diagnostic_rows.append(
@@ -1150,7 +1272,29 @@ class _AdmmMpcController:
         self.last_action_info = action_info
         actions = [step_result.executed_action_array[agent_idx].copy() for agent_idx in range(self.env.n)]
         if self._progress_bar is not None:
+            try:
+                self._progress_bar.set_postfix(
+                    {
+                        "episode/day": f"{self._episode_idx + 1}/{int(getattr(self.env, 'num_available_episodes', 1))}",
+                        "step": int(getattr(self.env, "cur_step", 0)) + 1,
+                        "iters": int(step_result.iterations),
+                        "converged": bool(step_result.converged),
+                    },
+                    refresh=False,
+                )
+            except Exception:
+                pass
             self._progress_bar.update(1)
+        elif self._show_progress:
+            episode_length = max(int(getattr(self.env, "episode_length", 1)), 1)
+            current_step_in_episode = int(getattr(self.env, "cur_step", 0)) + 1
+            if current_step_in_episode >= episode_length:
+                print(
+                    "ADMM MPC rollout progress: "
+                    f"episode/day {self._episode_idx + 1}/{int(getattr(self.env, 'num_available_episodes', 1))}, "
+                    f"step {self._global_step + 1}, iters={int(step_result.iterations)}, "
+                    f"converged={bool(step_result.converged)}"
+                )
         self._global_step += 1
         return actions
 
@@ -1213,6 +1357,359 @@ def _augment_rollout_with_diagnostics(
         summary=rollout.summary.copy(),
         meta=meta,
     )
+
+
+def build_admm_mpc_rollout_package(
+    rollout: grid_nb.RolloutResult,
+    *,
+    controller_label: str,
+    cfg: Any | None = None,
+    cfg_snapshot: dict[str, Any] | None = None,
+    prediction_mode: str | None = None,
+    rho_init: float | None,
+    rho_min: float,
+    rho_max: float,
+    rho_adaptation: str | None,
+    max_iters: int,
+    max_iters_first_step: int,
+    primal_tol: float,
+    dual_tol: float,
+    terminal_cost_multiplier: float,
+    extra_meta: dict[str, Any] | None = None,
+    diagnostic_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble a disk-friendly ADMM rollout package from compare-ready tables."""
+
+    if cfg_snapshot is None:
+        if cfg is None:
+            raise ValueError("Provide either cfg or cfg_snapshot when building an ADMM MPC rollout package.")
+        _, cfg_snapshot, _ = _expected_rollout_contract(
+            cfg,
+            prediction_mode=prediction_mode,
+            rho_init=rho_init,
+            rho_min=rho_min,
+            rho_max=rho_max,
+            rho_adaptation=rho_adaptation,
+            max_iters=max_iters,
+            max_iters_first_step=max_iters_first_step,
+            primal_tol=primal_tol,
+            dual_tol=dual_tol,
+            terminal_cost_multiplier=terminal_cost_multiplier,
+        )
+    resolved_prediction_mode = str(
+        grid_nb.normalize_prediction_mode(
+            prediction_mode
+            if prediction_mode is not None
+            else cfg_snapshot.get("prediction_mode", rollout.meta.get("prediction_mode", "normal"))
+        )
+    )
+    forecast_backend = str(
+        cfg_snapshot.get("forecast_backend", rollout.meta.get("forecast_backend", "perfect"))
+    )
+    manifest = {
+        "rollout_package_version": int(_ROLLOUT_PACKAGE_VERSION),
+        "controller_label": str(controller_label),
+        "saved_at_utc": pd.Timestamp.utcnow().isoformat(),
+        "prediction_mode": resolved_prediction_mode,
+        "forecast_backend": forecast_backend,
+        "cfg_snapshot": dict(cfg_snapshot),
+        "admm_solver_fingerprint": _build_admm_solver_fingerprint(
+            rho_init=rho_init,
+            rho_min=rho_min,
+            rho_max=rho_max,
+            rho_adaptation=rho_adaptation,
+            max_iters=max_iters,
+            max_iters_first_step=max_iters_first_step,
+            primal_tol=primal_tol,
+            dual_tol=dual_tol,
+            terminal_cost_multiplier=terminal_cost_multiplier,
+        ),
+        "extra_meta": dict(extra_meta or {}),
+    }
+    return {
+        "manifest": manifest,
+        "diagnostics": dict(diagnostic_summary or {}),
+        "step_df": rollout.step_df.copy(),
+        "agent_df": rollout.agent_df.copy(),
+        "grid_df": rollout.grid_df.copy(),
+        "summary_df": rollout.summary.copy(),
+    }
+
+
+def save_admm_mpc_rollout_package(package: dict[str, Any], target_dir: str | Path) -> Path:
+    """Persist an ADMM rollout package to a deterministic directory layout."""
+
+    target_path = Path(target_dir).resolve()
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    manifest = dict(package["manifest"])
+    diagnostics = dict(package.get("diagnostics", {}))
+    step_meta = _save_dataframe_npz(pd.DataFrame(package["step_df"]).copy(), target_path / "step_df.npz")
+    agent_meta = _save_dataframe_npz(pd.DataFrame(package["agent_df"]).copy(), target_path / "agent_df.npz")
+    grid_meta = _save_dataframe_npz(pd.DataFrame(package["grid_df"]).copy(), target_path / "grid_df.npz")
+    summary_meta = _save_dataframe_npz(pd.DataFrame(package["summary_df"]).copy(), target_path / "summary_df.npz")
+    manifest["tables"] = {
+        "step_df": step_meta,
+        "agent_df": agent_meta,
+        "grid_df": grid_meta,
+        "summary_df": summary_meta,
+    }
+
+    (target_path / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, default=json_default),
+        encoding="utf-8",
+    )
+    (target_path / "diagnostics.json").write_text(
+        json.dumps(diagnostics, indent=2, default=json_default),
+        encoding="utf-8",
+    )
+    return target_path
+
+
+def load_admm_mpc_rollout_package(target_dir: str | Path) -> dict[str, Any]:
+    """Load a saved ADMM rollout package without applying cfg compatibility checks."""
+
+    target_path = Path(target_dir).resolve()
+    manifest_path = target_path / "manifest.json"
+    diagnostics_path = target_path / "diagnostics.json"
+    step_path = target_path / "step_df.npz"
+    agent_path = target_path / "agent_df.npz"
+    grid_path = target_path / "grid_df.npz"
+    summary_path = target_path / "summary_df.npz"
+
+    missing_files = [
+        path.name
+        for path in (manifest_path, diagnostics_path, step_path, agent_path, grid_path, summary_path)
+        if not path.exists()
+    ]
+    if missing_files:
+        raise FileNotFoundError(
+            f"ADMM MPC rollout package is incomplete at {target_path}: missing {', '.join(missing_files)}."
+        )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if int(manifest.get("rollout_package_version", -1)) != int(_ROLLOUT_PACKAGE_VERSION):
+        raise ValueError(
+            "Unsupported ADMM MPC rollout package version at "
+            f"{target_path}: expected={_ROLLOUT_PACKAGE_VERSION}, actual={manifest.get('rollout_package_version')!r}. "
+            "Re-run notebooks/madrl/ADMM_mpc.ipynb to regenerate it."
+        )
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    tables = dict(manifest.get("tables", {}))
+    required_table_names = {"step_df", "agent_df", "grid_df", "summary_df"}
+    missing_tables = sorted(required_table_names.difference(tables))
+    if missing_tables:
+        raise ValueError(
+            f"ADMM MPC rollout package manifest at {target_path} is missing table metadata for {', '.join(missing_tables)}."
+        )
+
+    return {
+        "manifest": manifest,
+        "diagnostics": diagnostics,
+        "step_df": _load_dataframe_npz(step_path, metadata=tables["step_df"]),
+        "agent_df": _load_dataframe_npz(agent_path, metadata=tables["agent_df"]),
+        "grid_df": _load_dataframe_npz(grid_path, metadata=tables["grid_df"]),
+        "summary_df": _load_dataframe_npz(summary_path, metadata=tables["summary_df"]),
+    }
+
+
+def resolve_latest_compatible_admm_mpc_rollout_package_dir(
+    target_dir: str | Path,
+    *,
+    cfg: Any | None = None,
+    prediction_mode: str | None = None,
+    rho_init: float | None = None,
+    rho_min: float = 1e-3,
+    rho_max: float = 1e3,
+    rho_adaptation: str | None = "residual_balancing",
+    max_iters: int = 100,
+    max_iters_first_step: int = 300,
+    primal_tol: float = 1e-3,
+    dual_tol: float = 1e-3,
+    terminal_cost_multiplier: float = 1.0,
+) -> Path:
+    """Resolve the newest compatible cached ADMM rollout directory sharing the requested prefix."""
+
+    target_path = Path(target_dir).expanduser().resolve()
+    parent_dir = target_path.parent
+    prefix = target_path.name
+    required_names = _table_required_files()
+
+    expected_cfg_snapshot = None
+    expected_solver_fingerprint = None
+    if cfg is not None:
+        _, expected_cfg_snapshot, expected_solver_fingerprint = _expected_rollout_contract(
+            cfg,
+            prediction_mode=prediction_mode,
+            rho_init=rho_init,
+            rho_min=rho_min,
+            rho_max=rho_max,
+            rho_adaptation=rho_adaptation,
+            max_iters=max_iters,
+            max_iters_first_step=max_iters_first_step,
+            primal_tol=primal_tol,
+            dual_tol=dual_tol,
+            terminal_cost_multiplier=terminal_cost_multiplier,
+        )
+
+    if not parent_dir.exists():
+        raise FileNotFoundError(
+            "Cannot resolve cached ADMM MPC rollout prefix "
+            f"'{prefix}' because the scan root does not exist: {parent_dir}. "
+            "Please run notebooks/madrl/ADMM_mpc.ipynb first or set ADMM_ROLLOUT_INPUT_DIR."
+        )
+
+    compatible_candidates: list[dict[str, Any]] = []
+    discovered_candidates: list[str] = []
+    for candidate_dir in parent_dir.iterdir():
+        if not candidate_dir.is_dir():
+            continue
+        if candidate_dir.name != prefix and not candidate_dir.name.startswith(f"{prefix}_"):
+            continue
+
+        missing_required = [name for name in required_names if not (candidate_dir / name).exists()]
+        if missing_required:
+            discovered_candidates.append(
+                f"{candidate_dir.name} (missing={','.join(missing_required)})"
+            )
+            continue
+        manifest_path = candidate_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            discovered_candidates.append(f"{candidate_dir.name} (invalid manifest)")
+            continue
+
+        version = int(manifest.get("rollout_package_version", -1))
+        if version != int(_ROLLOUT_PACKAGE_VERSION):
+            discovered_candidates.append(
+                f"{candidate_dir.name} (version={version}, expected={_ROLLOUT_PACKAGE_VERSION})"
+            )
+            continue
+        try:
+            if expected_cfg_snapshot is not None:
+                _assert_cfg_snapshot_matches(expected_cfg_snapshot, manifest["cfg_snapshot"])
+            if expected_solver_fingerprint is not None:
+                _assert_admm_solver_fingerprint_matches(
+                    expected_solver_fingerprint,
+                    manifest["admm_solver_fingerprint"],
+                )
+        except Exception as exc:
+            discovered_candidates.append(f"{candidate_dir.name} ({exc})")
+            continue
+
+        saved_at_raw = manifest.get("saved_at_utc")
+        try:
+            saved_at = pd.Timestamp(saved_at_raw)
+            if saved_at.tzinfo is None:
+                saved_at = saved_at.tz_localize("UTC")
+            else:
+                saved_at = saved_at.tz_convert("UTC")
+            saved_at_key = int(saved_at.value)
+        except Exception:
+            saved_at_key = -1
+        compatible_candidates.append(
+            {
+                "path": candidate_dir,
+                "saved_at_key": saved_at_key,
+                "mtime_ns": int(candidate_dir.stat().st_mtime_ns),
+            }
+        )
+
+    if compatible_candidates:
+        compatible_candidates.sort(
+            key=lambda item: (int(item["saved_at_key"]), int(item["mtime_ns"]), str(item["path"].name)),
+            reverse=True,
+        )
+        return Path(compatible_candidates[0]["path"])
+
+    discovered_text = ", ".join(discovered_candidates) if discovered_candidates else "none"
+    raise FileNotFoundError(
+        "No compatible cached ADMM MPC rollout package was found. "
+        f"Expected prefix='{prefix}', scan_root='{parent_dir}', discovered_candidates={discovered_text}. "
+        "Please run notebooks/madrl/ADMM_mpc.ipynb to generate a compatible cache, "
+        "or set ADMM_ROLLOUT_INPUT_DIR to a compatible package directory."
+    )
+
+
+def replay_admm_mpc_rollout_package(
+    cfg: Any,
+    target_dir: str | Path,
+    *,
+    label: str | None = None,
+    prediction_mode: str | None = None,
+    rho_init: float | None = None,
+    rho_min: float = 1e-3,
+    rho_max: float = 1e3,
+    rho_adaptation: str | None = "residual_balancing",
+    max_iters: int = 100,
+    max_iters_first_step: int = 300,
+    primal_tol: float = 1e-3,
+    dual_tol: float = 1e-3,
+    terminal_cost_multiplier: float = 1.0,
+) -> dict[str, Any]:
+    """Load a cached ADMM rollout package and reconstruct a compare-ready rollout result."""
+
+    package = load_admm_mpc_rollout_package(target_dir)
+    comparison_cfg, current_cfg_snapshot, current_solver_fingerprint = _expected_rollout_contract(
+        cfg,
+        prediction_mode=prediction_mode or package["manifest"].get("prediction_mode"),
+        rho_init=rho_init,
+        rho_min=rho_min,
+        rho_max=rho_max,
+        rho_adaptation=rho_adaptation,
+        max_iters=max_iters,
+        max_iters_first_step=max_iters_first_step,
+        primal_tol=primal_tol,
+        dual_tol=dual_tol,
+        terminal_cost_multiplier=terminal_cost_multiplier,
+    )
+    _assert_cfg_snapshot_matches(current_cfg_snapshot, package["manifest"]["cfg_snapshot"])
+    _assert_admm_solver_fingerprint_matches(
+        current_solver_fingerprint,
+        package["manifest"]["admm_solver_fingerprint"],
+    )
+
+    controller_label = str(label or package["manifest"]["controller_label"])
+    step_df = _relabel_rollout_dataframe(package["step_df"], controller_label)
+    agent_df = _relabel_rollout_dataframe(package["agent_df"], controller_label)
+    grid_df = _relabel_rollout_dataframe(package["grid_df"], controller_label)
+    summary_df = _relabel_rollout_dataframe(package["summary_df"], controller_label)
+    meta = dict(package["manifest"].get("extra_meta", {}).get("rollout_meta", {}))
+    meta.update(
+        {
+            "controller": controller_label,
+            "prediction_mode": str(current_cfg_snapshot["prediction_mode"]),
+            "forecast_backend": str(current_cfg_snapshot["forecast_backend"]),
+            "future_horizon": int(current_cfg_snapshot["future_horizon"]),
+            "agent_profiles": list(current_cfg_snapshot["agent_profiles"]),
+            "agent_bus_ids": list(current_cfg_snapshot["agent_bus_ids"]),
+            "v_min_pu": float(current_cfg_snapshot["v_min_pu"]),
+            "v_max_pu": float(current_cfg_snapshot["v_max_pu"]),
+            "import_price_adder_eur_per_kwh": float(current_cfg_snapshot["import_price_adder_eur_per_kwh"]),
+            "export_subsidy_eur_per_kwh": float(current_cfg_snapshot["export_subsidy_eur_per_kwh"]),
+            "loaded_from_cached_rollout": True,
+            "rollout_package_dir": str(Path(target_dir).resolve()),
+            "rollout_package_version": int(package["manifest"]["rollout_package_version"]),
+            "cached_rollout_diagnostics": dict(package["diagnostics"]),
+            "cached_admm_solver_fingerprint": dict(package["manifest"]["admm_solver_fingerprint"]),
+            "cached_rollout_prediction_mode": str(package["manifest"]["prediction_mode"]),
+            "cached_rollout_forecast_backend": str(package["manifest"]["forecast_backend"]),
+            "comparison_forecast_backend": str(comparison_cfg.forecast.type),
+        }
+    )
+    rollout = grid_nb.RolloutResult(
+        step_df=step_df,
+        agent_df=agent_df,
+        grid_df=grid_df,
+        summary=summary_df,
+        meta=meta,
+    )
+    return {
+        "manifest": package["manifest"],
+        "diagnostics": package["diagnostics"],
+        "rollout": rollout,
+    }
 
 
 def collect_admm_mpc_rollout(
@@ -1294,10 +1791,15 @@ __all__ = [
     "AdmmMpcWarmStartCache",
     "AdmmMpcWindowData",
     "AdmmMpcWindowResult",
+    "build_admm_mpc_rollout_package",
     "build_admm_mpc_surrogate_cache",
     "build_admm_mpc_window_data",
     "collect_admm_mpc_rollout",
+    "load_admm_mpc_rollout_package",
+    "replay_admm_mpc_rollout_package",
     "resolve_default_terminal_cost_weight",
+    "resolve_latest_compatible_admm_mpc_rollout_package_dir",
     "run_admm_mpc_step",
+    "save_admm_mpc_rollout_package",
     "solve_admm_mpc_window",
 ]

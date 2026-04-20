@@ -12,6 +12,7 @@ from typing import Mapping
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from controllers.action_feasibility import (
@@ -19,8 +20,8 @@ from controllers.action_feasibility import (
     compute_action_gap_metrics_numpy,
     merge_action_info_into_step_info,
 )
-from controllers.mpc import gurobi_agent_mpc as single_agent_mpc_module
-from controllers.mpc import solve_single_agent_gurobi_mpc_action
+from controllers.mpc import gurobi_agent_mpc as local_mpc_module
+from controllers.mpc import solve_local_gurobi_mpc_action
 from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
 from predictors.training import ensure_lstm_artifacts
@@ -30,6 +31,13 @@ PERFECT_PREDICTION_MODE = "perfect"
 NORMAL_PREDICTION_MODE = "normal"
 ORACLE_EVAL_MODE = "oracle_eval"
 FORECAST_EVAL_MODE = "forecast_eval"
+
+COMPARE_PLOT_TITLE_FONTSIZE = 20
+COMPARE_PLOT_LABEL_FONTSIZE = 18
+COMPARE_PLOT_TICK_FONTSIZE = 16
+COMPARE_PLOT_LEGEND_FONTSIZE = 16
+COMPARE_PLOT_AGENT_PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
+COMPARE_PLOT_MUTED_COLOR = "#cbd5e1"
 
 
 def normalize_prediction_mode(prediction_mode: str) -> str:
@@ -583,7 +591,7 @@ def _power_to_full_action(power_kw: float, power_limit_kw: float, *, pv_action: 
     return np.asarray([battery_action, float(pv_action)], dtype=np.float32)
 
 
-def _solve_single_agent_mpc_action(
+def _solve_local_mpc_action(
     *,
     price_seq: np.ndarray,
     load_seq: np.ndarray,
@@ -597,7 +605,7 @@ def _solve_single_agent_mpc_action(
     soc_max: float,
     export_subsidy_eur_per_kwh: float,
 ) -> float:
-    return solve_single_agent_gurobi_mpc_action(
+    return solve_local_gurobi_mpc_action(
         price_seq=price_seq,
         load_seq=load_seq,
         pv_seq=pv_seq,
@@ -612,15 +620,15 @@ def _solve_single_agent_mpc_action(
     )
 
 
-def _ensure_single_agent_mpc_cache_state(env) -> tuple[dict[tuple[object, ...], object], dict[str, float]]:
-    cache = getattr(env, "_single_agent_mpc_solver_cache", None)
+def _ensure_local_mpc_cache_state(env) -> tuple[dict[tuple[object, ...], object], dict[str, float]]:
+    cache = getattr(env, "_local_mpc_solver_cache", None)
     if not isinstance(cache, dict):
         cache = {}
-        setattr(env, "_single_agent_mpc_solver_cache", cache)
-    stats = getattr(env, "_single_agent_mpc_stats", None)
+        setattr(env, "_local_mpc_solver_cache", cache)
+    stats = getattr(env, "_local_mpc_stats", None)
     if not isinstance(stats, dict):
         stats = {}
-        setattr(env, "_single_agent_mpc_stats", stats)
+        setattr(env, "_local_mpc_stats", stats)
     stats.setdefault("solver_build_count", 0.0)
     stats.setdefault("solver_reuse_count", 0.0)
     stats.setdefault("solve_count", 0.0)
@@ -629,7 +637,7 @@ def _ensure_single_agent_mpc_cache_state(env) -> tuple[dict[tuple[object, ...], 
     return cache, stats
 
 
-def _get_single_agent_mpc_solver(
+def _get_local_mpc_solver(
     env,
     *,
     agent_idx: int,
@@ -642,7 +650,7 @@ def _get_single_agent_mpc_solver(
     soc_max: float,
     export_subsidy_eur_per_kwh: float,
 ):
-    cache, stats = _ensure_single_agent_mpc_cache_state(env)
+    cache, stats = _ensure_local_mpc_cache_state(env)
     use_guarded_fallback = False
     horizon = int(np.asarray(price_seq, dtype=np.float32).reshape(-1).size)
     cache_key = (
@@ -659,7 +667,7 @@ def _get_single_agent_mpc_solver(
     )
     solver = cache.get(cache_key)
     if solver is None:
-        solver = single_agent_mpc_module._ReusableSingleAgentMPCSolver(
+        solver = local_mpc_module._ReusableLocalMPCSolver(
             horizon=horizon,
             battery_capacity_kwh=float(battery_capacity_kwh),
             p_max_kw=float(p_max_kw),
@@ -688,7 +696,7 @@ def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict
     pv_seq = np.asarray(obs["pv_seq"], dtype=np.float32)
     export_subsidy_eur_per_kwh = float(getattr(env.reward_fn, "export_subsidy_eur_per_kwh", 0.079))
     for agent_idx in range(env.n):
-        solver, solver_stats = _get_single_agent_mpc_solver(
+        solver, solver_stats = _get_local_mpc_solver(
             env,
             agent_idx=agent_idx,
             price_seq=price_seq,
@@ -1194,28 +1202,28 @@ def collect_controller_rollout(
                 "import_price_adder_eur_per_kwh": float(
                     getattr(getattr(cfg, "reward", None), "import_price_adder_eur_per_kwh", 0.0)
                 ),
-                "single_agent_mpc_solver_build_count": int(
-                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solver_build_count", 0.0))
+                "local_mpc_solver_build_count": int(
+                    float(getattr(env, "_local_mpc_stats", {}).get("solver_build_count", 0.0))
                 ),
-                "single_agent_mpc_solver_reuse_count": int(
-                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solver_reuse_count", 0.0))
+                "local_mpc_solver_reuse_count": int(
+                    float(getattr(env, "_local_mpc_stats", {}).get("solver_reuse_count", 0.0))
                 ),
-                "single_agent_mpc_solve_count": int(
-                    float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0))
+                "local_mpc_solve_count": int(
+                    float(getattr(env, "_local_mpc_stats", {}).get("solve_count", 0.0))
                 ),
-                "single_agent_mpc_total_solve_time_sec": float(
-                    getattr(env, "_single_agent_mpc_stats", {}).get("solve_time_sec_total", 0.0)
+                "local_mpc_total_solve_time_sec": float(
+                    getattr(env, "_local_mpc_stats", {}).get("solve_time_sec_total", 0.0)
                 ),
-                "single_agent_mpc_avg_solve_time_sec": float(
+                "local_mpc_avg_solve_time_sec": float(
                     (
-                        float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_time_sec_total", 0.0))
-                        / max(float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0)), 1.0)
+                        float(getattr(env, "_local_mpc_stats", {}).get("solve_time_sec_total", 0.0))
+                        / max(float(getattr(env, "_local_mpc_stats", {}).get("solve_count", 0.0)), 1.0)
                     )
-                    if float(getattr(env, "_single_agent_mpc_stats", {}).get("solve_count", 0.0)) > 0.0
+                    if float(getattr(env, "_local_mpc_stats", {}).get("solve_count", 0.0)) > 0.0
                     else 0.0
                 ),
-                "single_agent_mpc_guarded_fallback_count": int(
-                    float(getattr(env, "_single_agent_mpc_stats", {}).get("guarded_fallback_count", 0.0))
+                "local_mpc_guarded_fallback_count": int(
+                    float(getattr(env, "_local_mpc_stats", {}).get("guarded_fallback_count", 0.0))
                 ),
                 "controller_diagnostic_log": diagnostic_rows,
                 "soc_mode": "reset",
@@ -1258,10 +1266,10 @@ def collect_madrl_rollout(
     )
 
 
-def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) -> RolloutResult:
+def collect_local_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) -> RolloutResult:
     comparison_cfg = build_comparison_cfg(cfg, prediction_mode=prediction_mode)
     resolved_mode = normalize_prediction_mode(prediction_mode)
-    rollout_label = label or f"MPC ({resolve_evaluation_mode(resolved_mode)})"
+    rollout_label = label or f"Local MPC ({resolve_evaluation_mode(resolved_mode)})"
     rollout = collect_controller_rollout(
         comparison_cfg,
         label=rollout_label,
@@ -1282,8 +1290,8 @@ def collect_mpc_rollout(cfg, *, prediction_mode: str, label: str | None = None) 
             rollout.summary["purchase_cost"].astype(float)
             - rollout.summary["export_subsidy"].astype(float)
         )
-    rollout.meta["single_agent_mpc_price_mode"] = "import_adjusted"
-    rollout.meta["single_agent_mpc_objective_mode"] = "economic_only"
+    rollout.meta["local_mpc_price_mode"] = "import_adjusted"
+    rollout.meta["local_mpc_objective_mode"] = "economic_only"
     return rollout
 
 
@@ -2729,6 +2737,341 @@ def build_compare_warning_banner(*rollouts: RolloutResult):
     return _HTML(html)
 
 
+def _compare_plot_fontsizes() -> tuple[int, int, int, int]:
+    return (
+        COMPARE_PLOT_TITLE_FONTSIZE,
+        COMPARE_PLOT_LABEL_FONTSIZE,
+        COMPARE_PLOT_TICK_FONTSIZE,
+        COMPARE_PLOT_LEGEND_FONTSIZE,
+    )
+
+
+def _prepare_shared_price_frame(
+    step_df: pd.DataFrame,
+    *,
+    controller_label: str,
+    require_predicted: bool = False,
+) -> pd.DataFrame:
+    required_columns = {"timestamp", "price"}
+    if require_predicted:
+        required_columns.add("price_pred")
+    if step_df.empty or not required_columns.issubset(step_df.columns):
+        missing = sorted(required_columns.difference(step_df.columns))
+        raise ValueError(
+            f"Rollout '{controller_label}' is missing shared price columns required for compare plotting: {missing}"
+        )
+    columns = ["timestamp", "price"]
+    if "price_pred" in step_df.columns:
+        columns.append("price_pred")
+    if "import_price_pred" in step_df.columns:
+        columns.append("import_price_pred")
+    frame = step_df.loc[:, columns].copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame = frame.sort_values(["timestamp"]).drop_duplicates(subset=["timestamp"], keep="first").reset_index(drop=True)
+    return frame
+
+
+def _resolve_adjusted_price_prediction(step_df: pd.DataFrame, *, price_adder: float) -> np.ndarray:
+    if "import_price_pred" in step_df.columns:
+        return step_df["import_price_pred"].to_numpy(dtype=np.float64)
+    return step_df["price_pred"].to_numpy(dtype=np.float64) + float(price_adder)
+
+
+def _prepare_shared_agent_signal_frame(
+    agent_df: pd.DataFrame,
+    signal_name: str,
+    *,
+    controller_label: str,
+    require_predicted: bool = False,
+) -> pd.DataFrame:
+    required_columns = {"timestamp", "agent_profile", signal_name}
+    predicted_column = f"{signal_name}_pred"
+    if require_predicted:
+        required_columns.add(predicted_column)
+    if agent_df.empty or not required_columns.issubset(agent_df.columns):
+        missing = sorted(required_columns.difference(agent_df.columns))
+        raise ValueError(
+            f"Rollout '{controller_label}' is missing shared {signal_name} columns required for compare plotting: {missing}"
+        )
+    columns = ["timestamp", "agent_profile", signal_name]
+    if predicted_column in agent_df.columns:
+        columns.append(predicted_column)
+    frame = agent_df.loc[:, columns].copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame["agent_profile"] = frame["agent_profile"].astype(str)
+    frame = (
+        frame.sort_values(["timestamp", "agent_profile"])
+        .drop_duplicates(subset=["timestamp", "agent_profile"], keep="first")
+        .reset_index(drop=True)
+    )
+    return frame
+
+
+def _assert_matching_shared_actual_frame(
+    reference_frame: pd.DataFrame,
+    candidate_frame: pd.DataFrame,
+    *,
+    key_columns: list[str],
+    value_column: str,
+    controller_label: str,
+    signal_label: str,
+) -> None:
+    reference_keys = reference_frame.loc[:, key_columns].to_records(index=False)
+    candidate_keys = candidate_frame.loc[:, key_columns].to_records(index=False)
+    if reference_keys.shape != candidate_keys.shape or not np.array_equal(reference_keys, candidate_keys):
+        raise ValueError(
+            f"Rollout '{controller_label}' has different {signal_label} timestamps/profiles; "
+            "shared forecast-vs-actual plotting requires matching actual series across rollouts."
+        )
+    if not np.allclose(
+        reference_frame[value_column].to_numpy(dtype=np.float64),
+        candidate_frame[value_column].to_numpy(dtype=np.float64),
+        rtol=1e-6,
+        atol=1e-8,
+        equal_nan=True,
+    ):
+        raise ValueError(
+            f"Rollout '{controller_label}' has different actual {signal_label} values; "
+            "shared forecast-vs-actual plotting requires matching actual series across rollouts."
+        )
+
+
+def _align_shared_actual_frames(
+    reference_frame: pd.DataFrame,
+    candidate_frame: pd.DataFrame,
+    *,
+    key_columns: list[str],
+    value_column: str,
+    controller_label: str,
+    signal_label: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    reference_indexed = reference_frame.set_index(key_columns)
+    candidate_indexed = candidate_frame.set_index(key_columns)
+    common_index = reference_indexed.index.intersection(candidate_indexed.index, sort=False)
+    if len(common_index) == 0:
+        raise ValueError(
+            f"Rollout '{controller_label}' has no overlapping {signal_label} timestamps/profiles with the "
+            "shared forecast-vs-actual reference rollout."
+        )
+
+    reference_aligned = reference_indexed.loc[common_index].reset_index()
+    candidate_aligned = candidate_indexed.loc[common_index].reset_index()
+    _assert_matching_shared_actual_frame(
+        reference_aligned,
+        candidate_aligned,
+        key_columns=key_columns,
+        value_column=value_column,
+        controller_label=controller_label,
+        signal_label=signal_label,
+    )
+    return reference_aligned, candidate_aligned
+
+
+def _select_shared_forecast_reference_rollout(*rollouts: RolloutResult) -> RolloutResult:
+    for rollout in rollouts:
+        if str(rollout.meta.get("prediction_mode", "")).strip().lower() != NORMAL_PREDICTION_MODE:
+            continue
+        step_df = rollout.step_df
+        agent_df = rollout.agent_df
+        if {"timestamp", "price", "price_pred"}.issubset(step_df.columns) and {
+            "timestamp",
+            "agent_profile",
+            "load",
+            "load_pred",
+            "pv",
+            "pv_pred",
+        }.issubset(agent_df.columns):
+            return rollout
+    return rollouts[0]
+
+
+def plot_shared_forecast_vs_actual(
+    *rollouts: RolloutResult,
+    figsize: tuple[float, float] | None = None,
+):
+    if not rollouts:
+        raise ValueError("At least one rollout is required.")
+
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
+    reference_rollout = rollouts[0]
+    reference_label = str(reference_rollout.meta.get("controller", "unknown"))
+    price_reference = _prepare_shared_price_frame(
+        reference_rollout.step_df,
+        controller_label=reference_label,
+    )
+    load_reference = _prepare_shared_agent_signal_frame(
+        reference_rollout.agent_df,
+        "load",
+        controller_label=reference_label,
+    )
+    pv_reference = _prepare_shared_agent_signal_frame(
+        reference_rollout.agent_df,
+        "pv",
+        controller_label=reference_label,
+    )
+
+    for rollout in rollouts[1:]:
+        controller_label = str(rollout.meta.get("controller", "unknown"))
+        price_candidate = _prepare_shared_price_frame(
+            rollout.step_df,
+            controller_label=controller_label,
+        )
+        load_candidate = _prepare_shared_agent_signal_frame(
+            rollout.agent_df,
+            "load",
+            controller_label=controller_label,
+        )
+        pv_candidate = _prepare_shared_agent_signal_frame(
+            rollout.agent_df,
+            "pv",
+            controller_label=controller_label,
+        )
+        price_reference, _ = _align_shared_actual_frames(
+            price_reference,
+            price_candidate,
+            key_columns=["timestamp"],
+            value_column="price",
+            controller_label=controller_label,
+            signal_label="price",
+        )
+        load_reference, _ = _align_shared_actual_frames(
+            load_reference,
+            load_candidate,
+            key_columns=["timestamp", "agent_profile"],
+            value_column="load",
+            controller_label=controller_label,
+            signal_label="load",
+        )
+        pv_reference, _ = _align_shared_actual_frames(
+            pv_reference,
+            pv_candidate,
+            key_columns=["timestamp", "agent_profile"],
+            value_column="pv",
+            controller_label=controller_label,
+            signal_label="pv",
+        )
+
+    prediction_rollout = _select_shared_forecast_reference_rollout(*rollouts)
+    prediction_label = str(prediction_rollout.meta.get("controller", "unknown"))
+    price_prediction = _prepare_shared_price_frame(
+        prediction_rollout.step_df,
+        controller_label=prediction_label,
+        require_predicted=True,
+    )
+    load_prediction = _prepare_shared_agent_signal_frame(
+        prediction_rollout.agent_df,
+        "load",
+        controller_label=prediction_label,
+        require_predicted=True,
+    )
+    pv_prediction = _prepare_shared_agent_signal_frame(
+        prediction_rollout.agent_df,
+        "pv",
+        controller_label=prediction_label,
+        require_predicted=True,
+    )
+    price_reference, price_prediction = _align_shared_actual_frames(
+        price_reference,
+        price_prediction,
+        key_columns=["timestamp"],
+        value_column="price",
+        controller_label=prediction_label,
+        signal_label="price",
+    )
+    load_reference, load_prediction = _align_shared_actual_frames(
+        load_reference,
+        load_prediction,
+        key_columns=["timestamp", "agent_profile"],
+        value_column="load",
+        controller_label=prediction_label,
+        signal_label="load",
+    )
+    pv_reference, pv_prediction = _align_shared_actual_frames(
+        pv_reference,
+        pv_prediction,
+        key_columns=["timestamp", "agent_profile"],
+        value_column="pv",
+        controller_label=prediction_label,
+        signal_label="pv",
+    )
+
+    figure, axes = plt.subplots(3, 1, figsize=figsize or (20.0, 12.0), sharex=True)
+    price_axis, load_axis, pv_axis = np.atleast_1d(axes)
+    price_axis.plot(
+        price_reference["timestamp"],
+        price_reference["price"],
+        color="#111827",
+        linewidth=1.9,
+        label="Actual",
+    )
+    price_axis.plot(
+        price_prediction["timestamp"],
+        _resolve_adjusted_price_prediction(
+            price_prediction,
+            price_adder=float(prediction_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0)),
+        ),
+        color="#dc2626",
+        linewidth=1.8,
+        linestyle="--",
+        label=f"Predicted ({prediction_label})",
+    )
+    price_axis.set_title("Price Forecast vs Actual", fontsize=title_fontsize)
+    price_axis.set_ylabel("EUR/kWh", fontsize=label_fontsize)
+    price_axis.grid(True, alpha=0.25)
+    price_axis.tick_params(axis="both", labelsize=tick_fontsize)
+    price_axis.legend(loc="upper right", fontsize=legend_fontsize)
+
+    profile_names = list(dict.fromkeys(load_reference["agent_profile"].astype(str).tolist()))
+    figure_handles = [
+        Line2D([0], [0], color=COMPARE_PLOT_AGENT_PALETTE[idx % len(COMPARE_PLOT_AGENT_PALETTE)], linewidth=2.0, label=profile)
+        for idx, profile in enumerate(profile_names)
+    ]
+    figure_handles.extend(
+        [
+            Line2D([0], [0], color="#111827", linewidth=2.0, linestyle="-", label="Actual"),
+            Line2D([0], [0], color="#111827", linewidth=2.0, linestyle="--", label="Predicted"),
+        ]
+    )
+
+    for axis, signal_name, reference_frame, prediction_frame in (
+        (load_axis, "load", load_reference, load_prediction),
+        (pv_axis, "pv", pv_reference, pv_prediction),
+    ):
+        for color_idx, profile in enumerate(profile_names):
+            color = COMPARE_PLOT_AGENT_PALETTE[color_idx % len(COMPARE_PLOT_AGENT_PALETTE)]
+            actual_frame = reference_frame.loc[reference_frame["agent_profile"] == profile]
+            predicted_frame = prediction_frame.loc[prediction_frame["agent_profile"] == profile]
+            axis.plot(
+                actual_frame["timestamp"],
+                actual_frame[signal_name],
+                color=color,
+                linewidth=1.8,
+            )
+            axis.plot(
+                predicted_frame["timestamp"],
+                predicted_frame[f"{signal_name}_pred"],
+                color=color,
+                linewidth=1.6,
+                linestyle="--",
+            )
+        axis.set_title(f"{signal_name.upper()} Forecast vs Actual", fontsize=title_fontsize)
+        axis.set_ylabel("kW", fontsize=label_fontsize)
+        axis.grid(True, alpha=0.25)
+        axis.tick_params(axis="both", labelsize=tick_fontsize)
+
+    pv_axis.set_xlabel("Timestamp", fontsize=label_fontsize)
+    figure.legend(
+        handles=figure_handles,
+        loc="upper center",
+        ncol=min(len(figure_handles), 7),
+        frameon=False,
+        fontsize=legend_fontsize,
+        bbox_to_anchor=(0.5, 1.02),
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    return figure
+
+
 def plot_rollout_dashboard(
     rollout: RolloutResult,
     *,
@@ -3137,12 +3480,9 @@ def plot_voltage_profile_comparison(
         sharey=True,
     )
     axes = np.atleast_1d(axes)
-    muted_color = "#cbd5e1"
-    highlight_palette = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"]
-    title_fontsize = 18
-    label_fontsize = 16
-    tick_fontsize = 14
-    legend_fontsize = 14
+    muted_color = COMPARE_PLOT_MUTED_COLOR
+    highlight_palette = COMPARE_PLOT_AGENT_PALETTE
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
 
     for axis_idx, (axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         grid_df = rollout.grid_df
@@ -3213,10 +3553,7 @@ def plot_price_prediction_comparison(
     if not rollouts:
         raise ValueError("At least one rollout is required.")
 
-    title_fontsize = 18
-    label_fontsize = 16
-    tick_fontsize = 14
-    legend_fontsize = 14
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
 
     reference_rollout = next(
         (rollout for rollout in rollouts if str(rollout.meta.get("prediction_mode", "")) == NORMAL_PREDICTION_MODE),
@@ -3234,11 +3571,6 @@ def plot_price_prediction_comparison(
         linewidth=1.8,
         label="Price",
     )
-
-    def _resolve_adjusted_price_prediction(step_df: pd.DataFrame, *, price_adder: float) -> np.ndarray:
-        if "import_price_pred" in step_df.columns:
-            return step_df["import_price_pred"].to_numpy(dtype=np.float64)
-        return step_df["price_pred"].to_numpy(dtype=np.float64) + float(price_adder)
 
     reference_price_adder = float(reference_rollout.meta.get("import_price_adder_eur_per_kwh", 0.0))
     reference_pred = _resolve_adjusted_price_prediction(reference_step_df, price_adder=reference_price_adder)
@@ -3331,10 +3663,7 @@ def plot_net_load_comparison(
         sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 18
-    label_fontsize = 16
-    tick_fontsize = 14
-    legend_fontsize = 14
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
 
     for axis_idx, (feeder_axis, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         step_df = _prepare_compare_net_load_frame(
@@ -3426,10 +3755,7 @@ def plot_power_balance_comparison(
         sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 18
-    label_fontsize = 16
-    tick_fontsize = 14
-    legend_fontsize = 14
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
     positive_specs = [
         ("load_total", "Load", "#111827"),
         ("battery_charge_total", "Charge", "#dc2626"),
@@ -3514,10 +3840,7 @@ def plot_battery_power_and_soc_comparison(
         sharey=True,
     )
     axes = np.atleast_1d(axes)
-    title_fontsize = 18
-    label_fontsize = 16
-    tick_fontsize = 14
-    legend_fontsize = 14
+    title_fontsize, label_fontsize, tick_fontsize, legend_fontsize = _compare_plot_fontsizes()
     discharge_color = "#dc2626"
     charge_color = "#2563eb"
     soc_agent_color = "#94a3b8"
@@ -3682,7 +4005,7 @@ __all__ = [
     "collect_controller_rollout",
     "collect_global_full_horizon_rollout",
     "collect_global_mpc_rollout",
-    "collect_mpc_rollout",
+    "collect_local_mpc_rollout",
     "compare_purchase_costs",
     "compare_rollout_metrics",
     "build_trafo_diagnostic_table",
@@ -3694,6 +4017,7 @@ __all__ = [
     "plot_operating_cost_comparison",
     "plot_net_load_comparison",
     "plot_price_prediction_comparison",
+    "plot_shared_forecast_vs_actual",
     "plot_power_balance_bars",
     "plot_power_balance_comparison",
     "plot_battery_power_and_soc_comparison",

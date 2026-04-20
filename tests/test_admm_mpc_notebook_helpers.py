@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+import json
 import importlib.util
 import sys
 from types import SimpleNamespace
@@ -39,6 +41,12 @@ def _make_cfg(*, future_horizon: int = 4, n_agents: int = 2, test_start_date: st
             episode_limit=192,
             future_horizon=int(future_horizon),
             num_agents=int(n_agents),
+            battery_capacity=[4.0] * int(n_agents),
+            max_charge_rate=0.5,
+            efficiency=0.95,
+            init_soc=0.5,
+            soc_min=0.0,
+            soc_max=1.0,
             soc_target=0.5,
         ),
         reward=SimpleNamespace(
@@ -61,6 +69,8 @@ def _make_cfg(*, future_horizon: int = 4, n_agents: int = 2, test_start_date: st
             test_start_date=str(test_start_date),
             test_end_date=str(test_end_date),
             agent_profiles=[f"agent_{idx}" for idx in range(int(n_agents))],
+            load_scale=[1.0] * int(n_agents),
+            pv_scale=[1.0] * int(n_agents),
         ),
     )
 
@@ -133,6 +143,102 @@ def _make_surrogate_cache(*, horizon: int = 8, n_agents: int = 2):
         alpha_netload_window_kw=np.ones((n_agents, horizon), dtype=np.float32),
         horizon_steps=int(horizon),
     )
+
+
+def _make_cached_rollout(
+    *,
+    controller: str = "ADMM MPC + LSTM Forecast",
+    forecast_backend: str = "lstm",
+) -> grid_nb.RolloutResult:
+    timestamp = pd.Timestamp("2020-06-01 00:00:00")
+    step_df = pd.DataFrame(
+        [
+            {
+                "controller": controller,
+                "episode_idx": 0,
+                "step": 0,
+                "global_step": 0,
+                "timestamp": timestamp,
+                "price": 0.3,
+                "price_pred": 0.5,
+                "purchase_cost_total": 0.33,
+                "export_subsidy_total": 0.0,
+                "objective_total": 0.33,
+                "admm_converged": True,
+                "admm_iterations": 7,
+                "admm_final_primal_residual": 1e-4,
+                "admm_final_dual_residual": 2e-4,
+                "admm_solve_time_sec": 0.05,
+                "admm_rho_final": 0.2,
+            }
+        ]
+    )
+    agent_df = pd.DataFrame(
+        [
+            {
+                "controller": controller,
+                "episode_idx": 0,
+                "step": 0,
+                "global_step": 0,
+                "timestamp": timestamp,
+                "agent_id": 0,
+                "agent_profile": "agent_0",
+                "load": 1.2,
+                "load_pred": 1.2,
+                "pv": 0.5,
+                "pv_pred": 0.5,
+                "e_bat": 0.4,
+                "soc": 0.525,
+                "purchase_cost": 0.195,
+                "export_subsidy": 0.0,
+                "objective_total": 0.195,
+            },
+            {
+                "controller": controller,
+                "episode_idx": 0,
+                "step": 0,
+                "global_step": 0,
+                "timestamp": timestamp,
+                "agent_id": 1,
+                "agent_profile": "agent_1",
+                "load": 1.2,
+                "load_pred": 1.2,
+                "pv": 0.0,
+                "pv_pred": 0.0,
+                "e_bat": 0.2,
+                "soc": 0.5125,
+                "purchase_cost": 0.135,
+                "export_subsidy": 0.0,
+                "objective_total": 0.135,
+            },
+        ]
+    )
+    grid_df = pd.DataFrame(
+        [
+            {"controller": controller, "episode_idx": 0, "step": 0, "global_step": 0, "timestamp": timestamp, "bus_id": 0, "vm_pu": 1.0, "is_agent_bus": False},
+            {"controller": controller, "episode_idx": 0, "step": 0, "global_step": 0, "timestamp": timestamp, "bus_id": 1, "vm_pu": 0.99, "is_agent_bus": True},
+            {"controller": controller, "episode_idx": 0, "step": 0, "global_step": 0, "timestamp": timestamp, "bus_id": 2, "vm_pu": 1.01, "is_agent_bus": True},
+        ]
+    )
+    summary = pd.DataFrame(
+        [
+            {"controller": controller, "agent_profile": "agent_0", "purchase_cost": 0.195, "export_subsidy": 0.0, "objective_total": 0.195},
+            {"controller": controller, "agent_profile": "agent_1", "purchase_cost": 0.135, "export_subsidy": 0.0, "objective_total": 0.135},
+        ]
+    )
+    meta = {
+        "controller": controller,
+        "agent_profiles": ["agent_0", "agent_1"],
+        "agent_bus_ids": [1, 2],
+        "v_min_pu": 0.95,
+        "v_max_pu": 1.05,
+        "prediction_mode": "normal",
+        "forecast_backend": forecast_backend,
+        "import_price_adder_eur_per_kwh": 0.2,
+        "export_subsidy_eur_per_kwh": 0.079,
+        "economics_scope": "agent_only",
+    }
+    return grid_nb.RolloutResult(step_df=step_df, agent_df=agent_df, grid_df=grid_df, summary=summary, meta=meta)
 
 
 def test_build_admm_mpc_window_data_shapes_and_import_price():
@@ -487,6 +593,124 @@ def test_admm_mpc_controller_keeps_progress_bar_enabled_for_notebooks(monkeypatc
     finally:
         controller.close()
     assert created_progress_bars[0].closed is True
+    assert created_progress_bars[0].kwargs["leave"] is True
+
+
+def test_admm_mpc_controller_falls_back_to_stdout_progress_when_tqdm_unavailable(monkeypatch, capsys):
+    cfg = _make_cfg(future_horizon=4, n_agents=2)
+    env = _make_env(n_agents=2, future_horizon=4)
+    env.episode_length = 1
+    original_import = builtins.__import__
+
+    def _failing_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tqdm.auto":
+            raise ImportError("tqdm disabled for test")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _failing_import)
+    monkeypatch.setattr(
+        admm_mpc_nb,
+        "build_admm_mpc_surrogate_cache",
+        lambda cfg_arg, env_arg, horizon_steps: admm_mpc_nb.AdmmMpcSurrogateCache(
+            trafo_limit_kw=10.0,
+            trafo_base_kw=0.0,
+            alpha_netload_kw=np.ones((env_arg.n,), dtype=np.float32),
+            alpha_netload_window_kw=np.ones((env_arg.n, horizon_steps), dtype=np.float32),
+            horizon_steps=int(horizon_steps),
+        ),
+    )
+    monkeypatch.setattr(
+        admm_mpc_nb,
+        "build_admm_mpc_window_data",
+        lambda *args, **kwargs: admm_mpc_nb.AdmmMpcWindowData(
+            price_seq=np.asarray([0.3], dtype=np.float32),
+            wholesale_price_eur_per_kwh=np.asarray([0.1], dtype=np.float32),
+            import_price_eur_per_kwh=np.asarray([0.3], dtype=np.float32),
+            load_seq=np.zeros((2, 1), dtype=np.float32),
+            pv_seq=np.zeros((2, 1), dtype=np.float32),
+            battery_capacity_kwh=np.ones((2,), dtype=np.float32),
+            p_max_kw=np.ones((2,), dtype=np.float32),
+            eff_charge=np.ones((2,), dtype=np.float32),
+            eff_discharge=np.ones((2,), dtype=np.float32),
+            energy_init_kwh=np.ones((2,), dtype=np.float32),
+            energy_ref_kwh=np.ones((2,), dtype=np.float32),
+            energy_min_kwh=np.zeros((2,), dtype=np.float32),
+            energy_max_kwh=np.ones((2,), dtype=np.float32),
+            export_subsidy_eur_per_kwh=0.079,
+            import_price_adder_eur_per_kwh=0.2,
+            dt_hours=0.25,
+        ),
+    )
+    monkeypatch.setattr(
+        admm_mpc_nb,
+        "run_admm_mpc_step",
+        lambda *args, **kwargs: admm_mpc_nb.AdmmMpcStepResult(
+            executed_charge_kw=np.zeros((2,), dtype=np.float32),
+            executed_discharge_kw=np.zeros((2,), dtype=np.float32),
+            executed_pv_curtail_kw=np.zeros((2,), dtype=np.float32),
+            executed_net_load_kw=np.zeros((2,), dtype=np.float32),
+            executed_action_array=np.zeros((2, 2), dtype=np.float32),
+            full_horizon_solution=admm_mpc_nb.AdmmMpcWindowResult(
+                charge_kw=np.zeros((2, 1), dtype=np.float32),
+                discharge_kw=np.zeros((2, 1), dtype=np.float32),
+                pv_curtail_kw=np.zeros((2, 1), dtype=np.float32),
+                pv_effective_kw=np.zeros((2, 1), dtype=np.float32),
+                net_load_kw=np.zeros((2, 1), dtype=np.float32),
+                grid_import_kw=np.zeros((2, 1), dtype=np.float32),
+                grid_export_kw=np.zeros((2, 1), dtype=np.float32),
+                energy_kwh=np.zeros((2, 2), dtype=np.float32),
+                surrogate_root_p_kw=np.zeros((1,), dtype=np.float32),
+                baseline_root_p_kw=np.zeros((1,), dtype=np.float32),
+                objective_eur=0.0,
+                converged=True,
+                iterations=1,
+                final_primal_residual=0.0,
+                final_dual_residual=0.0,
+                solve_time_sec=0.01,
+                rho_final=0.2,
+                solver_status="optimal",
+                history_df=pd.DataFrame(),
+            ),
+            converged=True,
+            iterations=1,
+            final_primal_residual=0.0,
+            final_dual_residual=0.0,
+            solve_time_sec=0.01,
+            rho_final=0.2,
+            warm_start_cache=admm_mpc_nb.AdmmMpcWarmStartCache(horizon_steps=1),
+        ),
+    )
+    monkeypatch.setattr(admm_mpc_nb, "build_safety_local_numpy", lambda *args, **kwargs: np.zeros((2, 2), dtype=np.float32))
+    monkeypatch.setattr(
+        admm_mpc_nb,
+        "compute_action_gap_metrics_numpy",
+        lambda *args, **kwargs: {"action_gap_abs": np.zeros((2,), dtype=np.float32)},
+    )
+
+    controller = admm_mpc_nb._AdmmMpcController(
+        env,
+        cfg,
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=100,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+        show_progress=True,
+    )
+    try:
+        controller.reset()
+        env.cur_step = 0
+        controller.act(None)
+    finally:
+        controller.close()
+    captured = capsys.readouterr()
+    assert "ADMM MPC rollout: starting episode/day" in captured.out
+    assert "ADMM MPC rollout progress:" in captured.out
+    assert "ADMM MPC rollout complete:" in captured.out
 
 
 def test_plotting_helpers_accept_admm_mpc_style_rollout(monkeypatch):
@@ -597,7 +821,7 @@ def test_plotting_helpers_accept_admm_mpc_style_rollout(monkeypatch):
     assert fig_3 is not None
 
 
-def test_compare_helpers_accept_admm_mpc_and_single_agent_mpc_rollouts(monkeypatch):
+def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
     import matplotlib.pyplot as plt
 
     cfg = _make_cfg(future_horizon=4, n_agents=2)
@@ -612,7 +836,7 @@ def test_compare_helpers_accept_admm_mpc_and_single_agent_mpc_rollouts(monkeypat
         else:
             price_pred = [0.10, 0.20]
             price = [0.30, 0.40]
-            controller = "Single-Agent MPC + LSTM Forecast"
+            controller = "Local MPC + LSTM Forecast"
 
         step_df = pd.DataFrame(
             {
@@ -725,10 +949,10 @@ def test_compare_helpers_accept_admm_mpc_and_single_agent_mpc_rollouts(monkeypat
     monkeypatch.setattr(grid_nb, "collect_controller_rollout", _fake_collect_controller_rollout)
 
     admm_rollout = admm_mpc_nb.collect_admm_mpc_rollout(cfg, prediction_mode="normal", show_progress=False)
-    single_agent_rollout = grid_nb.collect_mpc_rollout(
+    single_agent_rollout = grid_nb.collect_local_mpc_rollout(
         cfg,
         prediction_mode="normal",
-        label="Single-Agent MPC + LSTM Forecast",
+        label="Local MPC + LSTM Forecast",
     )
 
     metrics_df = grid_nb.compare_rollout_metrics(admm_rollout, single_agent_rollout)
@@ -748,3 +972,299 @@ def test_compare_helpers_accept_admm_mpc_and_single_agent_mpc_rollouts(monkeypat
     assert fig_battery is not None
     for figure in [fig_price, fig_power, fig_voltage, fig_net, fig_battery]:
         plt.close(figure)
+
+
+def test_admm_mpc_rollout_package_round_trip(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+
+    package = admm_mpc_nb.build_admm_mpc_rollout_package(
+        rollout,
+        controller_label=rollout.meta["controller"],
+        cfg=cfg,
+        prediction_mode="normal",
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=100,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+        extra_meta={"rollout_meta": dict(rollout.meta)},
+        diagnostic_summary={"convergence_rate": 1.0},
+    )
+    saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, tmp_path / "cached_rollout")
+    loaded = admm_mpc_nb.load_admm_mpc_rollout_package(saved_dir)
+
+    assert int(loaded["manifest"]["rollout_package_version"]) == 1
+    assert loaded["diagnostics"]["convergence_rate"] == pytest.approx(1.0)
+    assert pd.api.types.is_datetime64_any_dtype(loaded["step_df"]["timestamp"])
+    assert list(loaded["agent_df"]["agent_profile"]) == ["agent_0", "agent_1"]
+    assert float(loaded["summary_df"]["objective_total"].sum()) == pytest.approx(0.33)
+
+
+def test_replay_admm_mpc_rollout_package_returns_compare_ready_rollout(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(
+        admm_mpc_nb.build_admm_mpc_rollout_package(
+            rollout,
+            controller_label=rollout.meta["controller"],
+            cfg=cfg,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+            extra_meta={"rollout_meta": dict(rollout.meta)},
+            diagnostic_summary={"avg_admm_iterations": 7.0},
+        ),
+        tmp_path / "cached_rollout",
+    )
+
+    replay = admm_mpc_nb.replay_admm_mpc_rollout_package(
+        cfg,
+        saved_dir,
+        label="Replayed ADMM MPC",
+        prediction_mode="normal",
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=100,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+    )
+
+    replay_rollout = replay["rollout"]
+    assert replay_rollout.meta["loaded_from_cached_rollout"] is True
+    assert replay_rollout.meta["rollout_package_dir"] == str(saved_dir.resolve())
+    assert replay_rollout.meta["cached_rollout_diagnostics"]["avg_admm_iterations"] == pytest.approx(7.0)
+    assert replay_rollout.meta["controller"] == "Replayed ADMM MPC"
+    assert replay_rollout.step_df["controller"].unique().tolist() == ["Replayed ADMM MPC"]
+    assert replay_rollout.summary["controller"].unique().tolist() == ["Replayed ADMM MPC"]
+
+
+def test_replay_admm_mpc_rollout_package_rejects_cfg_snapshot_mismatch(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(
+        admm_mpc_nb.build_admm_mpc_rollout_package(
+            rollout,
+            controller_label=rollout.meta["controller"],
+            cfg=cfg,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+            extra_meta={"rollout_meta": dict(rollout.meta)},
+        ),
+        tmp_path / "cached_rollout",
+    )
+
+    mismatched_cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-03")
+    mismatched_cfg.env.episode_limit = 96
+    mismatched_cfg.forecast.type = "lstm"
+    with pytest.raises(ValueError, match="ADMM MPC rollout package mismatch"):
+        admm_mpc_nb.replay_admm_mpc_rollout_package(
+            mismatched_cfg,
+            saved_dir,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+        )
+
+
+def test_replay_admm_mpc_rollout_package_rejects_solver_fingerprint_mismatch(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(
+        admm_mpc_nb.build_admm_mpc_rollout_package(
+            rollout,
+            controller_label=rollout.meta["controller"],
+            cfg=cfg,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+            extra_meta={"rollout_meta": dict(rollout.meta)},
+        ),
+        tmp_path / "cached_rollout",
+    )
+
+    with pytest.raises(ValueError, match="admm_solver_fingerprint mismatch at 'max_iters'"):
+        admm_mpc_nb.replay_admm_mpc_rollout_package(
+            cfg,
+            saved_dir,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=10,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+        )
+
+
+def test_load_admm_mpc_rollout_package_rejects_version_mismatch(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    saved_dir = admm_mpc_nb.save_admm_mpc_rollout_package(
+        admm_mpc_nb.build_admm_mpc_rollout_package(
+            rollout,
+            controller_label=rollout.meta["controller"],
+            cfg=cfg,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+            extra_meta={"rollout_meta": dict(rollout.meta)},
+        ),
+        tmp_path / "cached_rollout",
+    )
+    manifest_path = saved_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["rollout_package_version"] = 999
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported ADMM MPC rollout package version"):
+        admm_mpc_nb.load_admm_mpc_rollout_package(saved_dir)
+
+
+def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_prefers_newest_match(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    package = admm_mpc_nb.build_admm_mpc_rollout_package(
+        rollout,
+        controller_label=rollout.meta["controller"],
+        cfg=cfg,
+        prediction_mode="normal",
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=100,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+        extra_meta={"rollout_meta": dict(rollout.meta)},
+    )
+
+    prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
+    base_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, prefix)
+    newer_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, tmp_path / f"{prefix.name}_newer")
+
+    resolved = admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
+        prefix,
+        cfg=cfg,
+        prediction_mode="normal",
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=100,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+    )
+
+    assert base_dir.exists()
+    assert resolved == newer_dir.resolve()
+
+
+def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_reports_candidate_reasons(tmp_path):
+    cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
+    cfg.env.episode_limit = 96
+    cfg.forecast.type = "lstm"
+    rollout = _make_cached_rollout(controller=admm_mpc_nb.ADMM_MPC_LSTM_LABEL, forecast_backend="lstm")
+    prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
+
+    incompatible_package = admm_mpc_nb.build_admm_mpc_rollout_package(
+        rollout,
+        controller_label=rollout.meta["controller"],
+        cfg=cfg,
+        prediction_mode="normal",
+        rho_init=None,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation="residual_balancing",
+        max_iters=10,
+        max_iters_first_step=300,
+        primal_tol=1e-3,
+        dual_tol=1e-3,
+        terminal_cost_multiplier=1.0,
+        extra_meta={"rollout_meta": dict(rollout.meta)},
+    )
+    admm_mpc_nb.save_admm_mpc_rollout_package(incompatible_package, tmp_path / f"{prefix.name}_badsolver")
+
+    with pytest.raises(FileNotFoundError, match="Expected prefix='2020-06-01_2020-06-02_agents2_normal_lstm'") as exc_info:
+        admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
+            prefix,
+            cfg=cfg,
+            prediction_mode="normal",
+            rho_init=None,
+            rho_min=1e-3,
+            rho_max=1e3,
+            rho_adaptation="residual_balancing",
+            max_iters=100,
+            max_iters_first_step=300,
+            primal_tol=1e-3,
+            dual_tol=1e-3,
+            terminal_cost_multiplier=1.0,
+        )
+
+    message = str(exc_info.value)
+    assert "discovered_candidates=" in message
+    assert "admm_solver_fingerprint mismatch at 'max_iters'" in message
+    assert "Please run notebooks/madrl/ADMM_mpc.ipynb" in message

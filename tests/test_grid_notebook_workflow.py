@@ -20,11 +20,11 @@ from scripts.utils.grid_notebook_workflow import (
     build_compare_warning_banner,
     build_trafo_diagnostic_table,
     compare_rollout_metrics,
-    collect_mpc_rollout,
+    collect_local_mpc_rollout,
     collect_controller_rollout,
     collect_global_full_horizon_rollout,
     collect_global_mpc_rollout,
-    _get_single_agent_mpc_solver,
+    _get_local_mpc_solver,
     load_training_run_bundle,
     normalize_date_input,
     plot_battery_power_and_soc_comparison,
@@ -34,6 +34,7 @@ from scripts.utils.grid_notebook_workflow import (
     plot_power_balance_bars,
     plot_power_balance_comparison,
     plot_rollout_comparison_dashboard,
+    plot_shared_forecast_vs_actual,
     plot_voltage_profile_comparison,
     resolve_evaluation_mode,
     resolve_forecast_backend,
@@ -570,7 +571,7 @@ def test_collect_controller_rollout_respects_shared_data_selected_episode_indice
     assert rollout.meta["selected_episode_indices"] == [1, 2, 3]
 
 
-def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_path, monkeypatch):
+def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_mpc")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
@@ -605,8 +606,8 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             reward_fn = type("_DummyReward", (), {"export_subsidy_eur_per_kwh": 0.079})()
             import_price_adder_eur_per_kwh = 0.2
             _grid_core = _DummyGridCore()
-            _single_agent_mpc_solver_cache = {}
-            _single_agent_mpc_stats = {}
+            _local_mpc_solver_cache = {}
+            _local_mpc_stats = {}
 
             @staticmethod
             def get_signal_step(signal_name: str):
@@ -695,17 +696,17 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
             "guarded_fallback_count": 0.0,
         }
 
-    monkeypatch.setattr("scripts.utils.grid_notebook_workflow._get_single_agent_mpc_solver", _fake_get_solver)
+    monkeypatch.setattr("scripts.utils.grid_notebook_workflow._get_local_mpc_solver", _fake_get_solver)
 
-    perfect_rollout = collect_mpc_rollout(cfg, prediction_mode="perfect", label="MPC (oracle_eval)")
-    normal_rollout = collect_mpc_rollout(cfg, prediction_mode="normal", label="MPC (forecast_eval)")
+    perfect_rollout = collect_local_mpc_rollout(cfg, prediction_mode="perfect", label="Local MPC (oracle_eval)")
+    normal_rollout = collect_local_mpc_rollout(cfg, prediction_mode="normal", label="Local MPC (forecast_eval)")
 
-    assert perfect_rollout.meta["controller"] == "MPC (oracle_eval)"
-    assert normal_rollout.meta["controller"] == "MPC (forecast_eval)"
-    assert perfect_rollout.meta["single_agent_mpc_price_mode"] == "import_adjusted"
-    assert normal_rollout.meta["single_agent_mpc_price_mode"] == "import_adjusted"
-    assert perfect_rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
-    assert normal_rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
+    assert perfect_rollout.meta["controller"] == "Local MPC (oracle_eval)"
+    assert normal_rollout.meta["controller"] == "Local MPC (forecast_eval)"
+    assert perfect_rollout.meta["local_mpc_price_mode"] == "import_adjusted"
+    assert normal_rollout.meta["local_mpc_price_mode"] == "import_adjusted"
+    assert perfect_rollout.meta["local_mpc_objective_mode"] == "economic_only"
+    assert normal_rollout.meta["local_mpc_objective_mode"] == "economic_only"
     assert recorded_modes == ["perfect", "lstm"]
     assert recorded_subsidies == [0.079, 0.079, 0.079, 0.079]
     assert recorded_agent_indices == [0, 1, 0, 1]
@@ -718,7 +719,7 @@ def test_collect_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_p
         np.testing.assert_allclose(action_array[:, 1], np.array([0.16666663, -0.25], dtype=np.float32), atol=1e-5)
 
 
-def test_collect_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monkeypatch):
+def test_collect_local_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_mpc_objective")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
@@ -769,15 +770,15 @@ def test_collect_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monke
         _fake_collect_controller_rollout,
     )
 
-    rollout = collect_mpc_rollout(cfg, prediction_mode="normal", label="MPC (forecast_eval)")
+    rollout = collect_local_mpc_rollout(cfg, prediction_mode="normal", label="Local MPC (forecast_eval)")
 
-    assert rollout.meta["single_agent_mpc_objective_mode"] == "economic_only"
+    assert rollout.meta["local_mpc_objective_mode"] == "economic_only"
     assert float(rollout.step_df.loc[0, "objective_total"]) == pytest.approx(-2.0)
     assert float(rollout.agent_df.loc[0, "objective_total"]) == pytest.approx(-1.5)
     assert float(rollout.summary.loc[0, "objective_total"]) == pytest.approx(-1.5)
 
 
-def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
+def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
     class _DummySolver:
         def __init__(self, **kwargs):
             self.kwargs = dict(kwargs)
@@ -790,16 +791,16 @@ def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
         return solver
 
     monkeypatch.setattr(
-        "scripts.utils.grid_notebook_workflow.single_agent_mpc_module._ReusableSingleAgentMPCSolver",
+        "scripts.utils.grid_notebook_workflow.local_mpc_module._ReusableLocalMPCSolver",
         _fake_solver_factory,
     )
 
     class _DummyEnv:
-        _single_agent_mpc_solver_cache = {}
-        _single_agent_mpc_stats = {}
+        _local_mpc_solver_cache = {}
+        _local_mpc_stats = {}
 
     env = _DummyEnv()
-    solver_a_1, stats = _get_single_agent_mpc_solver(
+    solver_a_1, stats = _get_local_mpc_solver(
         env,
         agent_idx=0,
         price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
@@ -811,7 +812,7 @@ def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
         soc_max=0.9,
         export_subsidy_eur_per_kwh=0.079,
     )
-    solver_a_2, stats = _get_single_agent_mpc_solver(
+    solver_a_2, stats = _get_local_mpc_solver(
         env,
         agent_idx=0,
         price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
@@ -823,7 +824,7 @@ def test_get_single_agent_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
         soc_max=0.9,
         export_subsidy_eur_per_kwh=0.079,
     )
-    solver_b_1, stats = _get_single_agent_mpc_solver(
+    solver_b_1, stats = _get_local_mpc_solver(
         env,
         agent_idx=1,
         price_seq=np.asarray([0.2, 0.2], dtype=np.float32),
@@ -1057,20 +1058,20 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "v_min_pu": 0.95,
                 "v_max_pu": 1.05,
                 "trafo_loading_limit_pct": 100.0,
-                "high_budget_refinement_warn": controller == "MPC (forecast_eval)",
+                "high_budget_refinement_warn": controller == "Local MPC (forecast_eval)",
                 "returned_primary_objective_eur": 1.9,
             },
         )
 
     metrics_df = compare_rollout_metrics(
-        _make_rollout("MPC (oracle_eval)", [0.99, 1.01, 1.00, 1.02]),
-        _make_rollout("MPC (forecast_eval)", [0.94, 1.02, 0.96, 1.06]),
+        _make_rollout("Local MPC (oracle_eval)", [0.99, 1.01, 1.00, 1.02]),
+        _make_rollout("Local MPC (forecast_eval)", [0.94, 1.02, 0.96, 1.06]),
         _make_rollout("DRL (forecast_eval)", [0.98, 1.00, 0.99, 1.01]),
     )
 
     assert list(metrics_df["controller"]) == [
-        "MPC (oracle_eval)",
-        "MPC (forecast_eval)",
+        "Local MPC (oracle_eval)",
+        "Local MPC (forecast_eval)",
         "DRL (forecast_eval)",
     ]
     assert {
@@ -1104,8 +1105,8 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "returned_primary_objective_eur",
         "high_budget_refinement_warn",
     }.issubset(metrics_df.columns)
-    assert metrics_df.loc[metrics_df["controller"] == "MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
-    assert metrics_df.loc[metrics_df["controller"] == "MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
+    assert metrics_df.loc[metrics_df["controller"] == "Local MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
+    assert metrics_df.loc[metrics_df["controller"] == "Local MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
 
 
 def test_build_compare_tables_and_warning_banner_uses_final_dispatch_costs():
@@ -1165,10 +1166,218 @@ def test_build_compare_tables_and_warning_banner_uses_final_dispatch_costs():
     assert "returned/final dispatch" in banner.data
 
 
+def test_plot_shared_forecast_vs_actual_renders_shared_reference_predictions():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+
+    def _rollout(
+        label: str,
+        *,
+        price_pred: list[float],
+        load_pred_shift: float,
+        import_price_pred: list[float] | None = None,
+        price_adder: float = 0.2,
+    ) -> RolloutResult:
+        step_df = pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": price_pred,
+            }
+        )
+        if import_price_pred is not None:
+            step_df["import_price_pred"] = import_price_pred
+        return RolloutResult(
+            step_df=step_df,
+            agent_df=pd.DataFrame(
+                {
+                    "timestamp": list(timestamps.repeat(2)),
+                    "agent_profile": ["A", "B", "A", "B"],
+                    "load": [2.0, 3.0, 2.2, 3.1],
+                    "load_pred": [2.1 + load_pred_shift, 3.1 + load_pred_shift, 2.3 + load_pred_shift, 3.0 + load_pred_shift],
+                    "pv": [0.8, 0.9, 0.7, 1.0],
+                    "pv_pred": [0.7 + load_pred_shift, 0.95 + load_pred_shift, 0.75 + load_pred_shift, 0.98 + load_pred_shift],
+                }
+            ),
+            grid_df=pd.DataFrame(),
+            summary=pd.DataFrame(),
+            meta={
+                "controller": label,
+                "prediction_mode": "normal",
+                "import_price_adder_eur_per_kwh": price_adder,
+            },
+        )
+
+    reference_rollout = _rollout("Local MPC", price_pred=[0.31, 0.39], load_pred_shift=0.0)
+    other_rollout = _rollout("ADMM MPC", price_pred=[0.35, 0.45], load_pred_shift=0.2)
+
+    figure = plot_shared_forecast_vs_actual(reference_rollout, other_rollout)
+
+    assert len(figure.axes) == 3
+    assert all(axis.title.get_fontsize() == pytest.approx(20) for axis in figure.axes)
+    assert figure.axes[0].yaxis.label.get_size() == pytest.approx(18)
+    assert any(label.get_fontsize() == pytest.approx(16) for label in figure.axes[-1].get_xticklabels())
+    assert figure.axes[0].lines[1].get_label() == "Predicted (Local MPC)"
+    assert np.allclose(figure.axes[0].lines[1].get_ydata(), np.asarray([0.51, 0.59], dtype=np.float64))
+
+
+def test_plot_shared_forecast_vs_actual_prefers_import_price_pred_when_present():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+
+    rollout_a = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.10, 0.20],
+                "import_price_pred": [0.30, 0.40],
+            }
+        ),
+        agent_df=pd.DataFrame(
+            {
+                "timestamp": list(timestamps.repeat(2)),
+                "agent_profile": ["A", "B", "A", "B"],
+                "load": [2.0, 3.0, 2.2, 3.1],
+                "load_pred": [2.1, 3.1, 2.3, 3.0],
+                "pv": [0.8, 0.9, 0.7, 1.0],
+                "pv_pred": [0.7, 0.95, 0.75, 0.98],
+            }
+        ),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "ADMM MPC",
+            "prediction_mode": "normal",
+            "import_price_adder_eur_per_kwh": 0.2,
+        },
+    )
+    rollout_b = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.11, 0.21],
+            }
+        ),
+        agent_df=rollout_a.agent_df.copy(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Local MPC",
+            "prediction_mode": "normal",
+            "import_price_adder_eur_per_kwh": 0.2,
+        },
+    )
+
+    figure = plot_shared_forecast_vs_actual(rollout_a, rollout_b)
+
+    predicted_line = figure.axes[0].lines[1]
+    assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
+
+
+def test_plot_shared_forecast_vs_actual_aligns_to_common_time_window():
+    reference_timestamps = pd.date_range("2020-01-01 00:00:00", periods=3, freq="15min")
+    candidate_timestamps = pd.date_range("2020-01-01 00:15:00", periods=2, freq="15min")
+
+    reference_rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": reference_timestamps,
+                "price": [0.20, 0.30, 0.40],
+                "price_pred": [0.21, 0.31, 0.41],
+            }
+        ),
+        agent_df=pd.DataFrame(
+            {
+                "timestamp": list(reference_timestamps.repeat(2)),
+                "agent_profile": ["A", "B", "A", "B", "A", "B"],
+                "load": [1.0, 1.5, 1.1, 1.6, 1.2, 1.7],
+                "load_pred": [1.05, 1.55, 1.15, 1.65, 1.25, 1.75],
+                "pv": [0.2, 0.3, 0.25, 0.35, 0.3, 0.4],
+                "pv_pred": [0.22, 0.32, 0.27, 0.37, 0.33, 0.43],
+            }
+        ),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "ADMM MPC", "prediction_mode": "normal", "import_price_adder_eur_per_kwh": 0.0},
+    )
+    candidate_rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": candidate_timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.35, 0.45],
+            }
+        ),
+        agent_df=pd.DataFrame(
+            {
+                "timestamp": list(candidate_timestamps.repeat(2)),
+                "agent_profile": ["A", "B", "A", "B"],
+                "load": [1.1, 1.6, 1.2, 1.7],
+                "load_pred": [1.2, 1.7, 1.3, 1.8],
+                "pv": [0.25, 0.35, 0.3, 0.4],
+                "pv_pred": [0.28, 0.38, 0.33, 0.43],
+            }
+        ),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "MADRL + No Safety", "prediction_mode": "normal", "import_price_adder_eur_per_kwh": 0.0},
+    )
+
+    figure = plot_shared_forecast_vs_actual(reference_rollout, candidate_rollout)
+
+    actual_line = figure.axes[0].lines[0]
+    predicted_line = figure.axes[0].lines[1]
+    assert len(actual_line.get_xdata()) == 2
+    assert len(predicted_line.get_xdata()) == 2
+    assert np.allclose(actual_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
+
+
+def test_plot_shared_forecast_vs_actual_rejects_mismatched_actual_series():
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    reference_rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.30, 0.40],
+                "price_pred": [0.31, 0.39],
+            }
+        ),
+        agent_df=pd.DataFrame(
+            {
+                "timestamp": list(timestamps.repeat(2)),
+                "agent_profile": ["A", "B", "A", "B"],
+                "load": [2.0, 3.0, 2.2, 3.1],
+                "load_pred": [2.1, 3.1, 2.3, 3.0],
+                "pv": [0.8, 0.9, 0.7, 1.0],
+                "pv_pred": [0.7, 0.95, 0.75, 0.98],
+            }
+        ),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Local MPC", "prediction_mode": "normal"},
+    )
+    mismatched_rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "price": [0.31, 0.40],
+                "price_pred": [0.31, 0.39],
+            }
+        ),
+        agent_df=reference_rollout.agent_df.copy(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "ADMM MPC", "prediction_mode": "normal"},
+    )
+
+    with pytest.raises(ValueError, match="different actual price values"):
+        plot_shared_forecast_vs_actual(reference_rollout, mismatched_rollout)
+
+
 def test_plot_rollout_comparison_dashboard_accepts_three_rollouts():
     metrics_df = pd.DataFrame(
         {
-            "controller": ["MPC (oracle_eval)", "MPC (forecast_eval)", "DRL (forecast_eval)"],
+            "controller": ["Local MPC (oracle_eval)", "Local MPC (forecast_eval)", "DRL (forecast_eval)"],
             "purchase_cost_total": [1.0, 1.2, 0.9],
             "export_subsidy_total": [0.1, 0.1, 0.2],
             "objective_total": [0.9, 1.3, 0.7],
@@ -1403,24 +1612,24 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
 
     assert len(price_fig.axes) == 1
     assert len(price_fig.axes[0].lines) == 2
-    assert price_fig.axes[0].title.get_fontsize() == pytest.approx(18)
-    assert price_fig.axes[0].xaxis.label.get_size() == pytest.approx(16)
-    assert price_fig.axes[0].yaxis.label.get_size() == pytest.approx(16)
-    assert any(label.get_fontsize() == pytest.approx(14) for label in price_fig.axes[0].get_xticklabels())
-    assert any(label.get_fontsize() == pytest.approx(14) for label in price_fig.axes[0].get_yticklabels())
+    assert price_fig.axes[0].title.get_fontsize() == pytest.approx(20)
+    assert price_fig.axes[0].xaxis.label.get_size() == pytest.approx(18)
+    assert price_fig.axes[0].yaxis.label.get_size() == pytest.approx(18)
+    assert any(label.get_fontsize() == pytest.approx(16) for label in price_fig.axes[0].get_xticklabels())
+    assert any(label.get_fontsize() == pytest.approx(16) for label in price_fig.axes[0].get_yticklabels())
     assert len(voltage_fig.axes) == 3
     assert voltage_fig.axes[0].get_legend() is not None
     assert all(axis.get_legend() is None for axis in voltage_fig.axes[1:])
     assert voltage_fig.axes[0].get_shared_y_axes().joined(voltage_fig.axes[0], voltage_fig.axes[1])
-    assert voltage_fig.axes[0].title.get_fontsize() == pytest.approx(18)
-    assert voltage_fig.axes[0].yaxis.label.get_size() == pytest.approx(16)
-    assert all(text.get_fontsize() == pytest.approx(14) for text in voltage_fig.axes[0].get_legend().get_texts())
+    assert voltage_fig.axes[0].title.get_fontsize() == pytest.approx(20)
+    assert voltage_fig.axes[0].yaxis.label.get_size() == pytest.approx(18)
+    assert all(text.get_fontsize() == pytest.approx(16) for text in voltage_fig.axes[0].get_legend().get_texts())
     assert len(net_load_fig.axes) == 3
     assert net_load_fig.axes[0].get_shared_y_axes().joined(net_load_fig.axes[0], net_load_fig.axes[1])
     assert len(power_fig.axes) == 3
     assert all(len(axis.patches) > 0 for axis in power_fig.axes)
     assert power_fig.axes[0].get_shared_y_axes().joined(power_fig.axes[0], power_fig.axes[1])
-    assert all(text.get_fontsize() == pytest.approx(14) for text in power_fig.axes[0].get_legend().get_texts())
+    assert all(text.get_fontsize() == pytest.approx(16) for text in power_fig.axes[0].get_legend().get_texts())
     soc_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "SoC"]
     power_axes = [axis for axis in battery_fig.axes if axis.get_ylabel() == "Battery Power [kW]"]
     assert len(power_axes) == 3
@@ -1574,7 +1783,7 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         grid_df=pd.DataFrame(),
         summary=pd.DataFrame(),
         meta={
-            "controller": "Single-Agent MPC",
+            "controller": "Local MPC",
             "prediction_mode": "normal",
             "import_price_adder_eur_per_kwh": 0.2,
         },
