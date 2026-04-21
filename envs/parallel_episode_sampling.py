@@ -1,12 +1,6 @@
-"""Helpers for diversified episode assignment across parallel env slots."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 import numpy as np
-
-
 def validate_parallel_episode_sampling_mode(mode: str) -> str:
     resolved = str(mode).strip().lower()
     if resolved not in {"unique_active", "per_env_rng"}:
@@ -17,7 +11,6 @@ def validate_parallel_episode_sampling_mode(mode: str) -> str:
         )
     return resolved
 
-
 def validate_wave_done_flags(done_flags: list[bool], *, env_name: str) -> None:
     done_count = int(sum(bool(flag) for flag in done_flags))
     if done_count in {0, len(done_flags)}:
@@ -27,15 +20,12 @@ def validate_wave_done_flags(done_flags: list[bool], *, env_name: str) -> None:
         f"episode boundaries, but got {done_count}/{len(done_flags)} envs done in one step."
     )
 
-
 @dataclass
 class ParallelEpisodeSampler:
-    """Sample one episode index per active env slot."""
 
     num_available_episodes: int
     base_seed: int | None
     num_envs: int
-
     def __post_init__(self) -> None:
         total = int(self.num_available_episodes)
         if total <= 0:

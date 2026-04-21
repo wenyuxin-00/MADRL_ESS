@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils import local_mpc_notebook_helpers as local_mpc_nb
+from scripts.utils import local_mpc_rollout_packages as local_mpc_nb
 
 
 def _make_cfg(
@@ -309,7 +309,7 @@ def test_replay_local_mpc_rollout_package_rejects_solver_fingerprint_mismatch(tm
         )
 
 
-def test_resolve_latest_compatible_local_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
+def test_resolve_exact_local_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -325,7 +325,7 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_returns_exact_d
     prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
     base_dir = local_mpc_nb.save_local_mpc_rollout_package(package, prefix)
 
-    resolved = local_mpc_nb.resolve_latest_compatible_local_mpc_rollout_package_dir(
+    resolved = local_mpc_nb.resolve_exact_local_mpc_rollout_package_dir(
         prefix,
         cfg=cfg,
         prediction_mode="normal",
@@ -335,7 +335,7 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_returns_exact_d
     assert resolved == base_dir.resolve()
 
 
-def test_resolve_latest_compatible_local_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
+def test_resolve_exact_local_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -353,7 +353,7 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_requires_exact_
     local_mpc_nb.save_local_mpc_rollout_package(package, tmp_path / f"{prefix.name}_badsolver")
 
     with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
-        local_mpc_nb.resolve_latest_compatible_local_mpc_rollout_package_dir(
+        local_mpc_nb.resolve_exact_local_mpc_rollout_package_dir(
             prefix,
             cfg=cfg,
             prediction_mode="normal",

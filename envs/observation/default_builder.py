@@ -1,9 +1,5 @@
-"""Default structured observation builder."""
-
 from __future__ import annotations
-
 import numpy as np
-
 from envs.observation.base import ObservationBuilder
 from envs.observation.features import (
     build_adjacency_field,
@@ -11,12 +7,8 @@ from envs.observation.features import (
     resolve_sequence_features,
 )
 from envs.observation.normalization import ObservationNormalizer
-
 _SAFETY_LOCAL_FIELDS = ["soc_raw", "load_raw", "pv_raw", "battery_capacity_kwh", "p_max_kw"]
-
-
 class DefaultObservationBuilder(ObservationBuilder):
-    """Build local, sequence, and adjacency observation fields."""
 
     def __init__(
         self,

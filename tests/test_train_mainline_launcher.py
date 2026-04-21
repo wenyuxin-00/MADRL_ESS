@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from configs import compose_experiment_config, recommended_gpu_fast_num_envs
+from configs.profiles import compose_experiment_config, recommended_gpu_fast_num_envs
 from scripts.run_train_mainline import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 from scripts.utils.madrl_shared_data import ensure_madrl_shared_data

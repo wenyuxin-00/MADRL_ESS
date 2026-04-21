@@ -1,11 +1,7 @@
-"""Notebook-friendly configuration composition utilities."""
-
 from __future__ import annotations
-
 import os
 from pathlib import Path
 from pprint import pprint
-
 from configs.experiment_config import ExperimentConfig
 from envs.grid.deployments import resolve_fixed_battery_spec
 from predictors.artifacts import get_default_lstm_artifact_dir
@@ -16,26 +12,14 @@ from scripts.utils.torch_runtime import (
     resolve_device,
     resolve_runtime_mode,
 )
-
-
 def project_root() -> Path:
     return resolve_project_root()
-
 
 def default_data_dir() -> Path:
     return get_data_root()
 
-
-def make_base_config(data_dir: str | Path | None = None, device=None) -> ExperimentConfig:
-    cfg = ExperimentConfig()
-    cfg.data.data_dir = Path(data_dir) if data_dir is not None else default_data_dir()
-    cfg.runtime.device = resolve_device(device)
-    return cfg
-
-
 def recommended_gpu_fast_num_envs() -> int:
     return min(20, max(8, (os.cpu_count() or 8) - 8))
-
 
 def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentConfig:
     if profile_name == "base":
@@ -51,18 +35,6 @@ def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentC
         cfg.train.updates_per_step = 1
         cfg.train.use_noise_decay = False
         return cfg
-    if profile_name == "fast_train":
-        cpu_workers = max(4, min(12, max(2, (os.cpu_count() or 8) - 2)))
-        cfg.train.train_episodes = 300
-        cfg.train.max_train_steps = None
-        cfg.train.num_envs = cpu_workers
-        cfg.train.vec_env_type = "subproc" if cpu_workers > 1 else "dummy"
-        cfg.train.batch_size = 4096 if resolve_device(cfg.runtime.device).type == "cuda" else 1024
-        cfg.train.buffer_size = 100000
-        cfg.train.update_interval = 1
-        cfg.train.updates_per_step = 1
-        cfg.train.use_noise_decay = True
-        return cfg
     if profile_name == "gpu_fast":
         cfg.train.num_envs = recommended_gpu_fast_num_envs()
         cfg.train.vec_env_type = "subproc" if cfg.train.num_envs > 1 else "dummy"
@@ -74,22 +46,11 @@ def apply_train_profile(cfg: ExperimentConfig, profile_name: str) -> ExperimentC
         return cfg
     raise ValueError(f"Unknown train profile: '{profile_name}'")
 
-
 def apply_model_profile(cfg: ExperimentConfig, family: str) -> ExperimentConfig:
-    cfg.model.family = family
-    if family == "mlp":
+    cfg.model.family = str(family).strip().lower()
+    if cfg.model.family == "mlp":
         return cfg
-    if family == "transformer":
-        cfg.model.hidden_dim = 128
-        cfg.model.transformer_num_heads = 4
-        cfg.model.transformer_num_layers = 1
-        return cfg
-    if family == "graph":
-        cfg.obs.adjacency_type = "fully_connected_no_self"
-        cfg.model.graph_num_layers = 2
-        return cfg
-    raise ValueError(f"Unknown model family: '{family}'")
-
+    raise ValueError(f"Unknown model family: '{family}'. Available: ['mlp']")
 
 def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> ExperimentConfig:
     normalized = str(forecast_type).strip().lower()
@@ -100,23 +61,24 @@ def apply_forecast_profile(cfg: ExperimentConfig, forecast_type: str) -> Experim
         cfg.forecast.lstm_artifact_root = get_default_lstm_artifact_dir()
     return cfg
 
-
 def apply_runtime_profile(cfg: ExperimentConfig, runtime_mode: str) -> ExperimentConfig:
     cfg.runtime.execution_mode = resolve_runtime_mode(runtime_mode)
-    cfg.runtime.allow_tf32 = None
-    cfg.runtime.cudnn_benchmark = None
-    cfg.runtime.cudnn_deterministic = None
-    cfg.runtime.use_deterministic_algorithms = None
-    cfg.runtime.pin_memory = None
-    cfg.runtime.non_blocking_transfers = None
-    cfg.runtime.enable_amp = None
-    cfg.runtime.enable_compile = None
+    for attr in (
+        "allow_tf32",
+        "cudnn_benchmark",
+        "cudnn_deterministic",
+        "use_deterministic_algorithms",
+        "pin_memory",
+        "non_blocking_transfers",
+        "enable_amp",
+        "enable_compile",
+    ):
+        setattr(cfg.runtime, attr, None)
     cfg.runtime.amp_dtype = "bfloat16"
     cfg.runtime.compile_mode = "reduce-overhead"
     cfg.runtime.compile_fullgraph = False
     cfg.runtime.compile_dynamic = False
     return cfg
-
 
 def compose_experiment_config(
     *,
@@ -133,14 +95,13 @@ def compose_experiment_config(
     seed: int = 0,
     require_cuda: bool | None = None,
 ) -> ExperimentConfig:
-    cfg = make_base_config(data_dir=data_dir, device=device)
+    cfg = ExperimentConfig()
+    cfg.data.data_dir = Path(data_dir) if data_dir is not None else default_data_dir()
+    cfg.runtime.device = resolve_device(device)
     apply_train_profile(cfg, profile)
     apply_runtime_profile(cfg, runtime_mode)
     apply_model_profile(cfg, model_family)
-    cfg.algo.name = (
-        "MATD3" if algorithm is None and profile == "gpu_fast" else (algorithm or "MADDPG")
-    )
-
+    cfg.algo.name = algorithm or ("MATD3" if profile == "gpu_fast" else "MADDPG")
     if forecast_type is not None:
         apply_forecast_profile(cfg, forecast_type)
     if vec_env_type is not None:
@@ -154,7 +115,6 @@ def compose_experiment_config(
     if require_cuda is not None:
         cfg.runtime.require_cuda = bool(require_cuda)
     return cfg
-
 
 def _derive_training_budget(cfg: ExperimentConfig) -> dict[str, int | str | None]:
     episode_limit = max(1, int(cfg.env.episode_limit))
@@ -180,7 +140,6 @@ def _derive_training_budget(cfg: ExperimentConfig) -> dict[str, int | str | None
         "budget_source": budget_source,
     }
 
-
 def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
     budget = _derive_training_budget(cfg)
     battery_capacity, max_charge_rate, p_max_kw = resolve_fixed_battery_spec(
@@ -199,7 +158,6 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
         "soc_max": float(cfg.env.soc_max),
         "soc_target": float(cfg.env.soc_target),
     }
-
     summary: dict[str, object] = {
         "algo": cfg.algo.name,
         "model_family": cfg.model.family,
@@ -243,7 +201,6 @@ def summarize_experiment(cfg: ExperimentConfig) -> dict[str, object]:
     if cfg.runtime.execution_mode == STRICT_REPRO_RUNTIME_MODE:
         summary["strict_reproducibility"] = True
     return summary
-
 
 def print_experiment_summary(cfg: ExperimentConfig) -> dict[str, object]:
     summary = summarize_experiment(cfg)

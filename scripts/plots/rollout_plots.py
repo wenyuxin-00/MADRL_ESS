@@ -1,21 +1,14 @@
-"""Plot helpers for rollout diagnostics used by the MADRL notebooks."""
-
 from __future__ import annotations
-
 from typing import Any
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN, IMPORT_PRICE_PRED_COLUMN
-
-
 def plot_voltage_and_net_load_dashboard(
     rollout: Any,
     *,
     title: str | None = None,
 ):
-    """Plot import price, voltage, net load, and per-agent storage state for a rollout."""
     grid_df = rollout.grid_df.copy()
     step_df = rollout.step_df.copy()
     agent_df = rollout.agent_df.copy()
@@ -52,7 +45,6 @@ def plot_voltage_and_net_load_dashboard(
         title or f"{meta.get('controller', 'Rollout')} Import Price, Voltage, Net Load, and Storage State",
         fontsize=14,
     )
-
     timestamps = pd.to_datetime(step_df["timestamp"])
     price_ax.plot(
         timestamps,
@@ -74,7 +66,6 @@ def plot_voltage_and_net_load_dashboard(
     price_ax.set_title("Electricity Import Price")
     price_ax.grid(True, linestyle=":", alpha=0.45)
     price_ax.legend(loc="best")
-
     if not grid_df.empty:
         grid_sort_columns = [column for column in ("episode_idx", "step", "bus_id") if column in grid_df.columns]
         if grid_sort_columns:
@@ -84,7 +75,6 @@ def plot_voltage_and_net_load_dashboard(
         background_color = "#94a3b8"
         highlight_palette = ["#0f766e", "#2563eb", "#dc2626", "#ea580c", "#7c3aed", "#ca8a04"]
         highlight_index = 0
-
         for bus_id, bus_df in bus_groups:
             bus_id = int(bus_id)
             timestamps = pd.to_datetime(bus_df["timestamp"])
@@ -119,7 +109,6 @@ def plot_voltage_and_net_load_dashboard(
     voltage_ax.set_title("Bus Voltage Time Series")
     voltage_ax.grid(True, linestyle=":", alpha=0.45)
     voltage_ax.legend(loc="best")
-
     net_load_ax.plot(
         timestamps,
         np.asarray(step_df.get("base_net_load_total", np.zeros(len(step_df))), dtype=np.float32),
@@ -141,7 +130,6 @@ def plot_voltage_and_net_load_dashboard(
         linewidth=1.7,
         label="Post-action net load",
     )
-
     trafo_limit_kw = meta.get("trafo_limit_kw")
     if trafo_limit_kw is not None and np.isfinite(float(trafo_limit_kw)):
         limit = float(trafo_limit_kw)
@@ -153,7 +141,6 @@ def plot_voltage_and_net_load_dashboard(
     net_load_ax.set_title("Total Net Load Time Series")
     net_load_ax.grid(True, linestyle=":", alpha=0.45)
     net_load_ax.legend(loc="best")
-
     for axis, profile in zip(axes[3:], agent_profiles, strict=False):
         agent_frame = agent_df.loc[agent_df["agent_profile"] == profile]
         if agent_frame.empty:
@@ -163,7 +150,6 @@ def plot_voltage_and_net_load_dashboard(
         battery_power = agent_frame["e_bat"].to_numpy(dtype=np.float32)
         has_bat_req = "e_bat_req" in agent_frame.columns
         battery_power_req = agent_frame["e_bat_req"].to_numpy(dtype=np.float32) if has_bat_req else battery_power
-
         if has_bat_req:
             req_charge = np.clip(battery_power_req, 0.0, None)
             req_discharge = np.clip(battery_power_req, None, 0.0)
@@ -176,7 +162,6 @@ def plot_voltage_and_net_load_dashboard(
         axis.bar(agent_timestamps, discharge, width=0.008, color="#2563eb", alpha=0.7, label="Discharge (exec)")
         axis.set_ylabel(f"{profile}\nP_bat")
         axis.grid(True, linestyle=":", alpha=0.45)
-
         soc_axis = axis.twinx()
         soc_axis.plot(
             agent_timestamps,
@@ -187,7 +172,6 @@ def plot_voltage_and_net_load_dashboard(
         )
         soc_axis.set_ylabel("SoC")
         soc_axis.set_ylim(0.0, 1.0)
-
         handles_1, labels_1 = axis.get_legend_handles_labels()
         handles_2, labels_2 = soc_axis.get_legend_handles_labels()
         axis.legend(handles_1 + handles_2, labels_1 + labels_2, loc="upper right")

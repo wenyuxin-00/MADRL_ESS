@@ -1,13 +1,9 @@
-"""Factory helpers for the Grid MADRL mainline."""
-
 from __future__ import annotations
-
 import json
 import sys
 import warnings
 from pathlib import Path
 from typing import Any
-
 from data.loaders.registry import _resolve_split_dates, build_dataset
 from envs.grid.core.grid_core import GridCore
 from envs.grid.deployments import build_agent_deployments
@@ -18,19 +14,16 @@ from envs.observation.precomputed_builder import PrecomputedObservationBuilder
 from envs.rewards import NormalReward
 from envs.subproc_vec_env import SubprocVecEnv
 from envs.vec_env import DummyVecEnv
-from models import validate_and_finalize_model_config
+from models.assembly import validate_and_finalize_model_config
 from predictors.registry import build_forecaster
 from scripts.train import TrainRunner
 from scripts.utils.madrl_shared_data import load_madrl_shared_data_manifest, select_shared_data_episode_indices
 from scripts.utils.torch_runtime import configure_torch_runtime
-
-
 def _resolve_shared_data_dir(cfg: Any) -> Path | None:
     shared_data_dir = getattr(getattr(cfg, "runtime", None), "shared_data_dir", None)
     if shared_data_dir in (None, ""):
         return None
     return Path(shared_data_dir).resolve()
-
 
 def _shared_split_dir(cfg: Any, split: str) -> Path | None:
     if str(split) not in {"train", "test"}:
@@ -46,10 +39,8 @@ def _shared_split_dir(cfg: Any, split: str) -> Path | None:
         )
     return split_dir
 
-
 def _load_split_manifest(split_dir: Path) -> dict[str, Any]:
     return json.loads((split_dir / "manifest.json").read_text(encoding="utf-8"))
-
 
 def _clear_runtime_split_state(cfg: Any) -> None:
     runtime_cfg = getattr(cfg, "runtime", None)
@@ -58,11 +49,9 @@ def _clear_runtime_split_state(cfg: Any) -> None:
     runtime_cfg.effective_split_controls = None
     runtime_cfg.selected_episode_indices = None
 
-
 def _full_manifest_episode_indices(split_manifest: dict[str, Any]) -> list[int]:
     episodes = list(split_manifest.get("episodes") or [])
     return [int(entry["episode_idx"]) for entry in episodes]
-
 
 def _cfg_runtime_split_payload(
     *,
@@ -86,7 +75,6 @@ def _cfg_runtime_split_payload(
         "window_strategy": str(window_strategy),
     }
 
-
 def _shared_data_metadata(cfg: Any) -> dict[str, Any] | None:
     shared_data_dir = _resolve_shared_data_dir(cfg)
     if shared_data_dir is None:
@@ -105,11 +93,9 @@ def _shared_data_metadata(cfg: Any) -> dict[str, Any] | None:
         },
     }
 
-
 def _subproc_vec_env_is_supported_in_current_process() -> tuple[bool, str | None]:
     main_module = sys.modules.get("__main__")
     main_file = getattr(main_module, "__file__", None)
-
     if "ipykernel" in sys.modules:
         return (
             False,
@@ -124,7 +110,6 @@ def _subproc_vec_env_is_supported_in_current_process() -> tuple[bool, str | None
 
     return True, None
 
-
 def build_env(
     cfg: Any,
     mode: str,
@@ -137,7 +122,6 @@ def build_env(
     split_name = str(mode)
     split_precomputed_dir = _shared_split_dir(cfg, split_name) if split_name in {"train", "test"} else None
     shared_split_manifest: dict[str, Any] | None = None
-
     if split_precomputed_dir is not None:
         shared_split_manifest = _load_split_manifest(split_precomputed_dir)
         split_controls = dict(shared_split_manifest.get("split_controls") or {})
@@ -215,10 +199,8 @@ def build_env(
     )
     return env
 
-
 def _build_dummy_train_vec_env(cfg: Any, *, seed: int | None = None) -> Any:
     train_dataset = build_dataset(cfg, mode="train")
-
     def make_train_env():
         return build_env(cfg, mode="train", dataset=train_dataset)
 
@@ -228,7 +210,6 @@ def _build_dummy_train_vec_env(cfg: Any, *, seed: int | None = None) -> Any:
         seed=seed,
         parallel_episode_sampling=str(getattr(cfg.train, "parallel_episode_sampling", "unique_active")),
     )
-
 
 def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
     if cfg.train.vec_env_type == "dummy":
@@ -250,12 +231,10 @@ def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
         f"Unknown train.vec_env_type '{cfg.train.vec_env_type}', expected 'dummy' or 'subproc'."
     )
 
-
 def _finalize_runtime_from_env(cfg: Any, env: Any) -> None:
     cfg.runtime.observation_schema = dict(env.observation_schema)
     cfg.runtime.observation_layout = dict(env.observation_layout)
     cfg.runtime.action_dim = int(env.action_space[0].shape[0])
-
 
 def build_train_runner(
     cfg: Any,
@@ -266,14 +245,11 @@ def build_train_runner(
     cfg.runtime.seed = int(seed)
     configure_torch_runtime(cfg, seed=seed)
     validate_and_finalize_model_config(cfg)
-
     train_env = _build_train_vec_env(cfg, seed=seed)
     eval_dataset = build_dataset(cfg, mode="test")
     eval_env = build_env(cfg, mode="test", dataset=eval_dataset)
-
     _finalize_runtime_from_env(cfg, eval_env)
     validate_and_finalize_model_config(cfg)
-
     runner = TrainRunner(
         cfg,
         train_env=train_env,
@@ -284,13 +260,3 @@ def build_train_runner(
     )
     runner.shared_data_metadata = _shared_data_metadata(cfg)
     return runner
-
-
-__all__ = [
-    "_build_dummy_train_vec_env",
-    "_build_train_vec_env",
-    "_finalize_runtime_from_env",
-    "_subproc_vec_env_is_supported_in_current_process",
-    "build_env",
-    "build_train_runner",
-]

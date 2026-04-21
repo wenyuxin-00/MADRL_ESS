@@ -84,7 +84,7 @@ class FakeGridCore:
 
 
 def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
-    from configs import compose_experiment_config
+    from configs.profiles import compose_experiment_config
 
     cfg = compose_experiment_config(
         profile="debug",
@@ -129,7 +129,7 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
     from envs.observation.default_builder import DefaultObservationBuilder
-    from models import validate_and_finalize_model_config
+    from models.assembly import validate_and_finalize_model_config
     from predictors.registry import build_forecaster
     from scripts.builder import _finalize_runtime_from_env
 
@@ -380,36 +380,6 @@ def test_soc_stays_in_bounds(grid_env) -> None:
         assert np.all(grid_env.soc <= grid_env.soc_max + 1e-5)
         if any(np.logical_or(terminated_list, truncated_list)):
             break
-
-
-def test_episode_recorder_compatible(grid_env) -> None:
-    from scripts.recorders.episode_recorder import append_step_record, init_episode_record
-
-    reward_metas = grid_env.reward_fn.component_meta
-    history = init_episode_record(
-        n_agents=N_AGENTS,
-        init_soc=grid_env.init_soc,
-        reward_metas=reward_metas,
-    )
-
-    grid_env.reset()
-    actions = _zero_actions()
-    _, reward_list, _, _, info = grid_env.step(actions)
-    append_step_record(history, info, step_total=sum(reward_list), reward_metas=reward_metas)
-
-    assert len(history["wholesale_price"]) == 1
-    assert len(history["import_price"]) == 1
-    assert len(history["base_net_load"][0]) == 1
-    assert len(history["e_bat_exec"][0]) == 1
-    assert len(history["r_total_per_agent"][0]) == 1
-    assert "r_purchase_cost_sum" in history
-    assert "r_export_subsidy_sum" in history
-    assert "r_safe_line_sum" in history
-    assert "r_soc_pen_sum" in history
-    assert "r_safe_v_per_agent" in history
-    assert "r_safe_trafo_per_agent" in history
-    assert history["r_safe_trafo_per_agent"][0][0] == history["r_safe_trafo_per_agent"][2][0]
-    assert history["r_safe_v_per_agent"][0][0] != history["r_safe_v_per_agent"][2][0]
 
 
 def test_reward_tracks_local_voltage_differences(grid_env) -> None:

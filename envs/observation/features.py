@@ -1,13 +1,8 @@
-"""Observation feature registry."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Callable
-
 import numpy as np
 import pandas as pd
-
 from envs.observation.feature_blocks import (
     broadcast_scalar_feature,
     build_adjacency,
@@ -17,8 +12,6 @@ from envs.observation.feature_blocks import (
     pad_sequence_2d,
     reshape_agent_scalar_feature,
 )
-
-
 @dataclass(frozen=True)
 class ObservationFeatureSpec:
     name: str
@@ -27,7 +20,6 @@ class ObservationFeatureSpec:
     scope: str
     builder: Callable
     description: str = ""
-
     def field_name(self) -> str:
         return self.name if self.group == "local" else f"{self.name}_seq"
 
@@ -53,42 +45,33 @@ class ObservationFeatureSpec:
             "description": self.description,
         }
 
-
 LOCAL_FEATURES: dict[str, ObservationFeatureSpec] = {}
 SEQUENCE_FEATURES: dict[str, ObservationFeatureSpec] = {}
-
-
 def register_local_feature(spec: ObservationFeatureSpec) -> None:
     if spec.group != "local":
         raise ValueError("register_local_feature only accepts group='local' features.")
     LOCAL_FEATURES[spec.name] = spec
-
 
 def register_sequence_feature(spec: ObservationFeatureSpec) -> None:
     if spec.group != "sequence":
         raise ValueError("register_sequence_feature only accepts group='sequence' features.")
     SEQUENCE_FEATURES[spec.name] = spec
 
-
 def get_local_feature_spec(name: str) -> ObservationFeatureSpec:
     if name not in LOCAL_FEATURES:
         raise ValueError(f"Unknown local feature '{name}', available: {list(LOCAL_FEATURES)}")
     return LOCAL_FEATURES[name]
-
 
 def get_sequence_feature_spec(name: str) -> ObservationFeatureSpec:
     if name not in SEQUENCE_FEATURES:
         raise ValueError(f"Unknown sequence feature '{name}', available: {list(SEQUENCE_FEATURES)}")
     return SEQUENCE_FEATURES[name]
 
-
 def resolve_local_features(names: list[str]) -> list[ObservationFeatureSpec]:
     return [get_local_feature_spec(name) for name in names]
 
-
 def resolve_sequence_features(names: list[str]) -> list[ObservationFeatureSpec]:
     return [get_sequence_feature_spec(name) for name in names]
-
 
 def _current_timestamp_value(env) -> str:
     timestamps = list(dict(getattr(env, "episode_meta", {})).get("timestamps") or [])
@@ -96,7 +79,6 @@ def _current_timestamp_value(env) -> str:
         return str(timestamps[int(env.cur_step)])
     fallback = pd.Timestamp("2000-01-01 00:00:00+00:00") + pd.Timedelta(minutes=15 * int(env.cur_step))
     return str(fallback)
-
 
 def _history_timestamps(env) -> list[str]:
     if hasattr(env, "get_signal_history_timestamps"):
@@ -106,7 +88,6 @@ def _history_timestamps(env) -> list[str]:
         return []
     end_idx = max(0, int(env.cur_step) + 1)
     return [str(timestamp) for timestamp in timestamps[:end_idx]]
-
 
 def _current_shared_signal_feature(signal_name: str, description: str) -> ObservationFeatureSpec:
     return ObservationFeatureSpec(
@@ -118,7 +99,6 @@ def _current_shared_signal_feature(signal_name: str, description: str) -> Observ
         description=description,
     )
 
-
 def _current_per_agent_signal_feature(signal_name: str, description: str) -> ObservationFeatureSpec:
     return ObservationFeatureSpec(
         name=signal_name,
@@ -128,7 +108,6 @@ def _current_per_agent_signal_feature(signal_name: str, description: str) -> Obs
         builder=lambda env, _: reshape_agent_scalar_feature(env.get_signal_step(signal_name)),
         description=description,
     )
-
 
 def _shared_signal_sequence_feature(
     signal_name: str,
@@ -155,7 +134,6 @@ def _shared_signal_sequence_feature(
         description=description,
     )
 
-
 def _per_agent_signal_sequence_feature(
     signal_name: str,
     description: str,
@@ -180,7 +158,6 @@ def _per_agent_signal_sequence_feature(
         builder=builder,
         description=description,
     )
-
 
 register_local_feature(
     ObservationFeatureSpec(
@@ -215,7 +192,6 @@ register_local_feature(
         description="Current battery state of charge per agent.",
     )
 )
-
 register_sequence_feature(
     _shared_signal_sequence_feature("wholesale_price", "Future shared wholesale price window.", use_forecaster=True)
 )
@@ -225,7 +201,5 @@ register_sequence_feature(
 register_sequence_feature(
     _per_agent_signal_sequence_feature("pv", "Future per-agent PV window.", use_forecaster=True)
 )
-
-
 def build_adjacency_field(n_agents: int, adjacency_type: str) -> np.ndarray:
     return build_adjacency(n_agents, adjacency_type)

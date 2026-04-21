@@ -29,6 +29,7 @@ def _has_working_gurobi_license() -> bool:
 
 HAS_WORKING_GUROBI_LICENSE = _has_working_gurobi_license()
 
+from configs.profiles import summarize_experiment
 from configs.experiment_config import ExperimentConfig
 from scripts.utils.grid_notebook_workflow import (
     FORECAST_EVAL_MODE,
@@ -40,12 +41,10 @@ from scripts.utils.grid_notebook_workflow import (
     build_compare_economic_table,
     build_compare_safety_table,
     build_compare_warning_banner,
-    build_trafo_diagnostic_table,
     compare_rollout_metrics,
     collect_local_mpc_rollout,
     collect_controller_rollout,
     collect_global_full_horizon_rollout,
-    collect_global_mpc_rollout,
     _get_local_mpc_solver,
     load_training_run_bundle,
     normalize_date_input,
@@ -60,14 +59,12 @@ from scripts.utils.grid_notebook_workflow import (
     plot_voltage_profile_comparison,
     resolve_evaluation_mode,
     resolve_forecast_backend,
-    summarize_trafo_diagnostics,
     validate_compare_model_bundles,
 )
 from scripts.utils.forecast_shared_preset import (
     get_managed_lstm_forecast_controls,
     merge_managed_forecast_controls,
 )
-from scripts.utils.experiment_notebook_utils import summarize_cfg
 from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
 
@@ -325,7 +322,7 @@ def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
         test_year=2019,
     )
 
-    summary = summarize_cfg(cfg)
+    summary = summarize_experiment(cfg)
 
     assert summary["battery"]["mode"] == "fixed"
     assert summary["battery"]["battery_capacity"] == [10.0, 12.0]
@@ -869,98 +866,6 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
     assert stats["solver_reuse_count"] == pytest.approx(1.0)
 
 
-def test_collect_global_mpc_rollout_uses_controller_builder(tmp_path, monkeypatch):
-    case_dir = make_case_dir(tmp_path, "grid_rollout_global_mpc")
-    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
-
-    recorded_modes: list[str] = []
-
-    class _DummyController:
-        apply_action_penalty = False
-
-        def __init__(self, env, local_cfg):
-            self.env = env
-            self.cfg = local_cfg
-
-        def reset(self):
-            return None
-
-        def act(self, obs, deterministic=True):
-            del obs, deterministic
-            return [np.array([0.0, 1.0], dtype=np.float32) for _ in range(self.env.n)]
-
-    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
-        assert controller is None
-        assert action_fn is None
-        assert controller_builder is not None
-        recorded_modes.append(str(local_cfg.forecast.type))
-
-        class _DummyEnv:
-            n = 2
-
-        built = controller_builder(_DummyEnv())
-        assert isinstance(built, _DummyController)
-        assert built.cfg is local_cfg
-
-        return RolloutResult(
-            step_df=pd.DataFrame(
-                {
-                    "misocp_fallback": [0.0],
-                    "timestamp": [pd.Timestamp("2020-01-01 00:00:00")],
-                }
-            ),
-            agent_df=pd.DataFrame(),
-            grid_df=pd.DataFrame(),
-            summary=pd.DataFrame(),
-            meta={
-                "controller": label,
-                "controller_diagnostic_log": [
-                    {
-                        "controller": label,
-                        "episode_idx": 0,
-                        "step": 0,
-                        "timestamp": pd.Timestamp("2020-01-01 00:00:00"),
-                        "misocp_fallback": 0.0,
-                        "misocp_time_limit_feasible": 0.0,
-                        "solve_time_sec": 0.1,
-                        "root_p_kw": 1.0,
-                        "pp_root_p_kw": 1.0,
-                        "misocp_vm_pu": np.array([1.0, 0.9995], dtype=np.float32),
-                        "pp_vm_pu": np.array([1.0, 0.9994], dtype=np.float32),
-                        "misocp_line_loading_pct": np.array([10.0], dtype=np.float32),
-                        "pp_line_loading_pct": np.array([10.1], dtype=np.float32),
-                        "misocp_trafo_loading_pct": np.array([12.0], dtype=np.float32),
-                        "pp_trafo_loading_pct": np.array([12.1], dtype=np.float32),
-                    }
-                ],
-            },
-        )
-
-    monkeypatch.setattr(
-        "scripts.utils.grid_notebook_workflow.collect_controller_rollout",
-        _fake_collect_controller_rollout,
-    )
-    monkeypatch.setattr("controllers.mpc.GlobalSOCPMPCController", _DummyController)
-
-    perfect_rollout = collect_global_mpc_rollout(
-        cfg,
-        prediction_mode="perfect",
-        label="Global SOCP-MPC + Perfect Forecast",
-    )
-
-    assert perfect_rollout.meta["controller"] == "Global SOCP-MPC + Perfect Forecast"
-    assert recorded_modes == ["perfect"]
-    assert "misocp_validation_df" in perfect_rollout.meta
-    assert isinstance(perfect_rollout.meta["misocp_validation_df"], pd.DataFrame)
-
-    with pytest.raises(ValueError, match="prediction_mode='perfect'"):
-        collect_global_mpc_rollout(
-            cfg,
-            prediction_mode="normal",
-            label="Global SOCP-MPC + LSTM Forecast",
-        )
-
-
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_collect_global_full_horizon_rollout_reports_continuous_soc_mode(tmp_path):
     case_dir = make_case_dir(tmp_path, "grid_rollout_global_oracle")
@@ -1450,130 +1355,6 @@ def test_plot_power_balance_bars_accepts_rollout_with_balance_columns():
 
     figure = plot_power_balance_bars(rollout)
     assert len(figure.axes) == 1
-
-
-def test_build_trafo_diagnostic_table_highlights_reverse_flow_root_cause():
-    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
-    rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "episode_idx": [0, 0, 0],
-                "step": [0, 1, 2],
-                "timestamp": timestamps,
-                "base_net_load_total": [-7.0, -6.0, 5.0],
-                "net_load_total": [-3.5, -5.5, 3.0],
-                "load_total": [4.0, 4.0, 8.0],
-                "pv_raw_total": [11.0, 10.0, 1.0],
-                "pv_curtail_total": [2.0, 0.2, 0.0],
-                "grid_import_total": [0.0, 0.0, 3.0],
-                "grid_export_total": [3.5, 5.5, 0.0],
-                "battery_charge_total": [1.5, 0.1, 0.0],
-                "battery_discharge_total": [0.0, 0.0, 2.0],
-                "trafo_penalty_total": [4.0, 6.0, 1.5],
-                "psi_trafo_raw": [0.4, 0.6, 0.15],
-                "trafo_loading_pct_max": [120.0, 128.0, 112.0],
-                "n_trafo_violations": [1, 1, 1],
-                "projector_adjustment_kw_total": [3.0, 0.1, 2.5],
-                "battery_request_gap_kw_total": [1.5, 0.05, 1.5],
-                "pv_curtail_request_gap_kw_total": [1.5, 0.05, 1.0],
-                "controller_action_gap_total": [0.8, 0.02, 0.5],
-                "voltage_penalty_total": [0.1, 0.1, 0.0],
-                "line_penalty_total": [0.0, 0.0, 0.2],
-            }
-        ),
-        agent_df=pd.DataFrame(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "DRL (forecast_eval)", "trafo_loading_limit_pct": 100.0},
-    )
-
-    diagnostic_df = build_trafo_diagnostic_table(rollout, top_k=2)
-
-    assert list(diagnostic_df["step"]) == [1, 0]
-    assert diagnostic_df.loc[0, "dominant_regime"] == "reverse_flow_export"
-    assert "projection barely added charging or curtailment" in diagnostic_df.loc[0, "cause_hint"]
-    assert diagnostic_df.loc[1, "projector_adjustment_kw_total"] == pytest.approx(3.0)
-
-
-def test_build_trafo_diagnostic_table_backfills_psi_from_train_result_weight():
-    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
-    rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "episode_idx": [0, 0],
-                "step": [0, 1],
-                "timestamp": timestamps,
-                "base_net_load_total": [-4.0, -2.0],
-                "net_load_total": [-1.0, -0.5],
-                "load_total": [3.0, 3.0],
-                "pv_raw_total": [7.0, 5.0],
-                "pv_curtail_total": [1.0, 0.5],
-                "grid_import_total": [0.0, 0.0],
-                "grid_export_total": [1.0, 0.5],
-                "battery_charge_total": [2.0, 1.0],
-                "battery_discharge_total": [0.0, 0.0],
-                "trafo_penalty_total": [4.0, 2.0],
-            }
-        ),
-        agent_df=pd.DataFrame(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "DRL (forecast_eval)"},
-    )
-    train_result = {
-        "experiment_controls": {"reward_controls": {"w_trafo_pen": 10.0}},
-        "safety_summary": {"enabled": True},
-    }
-
-    diagnostic_df = build_trafo_diagnostic_table(rollout, train_result=train_result, top_k=2)
-
-    assert diagnostic_df.loc[0, "rank_metric"] == "psi_trafo_raw"
-    assert diagnostic_df.loc[0, "psi_trafo_raw"] == pytest.approx(0.4)
-    assert diagnostic_df.loc[1, "psi_trafo_raw"] == pytest.approx(0.2)
-
-
-def test_summarize_trafo_diagnostics_reports_projection_reduction():
-    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
-    rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "episode_idx": [0, 0, 0],
-                "step": [0, 1, 2],
-                "timestamp": timestamps,
-                "base_net_load_total": [-7.0, -6.0, 5.0],
-                "net_load_total": [-3.5, -5.5, 3.0],
-                "load_total": [4.0, 4.0, 8.0],
-                "pv_raw_total": [11.0, 10.0, 1.0],
-                "pv_curtail_total": [2.0, 0.2, 0.0],
-                "grid_import_total": [0.0, 0.0, 3.0],
-                "grid_export_total": [3.5, 5.5, 0.0],
-                "battery_charge_total": [1.5, 0.1, 0.0],
-                "battery_discharge_total": [0.0, 0.0, 2.0],
-                "trafo_penalty_total": [4.0, 6.0, 1.5],
-                "psi_trafo_raw": [0.4, 0.6, 0.15],
-                "projector_adjustment_kw_total": [3.0, 0.1, 2.5],
-            }
-        ),
-        agent_df=pd.DataFrame(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "DRL (forecast_eval)"},
-    )
-    train_result = {
-        "safety_summary": {
-            "enabled": True,
-            "projected_fraction": 0.72,
-            "mean_pre_projection_violation": 0.8,
-            "mean_post_projection_violation": 0.2,
-        }
-    }
-
-    summary = summarize_trafo_diagnostics(rollout, train_result=train_result, top_k=3)
-
-    assert summary["dominant_regime_top_k"] == "reverse_flow_export"
-    assert summary["projected_fraction"] == pytest.approx(0.72)
-    assert summary["projector_violation_reduction_pct"] == pytest.approx(75.0)
-    assert "reverse-flow/export driven" in summary["diagnosis"]
 
 
 def test_multi_rollout_compare_helpers_render_expected_row_counts():

@@ -1,22 +1,14 @@
-"""Processed prosumer episode dataset loader."""
-
 from __future__ import annotations
-
 from datetime import date
 from pathlib import Path
 from typing import Sequence
-
 import numpy as np
 import pandas as pd
-
 from data.loaders.base import BaseEpisodeDataset
 from data.loaders.constants import DEFAULT_PROCESSED_SUBDIR, PROSUMER_PROFILE_ALLOWLIST, TZ_LOCAL
-
 AVAILABLE_AGENT_PROFILES = tuple(PROSUMER_PROFILE_ALLOWLIST)
 VALID_LOAD_COMPONENTS = ("household", "heatpump")
 VALID_PV_REFERENCES = ("east", "south", "west")
-
-
 def _resolve_dataset_dir(data_dir: str | Path) -> Path:
     root = Path(data_dir)
     candidates = [
@@ -29,12 +21,10 @@ def _resolve_dataset_dir(data_dir: str | Path) -> Path:
             return candidate
     return root / DEFAULT_PROCESSED_SUBDIR
 
-
 def _parse_optional_local_date(value: str | date | None) -> date | None:
     if value in (None, ""):
         return None
     return pd.Timestamp(value).date()
-
 
 def _coerce_scale_vector(
     scale: Sequence[float] | float | None,
@@ -58,9 +48,7 @@ def _coerce_scale_vector(
         raise ValueError(f"{name} must be non-negative, got {values.tolist()}.")
     return values.astype(np.float32)
 
-
 class ProsumerDataset(BaseEpisodeDataset):
-    """Load multi-agent processed prosumer episodes."""
 
     def __init__(
         self,
@@ -97,13 +85,11 @@ class ProsumerDataset(BaseEpisodeDataset):
         self.load_scale = _coerce_scale_vector(load_scale, name="load_scale", n_agents=self.n_agents)
         self.pv_scale = _coerce_scale_vector(pv_scale, name="pv_scale", n_agents=self.n_agents)
         self.node_ids = list(node_ids) if node_ids is not None else list(range(self.n_agents))
-
         self._signals: dict[str, np.ndarray] = {}
         self._timestamps: pd.Series | None = None
         self._meta_template: dict[str, object] = {}
         self._episode_slices: list[tuple[int, int, int]] = []
         self._num_episodes = 0
-
         self._validate_init_args()
         self._load()
 
@@ -180,14 +166,12 @@ class ProsumerDataset(BaseEpisodeDataset):
         local_dates = timestamps.dt.date
         year_mask = (timestamps.dt.year == self.year).to_numpy(dtype=bool)
         exclude_mask = self._exclude_date_mask(local_dates)
-
         active_mask = year_mask.copy()
         if self.start_date is not None:
             active_mask &= (local_dates >= self.start_date).to_numpy(dtype=bool)
         if self.end_date is not None:
             active_mask &= (local_dates <= self.end_date).to_numpy(dtype=bool)
         active_mask &= ~exclude_mask
-
         if self.history_warmup_steps > 0:
             accessible_mask = year_mask & ~exclude_mask
         else:
@@ -283,7 +267,6 @@ class ProsumerDataset(BaseEpisodeDataset):
         base_timestamps = load_frame["timestamp"].reset_index(drop=True)
         wholesale_price = self._load_price(base_timestamps)
         pv, pv_peak_kw = self._load_pv(base_timestamps)
-
         load = load_frame.loc[:, self.agent_profiles].to_numpy(dtype=np.float32)
         if load.shape != pv.shape:
             raise ValueError(f"Load and PV shapes must match, got {load.shape} vs {pv.shape}")
@@ -325,7 +308,6 @@ class ProsumerDataset(BaseEpisodeDataset):
                 for component in component_frames
             },
         }
-
         self._episode_slices = []
         total_steps = len(base_timestamps)
         if total_steps <= 0:
@@ -347,7 +329,6 @@ class ProsumerDataset(BaseEpisodeDataset):
             if int(accessible_source_positions[idx]) != int(accessible_source_positions[idx - 1]) + 1:
                 contiguous_accessible_starts.append(idx)
         contiguous_accessible_starts.append(len(accessible_source_positions))
-
         for seg_idx in range(len(contiguous_accessible_starts) - 1):
             seg_start = contiguous_accessible_starts[seg_idx]
             seg_end = contiguous_accessible_starts[seg_idx + 1]
@@ -425,9 +406,3 @@ class ProsumerDataset(BaseEpisodeDataset):
                 **self._meta_template,
             },
         }
-
-
-__all__ = [
-    "AVAILABLE_AGENT_PROFILES",
-    "ProsumerDataset",
-]

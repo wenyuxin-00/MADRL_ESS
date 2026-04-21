@@ -1,11 +1,6 @@
-"""Fixed deployment defaults for the rural1 SimBench feeder."""
-
 from __future__ import annotations
-
 from envs.grid.deployments import AgentDeployment
-
 RURAL1_PROSUMER_BUS_IDS: list[int] = [10, 6, 12, 4, 2]
-
 RURAL1_AGENT_DEPLOYMENTS: list[AgentDeployment] = [
     AgentDeployment(
         bus_id=10,
@@ -52,9 +47,4 @@ RURAL1_AGENT_DEPLOYMENTS: list[AgentDeployment] = [
         soc_max=0.95,
         efficiency=0.95,
     ),
-]
-
-__all__ = [
-    "RURAL1_AGENT_DEPLOYMENTS",
-    "RURAL1_PROSUMER_BUS_IDS",
 ]

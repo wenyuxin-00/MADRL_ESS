@@ -1,28 +1,18 @@
-"""Canonical price protocol helpers shared across data, env, MPC, and reports."""
-
 from __future__ import annotations
-
 from typing import Iterable, Mapping, Sequence
-
 import numpy as np
-
 PRICE_PROTOCOL_VERSION = 1
-
 LEGACY_PRICE_SIGNAL = "price"
 LEGACY_PRICE_SEQ_FIELD = "price_seq"
 LEGACY_PRICE_PRED_COLUMN = "price_pred"
-
 WHOLESALE_PRICE_SIGNAL = "wholesale_price"
 WHOLESALE_PRICE_SEQ_FIELD = "wholesale_price_seq"
 WHOLESALE_PRICE_PRED_COLUMN = "wholesale_price_pred"
-
 IMPORT_PRICE_COLUMN = "import_price"
 IMPORT_PRICE_SEQ_FIELD = "import_price_seq"
 IMPORT_PRICE_PRED_COLUMN = "import_price_pred"
-
 IMPORT_PRICE_MARKUP_KEY = "import_price_markup_eur_per_kwh"
 DEFAULT_IMPORT_PRICE_MARKUP_EUR_PER_KWH = 0.20
-
 LEGACY_PRICE_PROTOCOL_KEYS = frozenset(
     {
         LEGACY_PRICE_SIGNAL,
@@ -31,19 +21,14 @@ LEGACY_PRICE_PROTOCOL_KEYS = frozenset(
         "import_price_adder_eur_per_kwh",
     }
 )
-
-
 class PriceProtocolError(ValueError):
-    """Base class for price-protocol failures."""
-
+    pass
 
 class LegacyPriceSchemaError(PriceProtocolError):
-    """Raised when old price schema keys are encountered on internal interfaces."""
-
+    pass
 
 class PriceProtocolMismatchError(PriceProtocolError):
-    """Raised when a cached payload/artifact uses a different price protocol version."""
-
+    pass
 
 def normalize_internal_signal_name(signal_name: str) -> str:
     normalized = str(signal_name).strip().lower()
@@ -54,7 +39,6 @@ def normalize_internal_signal_name(signal_name: str) -> str:
         )
     return normalized
 
-
 def derive_import_price(
     wholesale_price: float | np.ndarray,
     *,
@@ -62,14 +46,12 @@ def derive_import_price(
 ) -> float | np.ndarray:
     return np.asarray(wholesale_price, dtype=np.float32) + np.float32(markup_eur_per_kwh)
 
-
 def derive_import_price_seq(
     wholesale_price_seq: Sequence[float] | np.ndarray,
     *,
     markup_eur_per_kwh: float,
 ) -> np.ndarray:
     return np.asarray(wholesale_price_seq, dtype=np.float32).reshape(-1) + np.float32(markup_eur_per_kwh)
-
 
 def get_import_price_markup(
     cfg_or_reward: object | None,
@@ -81,11 +63,9 @@ def get_import_price_markup(
     reward_cfg = getattr(cfg_or_reward, "reward", cfg_or_reward)
     return float(getattr(reward_cfg, IMPORT_PRICE_MARKUP_KEY, default))
 
-
 def detect_legacy_price_schema_keys(keys: Iterable[object]) -> list[str]:
     normalized = {str(key) for key in keys}
     return sorted(str(key) for key in LEGACY_PRICE_PROTOCOL_KEYS if str(key) in normalized)
-
 
 def assert_no_legacy_price_schema(keys: Iterable[object], *, context: str) -> None:
     legacy_keys = detect_legacy_price_schema_keys(keys)
@@ -96,18 +76,4 @@ def assert_no_legacy_price_schema(keys: Iterable[object], *, context: str) -> No
             f"'{WHOLESALE_PRICE_PRED_COLUMN}', '{IMPORT_PRICE_COLUMN}', "
             f"'{IMPORT_PRICE_SEQ_FIELD}', '{IMPORT_PRICE_PRED_COLUMN}', and "
             f"'{IMPORT_PRICE_MARKUP_KEY}' instead."
-        )
-
-
-def assert_price_protocol_version(
-    payload: Mapping[str, object],
-    *,
-    context: str,
-    field_name: str = "price_protocol_version",
-) -> None:
-    actual_version = payload.get(field_name)
-    if int(actual_version) != int(PRICE_PROTOCOL_VERSION):
-        raise PriceProtocolMismatchError(
-            f"{context} uses unsupported price protocol version: "
-            f"expected={PRICE_PROTOCOL_VERSION}, actual={actual_version!r}."
         )

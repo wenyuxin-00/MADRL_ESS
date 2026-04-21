@@ -1,12 +1,7 @@
-"""Grid-aware multi-agent storage environment."""
-
 from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
-
 import numpy as np
-
 try:
     import gymnasium as gym
     from gymnasium import spaces
@@ -25,13 +20,9 @@ from scripts.utils.price_protocol import (
     derive_import_price,
     get_import_price_markup,
 )
-
-
 class GridEnv(gym.Env):
-    """Multi-agent storage environment with power-flow constraints."""
 
     metadata = {"render_modes": []}
-
     def __init__(
         self,
         cfg: Any,
@@ -47,7 +38,6 @@ class GridEnv(gym.Env):
         super().__init__()
         self.cfg = cfg
         self.mode = mode
-
         env_cfg = cfg.env
         self.n = int(env_cfg.num_agents)
         self.episode_length = int(env_cfg.episode_limit)
@@ -70,7 +60,6 @@ class GridEnv(gym.Env):
         runtime_seed = getattr(getattr(cfg, "runtime", None), "seed", None)
         self._default_seed = None if runtime_seed is None else int(runtime_seed)
         self._seeded_once = False
-
         self.soc_min = float(env_cfg.soc_min)
         self.soc_max = float(env_cfg.soc_max)
         self.soc_target = float(env_cfg.soc_target)
@@ -79,31 +68,23 @@ class GridEnv(gym.Env):
                 f"Invalid SoC range: soc_min={self.soc_min}, soc_max={self.soc_max}."
             )
         self.init_soc = float(np.clip(self.init_soc, self.soc_min, self.soc_max))
-
         self._grid_cfg = cfg.grid
-
         from envs.rewards import NormalReward
-
         self.reward_fn = reward_fn if reward_fn is not None else NormalReward(cfg)
         self.import_price_markup_eur_per_kwh = get_import_price_markup(cfg)
-
         if dataset is None:
             from data.loaders.registry import build_dataset
-
             if data_path is not None:
                 cfg.data.data_dir = str(Path(data_path).parent)
             dataset = build_dataset(cfg, mode=mode)
         self._dataset = dataset
         if forecaster is None and precomputed_data_dir is None:
             from predictors.oracle import PerfectForecaster
-
             forecaster = PerfectForecaster()
         self.forecaster = forecaster
-
         if obs_builder is None:
             from envs.observation.default_builder import DefaultObservationBuilder
             from envs.observation.normalization import build_observation_normalizer
-
             obs_builder = DefaultObservationBuilder(
                 local_features=cfg.obs.local_features,
                 sequence_features=cfg.obs.sequence_features,
@@ -115,20 +96,16 @@ class GridEnv(gym.Env):
             getattr(cfg.obs, "normalization_enabled", False)
         ):
             from envs.observation.normalization import build_observation_normalizer
-
             obs_builder.normalizer = build_observation_normalizer(cfg)
         self.obs_builder = obs_builder
         self.observation_schema = self.obs_builder.get_schema(self.n)
         self.observation_layout = self.obs_builder.get_layout(self.n)
-
         if grid_core is None:
             raise ValueError("GridEnv requires an attached GridCore instance.")
         self._grid_core = grid_core
-
         self.num_available_episodes = self._dataset.num_episodes()
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
-
         self.signals: dict[str, np.ndarray] = {}
         self.history_signals: dict[str, np.ndarray] = {}
         self.history_timestamps: list[str] = []
@@ -148,7 +125,6 @@ class GridEnv(gym.Env):
         self.ep_pv = np.zeros((self.episode_length, self.n), dtype=np.float32)
         self._local_mpc_solver_cache: dict[tuple[object, ...], Any] = {}
         self._local_mpc_stats: dict[str, float] = {}
-
         self.agent_c_bat = (
             self._fixed_capacity_kwh.copy()
             if self._fixed_capacity_kwh is not None
@@ -163,9 +139,7 @@ class GridEnv(gym.Env):
         self.agent_e_max = (self.soc_max * self.agent_c_bat).astype(np.float32)
         self.e_min = self.agent_e_min.copy()
         self.e_max = self.agent_e_max.copy()
-
         self.vm_pu = np.ones(1, dtype=np.float32)
-
         self.action_space = [
             spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
             for _ in range(self.n)
@@ -403,7 +377,6 @@ class GridEnv(gym.Env):
         self._last_episode_idx = int(episode_idx)
         self.cur_step = 0
         self.soc = np.full((self.n,), self.init_soc, dtype=np.float32)
-
         if self.forecaster is not None:
             self.forecaster.reset()
             self.forecaster.set_episode(self.get_combined_episode_signals(), self.episode_meta)
@@ -411,7 +384,6 @@ class GridEnv(gym.Env):
         base_load = np.asarray(self.ep_load[0], dtype=np.float32)
         base_pv = np.asarray(self.ep_pv[0], dtype=np.float32)
         self._grid_core.reset(base_load, base_pv)
-
         return self.obs_builder.build(self), self._build_reset_info(int(episode_idx))
 
     def _split_action_components(
@@ -447,11 +419,9 @@ class GridEnv(gym.Env):
 
     def _apply_storage_dynamics(self, battery_action: np.ndarray) -> dict[str, np.ndarray]:
         e_bat_req = np.asarray(battery_action, dtype=np.float32) * self.agent_p_max
-
         soc_t = self.soc.copy().astype(np.float32)
         e_t = soc_t * self.agent_c_bat
         eff = max(self.eff, 1e-6)
-
         p_max_chg = np.minimum(
             self.agent_p_max,
             np.maximum(0.0, (self.agent_e_max - e_t) / (eff * self.dt)),
@@ -474,7 +444,6 @@ class GridEnv(gym.Env):
                 f"allowed range [{p_lower[bad_agent]:.4f}, {p_upper[bad_agent]:.4f}] kW."
             )
         e_bat = e_bat_req.astype(np.float32)
-
         delta_e = np.where(e_bat >= 0.0, e_bat * eff, e_bat / eff) * self.dt
         e_next = (e_t + delta_e).astype(np.float32)
         invalid_energy = np.logical_or(
@@ -490,7 +459,6 @@ class GridEnv(gym.Env):
             )
         e_next = np.clip(e_next, self.agent_e_min, self.agent_e_max).astype(np.float32)
         soc_next = (e_next / self.agent_c_bat).astype(np.float32)
-
         return {
             "e_bat_req": e_bat_req.astype(np.float32),
             "e_bat": e_bat,
@@ -782,11 +750,9 @@ class GridEnv(gym.Env):
         signal_state = self._build_signal_state(t, pv_action)
         pf_result, pf_error = self._run_power_flow(storage_state, signal_state)
         step_state = self._build_step_payload(t, storage_state, signal_state, pf_result, pf_error)
-
         reward_state = self._build_reward_state(step_state)
         reward_per_agent, components = self.reward_fn.compute(reward_state)
         reward = np.asarray(reward_per_agent, dtype=np.float32)
-
         self.soc = storage_state["soc_next"]
         self.cur_step += 1
         done = self.cur_step >= self.episode_length

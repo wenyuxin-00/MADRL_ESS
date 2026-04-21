@@ -1,13 +1,8 @@
-"""Validation summaries and plotting helpers for the MISOCP notebook flow."""
-
 from __future__ import annotations
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
 def build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.DataFrame:
-    """Build a per-step MISOCP-vs-pandapower validation DataFrame."""
 
     from controllers.mpc.global_socp_mpc import (
         _LINE_LOADING_ERR_TOL_PCT,
@@ -15,7 +10,6 @@ def build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.D
         _TRAFO_LOADING_ERR_TOL_PCT,
         _VOLTAGE_ERR_TOL_PU,
     )
-
     rows: list[dict[str, object]] = []
     for entry in diagnostic_rows:
         misocp_vm = entry.get("misocp_vm_pu")
@@ -92,16 +86,13 @@ def build_misocp_validation_df(diagnostic_rows: list[dict[str, object]]) -> pd.D
         )
     return pd.DataFrame(rows)
 
-
 def summarize_misocp_validation(validation_df: pd.DataFrame) -> pd.Series:
-    """Build a compact summary for the notebook validation section."""
 
     from scripts.utils.misocp_notebook_helpers import (
         _SOC_SLACK_TIGHT_P95_THRESHOLD,
         _interpret_linear_fit,
         _linear_fit_summary,
     )
-
     if validation_df.empty:
         return pd.Series(
             {
@@ -193,7 +184,6 @@ def summarize_misocp_validation(validation_df: pd.DataFrame) -> pd.Series:
         name="misocp_validation_summary",
     )
 
-
 def plot_full_horizon_power_balance(
     step_df: pd.DataFrame,
     *,
@@ -201,7 +191,6 @@ def plot_full_horizon_power_balance(
     dt_hours: float,
     figsize: tuple[float, float] = (18.0, 4.8),
 ):
-    """Render a MADRL-style single-panel full-horizon power-balance chart."""
 
     if step_df.empty:
         raise ValueError("step_df is empty; nothing to plot.")
@@ -219,9 +208,7 @@ def plot_full_horizon_power_balance(
         ("grid_import_kw", "Grid import", "#2563eb"),
         ("battery_discharge_kw", "Battery discharge", "#7c3aed"),
     ]
-
     figure, balance_axis = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-
     x_index = pd.Index(x_values)
     is_temporal_x = bool(
         pd.api.types.is_datetime64_any_dtype(x_index.dtype)
@@ -296,7 +283,6 @@ def plot_full_horizon_power_balance(
     figure._misocp_balance_axes = [balance_axis]
     return figure
 
-
 def plot_full_horizon_voltage(
     step_df: pd.DataFrame,
     grid_voltage_df: pd.DataFrame,
@@ -307,7 +293,6 @@ def plot_full_horizon_voltage(
     controller_label: str,
     figsize: tuple[float, float] = (18.0, 5.4),
 ):
-    """Render the full-horizon bus-voltage chart."""
 
     if step_df.empty or grid_voltage_df.empty:
         raise ValueError("Voltage plotting requires non-empty step_df and grid_voltage_df.")
@@ -378,7 +363,6 @@ def plot_full_horizon_voltage(
     figure._misocp_voltage_axis = axis
     return figure
 
-
 def plot_full_horizon_net_load(
     step_df: pd.DataFrame,
     *,
@@ -386,22 +370,18 @@ def plot_full_horizon_net_load(
     controller_label: str,
     figsize: tuple[float, float] = (18.0, 8.2),
 ):
-    """Render feeder-total and agent-only net load with a transformer S-limit reference in active-power view."""
 
     from scripts.utils.misocp_notebook_helpers import (
         _resolve_agent_net_load_columns,
         _resolve_feeder_net_load_columns,
     )
-
     if step_df.empty:
         raise ValueError("step_df is empty; nothing to plot.")
 
     agent_raw, agent_effective, agent_post_action = _resolve_agent_net_load_columns(step_df)
     feeder_raw, feeder_effective, feeder_post_action = _resolve_feeder_net_load_columns(step_df)
-
     figure, axes = plt.subplots(2, 1, figsize=figsize, sharex=True, constrained_layout=True)
     feeder_axis, agent_axis = axes
-
     if feeder_raw is not None and feeder_effective is not None and feeder_post_action is not None:
         feeder_axis.plot(
             step_df["timestamp"],
@@ -451,7 +431,6 @@ def plot_full_horizon_net_load(
     feeder_axis.set_ylabel("Power [kW]")
     feeder_axis.grid(True, alpha=0.25)
     feeder_axis.legend(loc="upper right", ncol=2)
-
     agent_axis.plot(
         step_df["timestamp"],
         agent_raw,
@@ -483,14 +462,12 @@ def plot_full_horizon_net_load(
     figure._misocp_net_load_axes = list(axes)
     return figure
 
-
 def plot_root_exchange_alignment(
     step_df: pd.DataFrame,
     *,
     controller_label: str,
     figsize: tuple[float, float] = (14.0, 4.5),
 ) -> plt.Figure:
-    """Plot solver root exchange, replay root exchange, and feeder post-action net load together."""
 
     figure, axis = plt.subplots(figsize=figsize, constrained_layout=True)
     axis.plot(
@@ -525,17 +502,14 @@ def plot_root_exchange_alignment(
     axis.legend(loc="upper right")
     return figure
 
-
 def plot_misocp_validation_scatter_panel(
     validation_df: pd.DataFrame,
     *,
     controller_label: str,
     figsize: tuple[float, float] = (12.0, 4.8),
 ) -> plt.Figure:
-    """Plot root-P and root-S scatter diagnostics with linear-fit annotations."""
 
     from scripts.utils.misocp_notebook_helpers import _interpret_linear_fit, _linear_fit_summary
-
     figure, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
     scatter_specs = [
         (

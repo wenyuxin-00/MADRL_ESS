@@ -1,26 +1,17 @@
-"""Build and reuse shared MADRL train/test data packages."""
-
 from __future__ import annotations
-
-import argparse
-import dataclasses
 import hashlib
 import json
-import os
 import shutil
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
 import numpy as np
 import pandas as pd
 import torch
 from numpy.lib.format import open_memmap
 from tqdm.auto import tqdm
-
 from data.loaders.registry import _resolve_split_dates, _same_year_has_explicit_train_range, build_dataset
 from predictors.lstm_forecaster import load_lstm_forecaster_artifacts
 from predictors.registry import build_forecaster
@@ -33,16 +24,11 @@ from scripts.utils.price_protocol import (
     assert_no_legacy_price_schema,
 )
 from scripts.utils.project_paths import get_shared_data_root
-
 if TYPE_CHECKING:
     from configs.experiment_config import ExperimentConfig
 
 _FLOAT_PRECISION = 6
-_LOCK_TIMEOUT_S = 300.0
-_LOCK_POLL_INTERVAL_S = 0.25
 _SCHEMA_VERSION = 3
-
-
 def _json_default(value: Any):
     if isinstance(value, Path):
         return str(value)
@@ -55,10 +41,8 @@ def _json_default(value: Any):
             pass
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
-
 def _normalize_float(value: float) -> float:
     return float(round(float(value), _FLOAT_PRECISION))
-
 
 def _normalize_for_signature(value: Any) -> Any:
     if isinstance(value, dict):
@@ -76,11 +60,9 @@ def _normalize_for_signature(value: Any) -> Any:
         return str(value)
     return value
 
-
 def _signature_hash(payload: dict[str, object]) -> str:
     encoded = json.dumps(_normalize_for_signature(payload), sort_keys=True, ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
-
 
 def _file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
@@ -92,14 +74,12 @@ def _file_sha256(path: str | Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
-
 def _normalize_artifact_bundle(bundle) -> list[tuple[str, str | None, str | None]]:
     if isinstance(bundle, tuple) and len(bundle) == 3 and not any(isinstance(item, (tuple, list)) for item in bundle):
         return [bundle]
     if isinstance(bundle, list):
         return [tuple(item) for item in bundle]
     raise TypeError(f"Unsupported forecast artifact bundle: {bundle!r}")
-
 
 def _normalized_artifact_meta_subset(meta: dict[str, object]) -> dict[str, object]:
     return _normalize_for_signature(
@@ -123,7 +103,6 @@ def _normalized_artifact_meta_subset(meta: dict[str, object]) -> dict[str, objec
         }
     )
 
-
 def _artifact_fingerprint(forecast_ready: dict[str, object]) -> dict[str, object]:
     artifacts = dict(forecast_ready.get("artifacts") or {})
     if not artifacts:
@@ -144,7 +123,6 @@ def _artifact_fingerprint(forecast_ready: dict[str, object]) -> dict[str, object
         fingerprint[str(signal_name)] = entries
     return fingerprint
 
-
 def validate_lstm_artifacts_for_shared_data(cfg) -> dict[str, object]:
     if str(cfg.forecast.type).strip().lower() != "lstm":
         return {"artifacts": {}, "fingerprint": {"mode": "non_lstm"}}
@@ -154,7 +132,6 @@ def validate_lstm_artifacts_for_shared_data(cfg) -> dict[str, object]:
         "forecast_ready": forecast_ready,
         "fingerprint": _artifact_fingerprint(forecast_ready),
     }
-
 
 def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, object]) -> dict[str, object]:
     include_test_window = _test_window_in_signature(cfg)
@@ -183,22 +160,14 @@ def _shared_data_signature_payload(cfg, *, artifact_fingerprint: dict[str, objec
         "artifacts": artifact_fingerprint,
     }
 
-
-def build_shared_data_signature(cfg) -> dict[str, object]:
-    artifact_info = validate_lstm_artifacts_for_shared_data(cfg)
-    return _shared_data_signature_payload(cfg, artifact_fingerprint=dict(artifact_info["fingerprint"]))
-
-
 def _test_window_in_signature(cfg) -> bool:
     return (
         int(cfg.data.train_year) == int(cfg.data.test_year)
         and not _same_year_has_explicit_train_range(cfg)
     )
 
-
 def _test_window_strategy(cfg) -> str:
     return "cfg_window" if _test_window_in_signature(cfg) else "full_year_runtime_slice"
-
 
 def _resolve_shared_split_controls(cfg, split: str) -> dict[str, object]:
     if str(split) == "test" and _test_window_strategy(cfg) == "full_year_runtime_slice":
@@ -226,7 +195,6 @@ def _resolve_shared_split_controls(cfg, split: str) -> dict[str, object]:
         ),
     }
 
-
 def _episode_manifest_entry(dataset, episode_idx: int, episode: dict[str, object]) -> dict[str, object]:
     episode_slices = list(getattr(dataset, "_episode_slices", []))
     history_start_idx, active_start_idx, active_end_idx = episode_slices[int(episode_idx)]
@@ -244,12 +212,6 @@ def _episode_manifest_entry(dataset, episode_idx: int, episode: dict[str, object
         "active_end_idx": int(active_end_idx),
     }
 
-
-def _full_episode_index_list(split_manifest: dict[str, object]) -> list[int]:
-    episodes = list(split_manifest.get("episodes") or [])
-    return [int(entry["episode_idx"]) for entry in episodes]
-
-
 def _build_calendar_time_matrix(
     timestamps: list[str | pd.Timestamp] | np.ndarray | tuple[str | pd.Timestamp, ...],
     n_agents: int,
@@ -263,17 +225,14 @@ def _build_calendar_time_matrix(
         + index.minute.to_numpy(dtype=np.float32) / np.float32(60.0)
     )
     day_of_year = (index.dayofyear.to_numpy(dtype=np.float32) - np.float32(1.0)) + hour_of_day / np.float32(24.0)
-
     hour_phase = np.float32(2.0 * np.pi) * hour_of_day / np.float32(24.0)
     year_phase = np.float32(2.0 * np.pi) * day_of_year / np.float32(365.25)
-
     per_step = np.empty((len(index), 4), dtype=np.float32)
     per_step[:, 0] = np.sin(hour_phase).astype(np.float32)
     per_step[:, 1] = np.cos(hour_phase).astype(np.float32)
     per_step[:, 2] = np.sin(year_phase).astype(np.float32)
     per_step[:, 3] = np.cos(year_phase).astype(np.float32)
     return np.broadcast_to(per_step[:, None, :], (len(index), int(n_agents), 4)).astype(np.float32, copy=False)
-
 
 def _compute_future_mean_price(wholesale_price: np.ndarray, future_horizon: int) -> tuple[np.ndarray, np.ndarray]:
     values = np.asarray(wholesale_price, dtype=np.float32).reshape(-1)
@@ -283,14 +242,12 @@ def _compute_future_mean_price(wholesale_price: np.ndarray, future_horizon: int)
     horizon = int(max(future_horizon, 1))
     idx = np.arange(values.size, dtype=np.int64)
     csum = np.concatenate([[0.0], np.cumsum(values.astype(np.float64), dtype=np.float64)], axis=0)
-
     start = idx + 1
     end = np.minimum(idx + 1 + horizon, values.size)
     valid = start < values.size
     sums = csum[end] - csum[start]
     lengths = np.maximum(end - start, 1)
     mu_t = np.where(valid, sums / lengths, values[np.minimum(idx, values.size - 1)]).astype(np.float32)
-
     next_idx = np.minimum(idx + 1, values.size - 1)
     start_next = next_idx + 1
     end_next = np.minimum(next_idx + 1 + horizon, values.size)
@@ -299,7 +256,6 @@ def _compute_future_mean_price(wholesale_price: np.ndarray, future_horizon: int)
     lengths_next = np.maximum(end_next - start_next, 1)
     mu_next = np.where(valid_next, sums_next / lengths_next, values[next_idx]).astype(np.float32)
     return mu_t.astype(np.float32, copy=False), mu_next.astype(np.float32, copy=False)
-
 
 def _merge_history_with_episode_signals(
     signals: dict[str, np.ndarray],
@@ -317,7 +273,6 @@ def _merge_history_with_episode_signals(
         merged[name] = np.concatenate([prefix, value], axis=0).astype(np.float32, copy=False)
     return merged, prefix_length
 
-
 def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, object]:
     split_controls = _resolve_shared_split_controls(cfg, str(split))
     dataset = build_dataset(
@@ -332,7 +287,6 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
     episode_length = int(cfg.env.episode_limit)
     n_agents = int(cfg.env.num_agents)
     sequence_length = int(cfg.env.future_horizon) + 1
-
     split_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "calendar_time": "calendar_time.npy",
@@ -342,7 +296,6 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         "mu_t": "mu_t.npy",
         "mu_next": "mu_next.npy",
     }
-
     arrays = {
         "calendar_time": open_memmap(
             split_dir / files["calendar_time"],
@@ -381,11 +334,9 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
             shape=(n_episodes, episode_length),
         ),
     }
-
     forecaster = build_forecaster(cfg)
     vectorized_forecaster = hasattr(forecaster, "predict_episode_matrix")
     episode_manifest: list[dict[str, object]] = []
-
     for episode_idx in tqdm(
         range(n_episodes),
         desc=f"shared_data[{split}] episodes",
@@ -406,15 +357,12 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         combined_signals, prefix_length = _merge_history_with_episode_signals(signals, history_signals)
         combined_timestamps = [*history_timestamps, *timestamps]
         episode_manifest.append(_episode_manifest_entry(dataset, episode_idx, episode))
-
         forecaster.reset()
         forecaster.set_episode(combined_signals, meta)
-
         mu_t, mu_next = _compute_future_mean_price(signals[WHOLESALE_PRICE_SIGNAL], int(cfg.env.future_horizon))
         arrays["mu_t"][episode_idx] = mu_t
         arrays["mu_next"][episode_idx] = mu_next
         arrays["calendar_time"][episode_idx] = _build_calendar_time_matrix(timestamps, n_agents)
-
         if vectorized_forecaster:
             arrays[WHOLESALE_PRICE_SEQ_FIELD][episode_idx] = forecaster.predict_episode_matrix(
                 combined_signals[WHOLESALE_PRICE_SIGNAL],
@@ -464,7 +412,6 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
         if mmap is not None:
             mmap.close()
     del arrays
-
     split_manifest = {
         "schema_version": _SCHEMA_VERSION,
         "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
@@ -480,10 +427,8 @@ def _write_split_shared_data(cfg, *, split: str, split_dir: Path) -> dict[str, o
     (split_dir / "manifest.json").write_text(json.dumps(split_manifest, indent=2, default=_json_default), encoding="utf-8")
     return split_manifest
 
-
 def _shared_data_root(root: str | Path | None = None) -> Path:
     return get_shared_data_root(root) / "mainline"
-
 
 def _root_manifest_is_complete(shared_dir: Path, signature_hash: str) -> bool:
     manifest_path = shared_dir / "manifest.json"
@@ -501,55 +446,12 @@ def _root_manifest_is_complete(shared_dir: Path, signature_hash: str) -> bool:
             return False
     return True
 
-
-def _try_acquire_lock(lock_dir: Path) -> bool:
-    try:
-        lock_dir.mkdir(parents=False, exist_ok=False)
-    except FileExistsError:
-        return False
-    (lock_dir / "owner.json").write_text(
-        json.dumps(
-            {
-                "pid": int(os.getpid()),
-                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return True
-
-
-def _release_lock(lock_dir: Path) -> None:
-    if lock_dir.exists():
-        shutil.rmtree(lock_dir, ignore_errors=True)
-
-
-def _wait_for_existing_or_lock(shared_dir: Path, lock_dir: Path, signature_hash: str) -> bool:
-    started = time.monotonic()
-    while True:
-        if _root_manifest_is_complete(shared_dir, signature_hash):
-            return True
-        if not lock_dir.exists():
-            return False
-        lock_age = max(time.time() - lock_dir.stat().st_mtime, 0.0)
-        if lock_age >= _LOCK_TIMEOUT_S and not shared_dir.exists():
-            shutil.rmtree(lock_dir, ignore_errors=True)
-            return False
-        if time.monotonic() - started >= _LOCK_TIMEOUT_S:
-            raise TimeoutError(
-                f"Timed out waiting for shared MADRL data '{shared_dir.name}' to finish generating."
-            )
-        time.sleep(_LOCK_POLL_INTERVAL_S)
-
-
 @dataclass(frozen=True)
 class SharedDataResult:
     shared_data_dir: Path
     signature_hash: str
     manifest: dict[str, object]
     reused: bool
-
 
 def build_shared_data_status_summary(
     result: SharedDataResult,
@@ -574,9 +476,7 @@ def build_shared_data_status_summary(
         "test_end_date": test_end_date,
     }
 
-
 class PrecomputedObservationStore:
-    """Read per-episode precomputed observations from a split directory."""
 
     def __init__(self, split_dir: str | Path):
         self.split_dir = Path(split_dir).resolve()
@@ -600,11 +500,9 @@ class PrecomputedObservationStore:
     def episode(self, episode_idx: int) -> dict[str, np.ndarray]:
         return {name: np.asarray(array[int(episode_idx)]) for name, array in self._arrays.items()}
 
-
 def load_madrl_shared_data_manifest(path: str | Path) -> dict[str, object]:
     shared_dir = Path(path).resolve()
     return json.loads((shared_dir / "manifest.json").read_text(encoding="utf-8"))
-
 
 def select_shared_data_episode_indices(
     manifest: dict[str, object],
@@ -640,15 +538,12 @@ def select_shared_data_episode_indices(
         )
     return selected
 
-
 def ensure_madrl_shared_data(
     cfg,
     *,
     root: str | Path | None = None,
-    force: bool = False,
 ) -> SharedDataResult:
     artifact_info = validate_lstm_artifacts_for_shared_data(cfg)
-    forecast_ready = dict(artifact_info.get("forecast_ready") or {})
     signature_payload = _shared_data_signature_payload(
         cfg,
         artifact_fingerprint=dict(artifact_info["fingerprint"]),
@@ -657,9 +552,7 @@ def ensure_madrl_shared_data(
     root_dir = _shared_data_root(root)
     root_dir.mkdir(parents=True, exist_ok=True)
     shared_dir = (root_dir / signature_hash).resolve()
-    lock_dir = (root_dir / f"{signature_hash}.lock").resolve()
-
-    if not force and _root_manifest_is_complete(shared_dir, signature_hash):
+    if _root_manifest_is_complete(shared_dir, signature_hash):
         return SharedDataResult(
             shared_data_dir=shared_dir,
             signature_hash=signature_hash,
@@ -667,26 +560,8 @@ def ensure_madrl_shared_data(
             reused=True,
         )
 
-    if not _try_acquire_lock(lock_dir):
-        if _wait_for_existing_or_lock(shared_dir, lock_dir, signature_hash):
-            return SharedDataResult(
-                shared_data_dir=shared_dir,
-                signature_hash=signature_hash,
-                manifest=load_madrl_shared_data_manifest(shared_dir),
-                reused=True,
-            )
-        if not _try_acquire_lock(lock_dir):
-            return SharedDataResult(
-                shared_data_dir=shared_dir,
-                signature_hash=signature_hash,
-                manifest=load_madrl_shared_data_manifest(shared_dir),
-                reused=True,
-            )
-
-    temp_dir = (root_dir / f"{signature_hash}.tmp.{os.getpid()}.{uuid.uuid4().hex}").resolve()
+    temp_dir = (root_dir / f"{signature_hash}.tmp.{uuid.uuid4().hex}").resolve()
     try:
-        if force and shared_dir.exists():
-            shutil.rmtree(shared_dir, ignore_errors=True)
         temp_dir.mkdir(parents=True, exist_ok=False)
         train_manifest = _write_split_shared_data(cfg, split="train", split_dir=temp_dir / "train")
         test_manifest = _write_split_shared_data(cfg, split="test", split_dir=temp_dir / "test")
@@ -735,65 +610,3 @@ def ensure_madrl_shared_data(
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
-        _release_lock(lock_dir)
-
-
-def dump_cfg_json(cfg, path: str | Path) -> Path:
-    payload = dataclasses.asdict(cfg)
-    target = Path(path).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, default=_json_default), encoding="utf-8")
-    return target
-
-
-def _apply_dataclass_values(instance, payload: dict[str, object]) -> None:
-    for field in dataclasses.fields(instance):
-        if field.name not in payload:
-            continue
-        current_value = getattr(instance, field.name)
-        next_value = payload[field.name]
-        if dataclasses.is_dataclass(current_value):
-            _apply_dataclass_values(current_value, dict(next_value))
-            continue
-        if isinstance(current_value, torch.device):
-            setattr(instance, field.name, torch.device(str(next_value)))
-            continue
-        setattr(instance, field.name, next_value)
-
-
-def load_cfg_json(path: str | Path) -> "ExperimentConfig":
-    from configs.experiment_config import ExperimentConfig
-
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    cfg = ExperimentConfig()
-    _apply_dataclass_values(cfg, dict(payload))
-    return cfg
-
-
-def _build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Prepare shared MADRL train/test data from a config snapshot.")
-    parser.add_argument("--cfg-json", required=True)
-    parser.add_argument("--root")
-    parser.add_argument("--force", action="store_true")
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _build_cli().parse_args(argv)
-    cfg = load_cfg_json(args.cfg_json)
-    result = ensure_madrl_shared_data(cfg, root=args.root, force=bool(args.force))
-    print(
-        json.dumps(
-            {
-                "shared_data_dir": str(result.shared_data_dir),
-                "shared_data_signature": str(result.signature_hash),
-                "reused": bool(result.reused),
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

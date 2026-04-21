@@ -1,10 +1,6 @@
-"""High-level multi-agent controller wrapper for MADRL policies."""
-
 from __future__ import annotations
-
 import numpy as np
 import torch
-
 from controllers.action_feasibility import (
     action_info_to_numpy,
     compute_action_gap_metrics_torch,
@@ -12,8 +8,6 @@ from controllers.action_feasibility import (
 )
 from controllers.base import BaseController
 from scripts.utils.nested import add_batch_dim, to_torch_nested
-
-
 def _override_soc_penalty_metrics(
     action_info: dict[str, torch.Tensor] | None,
     penalty_source_info: dict[str, torch.Tensor] | None,
@@ -28,9 +22,7 @@ def _override_soc_penalty_metrics(
             merged[key] = penalty_source_info[key]
     return merged
 
-
 class MADRLController(BaseController):
-    """Coordinate one action per agent for evaluation or deployment."""
 
     def __init__(self, agent_n: list, noise_std: float = 0.0, projector=None) -> None:
         self.agent_n = list(agent_n)
@@ -42,7 +34,6 @@ class MADRLController(BaseController):
         self.last_action_info: dict[str, np.ndarray] | None = None
 
     def reset(self) -> None:
-        """Feed-forward policies do not keep episode state."""
         self.last_action_info = None
 
     @staticmethod
@@ -102,7 +93,6 @@ class MADRLController(BaseController):
             action_info = _override_soc_penalty_metrics(action_info, projector_residual_info)
         executed_np = executed_t.to(dtype=torch.float32).cpu().numpy()
         action_info_np = action_info_to_numpy(action_info)
-
         if has_batch_dim:
             return [executed_np[:, agent_id].copy() for agent_id in range(executed_np.shape[1])], action_info_np
         single_env_info = None

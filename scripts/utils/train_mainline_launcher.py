@@ -1,7 +1,4 @@
-"""Helpers for launching the training mainline outside notebooks."""
-
 from __future__ import annotations
-
 import json
 import os
 import subprocess
@@ -9,23 +6,18 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-
 from scripts.checkpoints import build_training_run_paths, slugify_checkpoint_token
 from scripts.utils.project_paths import get_checkpoint_root
-
-
 def _default_algorithm(experiment_controls: dict[str, Any], train_controls: dict[str, Any]) -> str:
     algorithm = experiment_controls.get("algorithm")
     if algorithm:
         return str(algorithm)
     return "MATD3" if str(train_controls.get("profile", "base")) == "gpu_fast" else "MADDPG"
 
-
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
-
 
 def prepare_train_mainline_launch(
     *,
@@ -43,7 +35,6 @@ def prepare_train_mainline_launch(
     project_root = Path(project_root).resolve()
     data_dir = Path(data_dir).resolve() if data_dir is not None else (project_root / "data").resolve()
     checkpoint_controls = dict(checkpoint_controls or {})
-
     algorithm = _default_algorithm(experiment_controls, train_controls)
     prediction_mode = str(data_controls.get("prediction_mode", "perfect")).strip().lower()
     checkpoint_root = Path(
@@ -53,7 +44,6 @@ def prepare_train_mainline_launch(
         checkpoint_controls.get("experiment_name", "grid_mainline"),
         default="grid_mainline",
     )
-
     if save_dir is None:
         run_paths = build_training_run_paths(
             checkpoint_root,
@@ -82,7 +72,6 @@ def prepare_train_mainline_launch(
         "model_root": str(model_root),
     }
     battery_controls = dict(battery_controls or {})
-
     experiment_controls_path = _write_json(meta_dir / "experiment_controls.json", experiment_controls)
     data_controls_path = _write_json(meta_dir / "data_controls.json", data_controls)
     battery_controls_path = _write_json(meta_dir / "battery_controls.json", battery_controls)
@@ -91,7 +80,6 @@ def prepare_train_mainline_launch(
     result_json_path = meta_dir / "train_result.json"
     progress_json_path = meta_dir / "progress.json"
     log_path = meta_dir / "train.log"
-
     return {
         "project_root": str(project_root),
         "experiment_controls_path": str(experiment_controls_path),
@@ -113,7 +101,6 @@ def prepare_train_mainline_launch(
         "env_name": str(env_name),
         "run_number": int(run_number),
     }
-
 
 def build_train_mainline_command(
     launch_info: dict[str, Any],
@@ -147,17 +134,14 @@ def build_train_mainline_command(
         str(launch_info["run_number"]),
     ]
 
-
 def load_train_mainline_result(result_json_path) -> dict[str, Any]:
     return json.loads(Path(result_json_path).read_text(encoding="utf-8"))
-
 
 def _load_progress_payload(progress_json_path: Path) -> dict[str, Any] | None:
     try:
         return json.loads(progress_json_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return None
-
 
 def _format_progress_summary(payload: dict[str, Any]) -> str:
     interaction_step = int(payload.get("interaction_step", 0))
@@ -182,7 +166,6 @@ def _format_progress_summary(payload: dict[str, Any]) -> str:
         f"{eta_segment}"
     )
 
-
 def _monitor_process_progress(
     process: subprocess.Popen[str],
     *,
@@ -195,7 +178,6 @@ def _monitor_process_progress(
     last_summary = ""
     last_payload: dict[str, Any] | None = None
     next_episode_report = max(int(progress_episode_interval), 1)
-
     while process.poll() is None:
         payload = _load_progress_payload(progress_json_path)
         if payload is not None and progress_json_path.exists():
@@ -232,7 +214,6 @@ def _monitor_process_progress(
             print(summary)
     return last_payload
 
-
 def run_external_train_mainline(
     *,
     project_root,
@@ -264,7 +245,6 @@ def run_external_train_mainline(
     command = build_train_mainline_command(launch_info, python_executable=python_executable)
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
-
     log_path = Path(launch_info["log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     last_progress = None
@@ -306,7 +286,6 @@ def run_external_train_mainline(
         "last_progress": last_progress,
         "stream_output": bool(stream_output),
     }
-
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, command)
     return launch_metadata

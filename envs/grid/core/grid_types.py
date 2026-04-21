@@ -1,19 +1,11 @@
-"""Structured result types for grid power-flow steps."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-
 import numpy as np
-
-
 def _empty_f32() -> np.ndarray:
     return np.zeros(0, dtype=np.float32)
 
-
 @dataclass
 class GridStepResult:
-    """Container for one pandapower step result."""
 
     converged: bool
     vm_pu: np.ndarray
@@ -29,8 +21,6 @@ class GridStepResult:
     n_buses: int
     n_lines: int
     n_trafos: int
-
-    # Full-grid safety diagnostics used by the global reward.
     trafo_p_signed_kw: np.ndarray = field(default_factory=_empty_f32)
     bus_v_excess: np.ndarray = field(default_factory=_empty_f32)
     line_excess: np.ndarray = field(default_factory=_empty_f32)

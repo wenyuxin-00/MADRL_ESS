@@ -1,16 +1,9 @@
-"""Dataclass-based experiment configuration for the grid training mainline."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from pathlib import Path
-
 import torch
-
-
 def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]:
     return {
@@ -42,7 +35,6 @@ def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]
 
 @dataclass
 class DataConfig:
-    """Processed prosumer dataset selection."""
 
     data_dir: str | Path | None = None
     agent_profiles: list[str] = field(default_factory=lambda: ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"])
@@ -57,7 +49,6 @@ class DataConfig:
     pv_capacity_kw: list[float] = field(default_factory=list)
     load_scale: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0, 10.0])
     pv_scale: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 5.0, 5.0])
-
     def resolved_load_scale(self, n_agents: int) -> list[float]:
         values = list(self.load_scale)
         if not values:
@@ -70,10 +61,8 @@ class DataConfig:
             return [1.0] * int(n_agents)
         return [float(value) for value in values]
 
-
 @dataclass
 class TrainConfig:
-    """Training-loop settings."""
 
     train_episodes: int = 1000
     max_train_steps: int | None = None
@@ -94,7 +83,6 @@ class TrainConfig:
     progress_postfix_interval: int = 10
     progress_episode_interval: int = 10
     progress_write_interval_seconds: float = 5.0
-
     def resolved_max_train_steps(self, episode_limit: int) -> int:
         if self.max_train_steps is not None:
             return int(self.max_train_steps)
@@ -105,10 +93,8 @@ class TrainConfig:
             return 0.0
         return float((self.noise_std_init - self.noise_std_min) / self.noise_decay_steps)
 
-
 @dataclass
 class EnvConfig:
-    """Environment settings for the default GridEnv workflow."""
 
     num_agents: int = 5
     episode_limit: int = 96 * 2
@@ -122,10 +108,8 @@ class EnvConfig:
     soc_max: float = 0.95
     soc_target: float = 0.5
 
-
 @dataclass
 class RewardConfig:
-    """Reward weights for the default NormalReward."""
 
     w_soc_pen: float = 0.5
     export_subsidy_eur_per_kwh: float = 0.079
@@ -134,10 +118,8 @@ class RewardConfig:
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
 
-
 @dataclass
 class MpcConfig:
-    """Solver-side regularization knobs for offline MISOCP analysis."""
 
     branch_current_tiebreaker_eur_per_pu_step: float = 0.0
     physics_refinement_mode: str = "two_stage_min_branch_l"
@@ -161,10 +143,8 @@ class MpcConfig:
     physics_refinement_target_export_gap_ratio: float = 0.05
     physics_refinement_use_full_start: bool = True
 
-
 @dataclass
 class ObsConfig:
-    """Observation-builder settings."""
 
     local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
     sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
@@ -182,7 +162,6 @@ class ObsConfig:
 
 @dataclass
 class ModelConfig:
-    """Neural-network family configuration."""
 
     family: str = "mlp"
     actor_head_type: str = "deterministic_continuous"
@@ -192,14 +171,9 @@ class ModelConfig:
     use_orthogonal_init: bool = True
     use_grad_clip: bool = True
     grad_clip_norm: float = 10.0
-    transformer_num_heads: int = 4
-    transformer_num_layers: int = 1
-    graph_num_layers: int = 2
-
 
 @dataclass
 class AlgoConfig:
-    """MADRL algorithm configuration."""
 
     name: str = "MADDPG"
     gamma: float = 0.999
@@ -208,10 +182,8 @@ class AlgoConfig:
     policy_noise: float = 0.2
     noise_clip: float = 0.5
 
-
 @dataclass
 class ForecastConfig:
-    """Forecasting settings."""
 
     type: str = "perfect"
     target_signals: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
@@ -241,10 +213,8 @@ class ForecastConfig:
     )
     load_component_split: bool = True
     load_scaler_type: str = "robust"
-
     @property
     def lstm_model_path(self) -> None:
-        """Legacy single-model entrypoints are no longer supported."""
         return None
 
     @lstm_model_path.setter
@@ -256,12 +226,8 @@ class ForecastConfig:
             "Use managed LSTM artifacts under forecast.lstm_artifact_root instead."
         )
 
-
-
-
 @dataclass
 class RuntimeConfig:
-    """Runtime configuration derived before model construction."""
 
     device: torch.device = field(default_factory=_default_device)
     seed: int = 0
@@ -292,10 +258,8 @@ class RuntimeConfig:
     effective_split_controls: dict[str, object] | None = None
     selected_episode_indices: list[int] | None = None
 
-
 @dataclass
 class GridConfig:
-    """Power-flow and topology settings for GridEnv."""
 
     sb_code: str = "1-LV-rural1--0-sw"
     pf_solver: str = "nr"
@@ -305,10 +269,8 @@ class GridConfig:
     line_max_loading_pct: float = 100.0
     train_compact_info: bool = True
 
-
 @dataclass
 class SafetyConfig:
-    """Optional safety-layer controls for isolated safe-policy experiments."""
 
     enabled: bool = False
     projector_mode: str = "joint_linearized"
@@ -319,10 +281,8 @@ class SafetyConfig:
     linearization_delta_kw: float = 0.25
     record_diagnostics: bool = True
 
-
 @dataclass
 class ExperimentConfig:
-    """Top-level experiment configuration."""
 
     env: EnvConfig = field(default_factory=EnvConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -336,3 +296,25 @@ class ExperimentConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     grid: GridConfig = field(default_factory=GridConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+
+MAINLINE_AGENT_PROFILES: tuple[str, ...] = ("SFH12", "SFH14", "SFH16", "SFH18", "SFH20")
+MAINLINE_AGENT_BUS_IDS: tuple[int, ...] = (10, 6, 12, 4, 2)
+MAINLINE_TEST_START_DATE = "2020-06-01"
+MAINLINE_TEST_END_DATE = "2020-06-07"
+MAINLINE_LOAD_SCALE: tuple[float, ...] = (10.0, 10.0, 10.0, 10.0, 10.0)
+MAINLINE_PV_SCALE: tuple[float, ...] = (5.0, 5.0, 5.0, 5.0, 5.0)
+MAINLINE_BATTERY_CAPACITY_KWH = 20.0
+MAINLINE_BATTERY_MAX_CHARGE_RATE = 10.0 / MAINLINE_BATTERY_CAPACITY_KWH
+MAINLINE_FORECAST = {
+    "future_horizon": 24,
+    "history_window": 96 * 3,
+    "target_signals": ("wholesale_price", "load", "pv"),
+    "load_model_mode": "per_agent",
+    "load_time_feature_mode": "hour_week_year",
+    "pv_time_feature_mode": "hour_week_year",
+    "load_hybrid_mode": "baseline_blend",
+    "load_baseline_mode": "last_value",
+    "pv_postprocess_mode": "physical_clip",
+    "load_component_split": True,
+    "load_scaler_type": "robust",
+}

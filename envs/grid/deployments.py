@@ -1,15 +1,9 @@
-"""Battery deployment helpers for the single grid-training mainline."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Iterable
 from typing import Any
-
-
 @dataclass(frozen=True)
 class AgentDeployment:
-    """Physical deployment details for one storage agent in the grid."""
 
     bus_id: int
     battery_capacity_kwh: float
@@ -18,7 +12,6 @@ class AgentDeployment:
     soc_min: float = 0.05
     soc_max: float = 0.95
     efficiency: float = 0.95
-
 
 def _resolve_positive_scalar(value: object, *, name: str) -> float:
     try:
@@ -29,7 +22,6 @@ def _resolve_positive_scalar(value: object, *, name: str) -> float:
         raise ValueError(f"{name} must be positive, got {scalar}.")
     return scalar
 
-
 def _coerce_vector_like(value: object) -> list[object] | None:
     if isinstance(value, (str, bytes, bytearray)):
         return None
@@ -38,7 +30,6 @@ def _coerce_vector_like(value: object) -> list[object] | None:
     if isinstance(value, Iterable):
         return list(value)
     return None
-
 
 def _resolve_capacity_vector(
     battery_capacity: float | list[float] | tuple[float, ...],
@@ -65,17 +56,12 @@ def _resolve_capacity_vector(
         raise ValueError(f"battery_capacity must be positive for all agents, got {values}.")
     return values
 
-
 def resolve_fixed_battery_spec(
     battery_capacity: float | list[float] | tuple[float, ...],
     max_charge_rate: float,
     *,
     n_agents: int,
 ) -> tuple[list[float], float, list[float]]:
-    """Resolve fixed-mode battery capacity and power vectors.
-
-    `max_charge_rate` is interpreted as a scalar C-rate in fixed mode.
-    """
     if _coerce_vector_like(max_charge_rate) is not None:
         raise ValueError(
             "fixed battery mode expects max_charge_rate to be a positive scalar C-rate, "
@@ -87,11 +73,8 @@ def resolve_fixed_battery_spec(
     p_max_kw = [float(capacity * c_rate) for capacity in capacity_kwh]
     return capacity_kwh, c_rate, p_max_kw
 
-
 def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
-    """Build per-agent storage deployments from the experiment config."""
     from envs.grid.topology.rural1_fixed import RURAL1_AGENT_DEPLOYMENTS
-
     n_agents = int(cfg.env.num_agents)
     bus_ids = list(cfg.grid.agent_bus_ids)
     if not bus_ids:
@@ -106,7 +89,6 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
     soc_min = float(cfg.env.soc_min)
     soc_max = float(cfg.env.soc_max)
     efficiency = float(cfg.env.efficiency)
-
     return [
         AgentDeployment(
             bus_id=int(bus_ids[idx]),
@@ -119,10 +101,3 @@ def build_agent_deployments(cfg: Any) -> list[AgentDeployment]:
         )
         for idx in range(n_agents)
     ]
-
-
-__all__ = [
-    "AgentDeployment",
-    "build_agent_deployments",
-    "resolve_fixed_battery_spec",
-]

@@ -1,14 +1,7 @@
-"""Default dense reward for the grid training mainline."""
-
 from __future__ import annotations
-
 import numpy as np
-
 from envs.rewards.base import ComponentMeta, RewardFn
-
-
 class NormalReward(RewardFn):
-    """Purchase-cost reward with export subsidy and grid-safety penalties."""
 
     def __init__(self, cfg: object) -> None:
         if hasattr(cfg.reward, "w_action_pen") and not hasattr(cfg.reward, "w_soc_pen"):
@@ -44,14 +37,12 @@ class NormalReward(RewardFn):
         psi_v_raw = float(env_state.get("psi_v_raw", 0.0))
         psi_line_raw = float(env_state.get("psi_line_raw", 0.0))
         psi_trafo_raw = float(env_state.get("psi_trafo_raw", 0.0))
-
         grid_import = np.maximum(actual_grid_power_t, 0.0).astype(np.float32)
         grid_export = np.maximum(-actual_grid_power_t, 0.0).astype(np.float32)
         r_purchase_cost = (grid_import * np.float32(dt) * np.float32(import_price_t)).astype(np.float32)
         r_export_subsidy = (
             grid_export * np.float32(dt) * np.float32(self.export_subsidy_eur_per_kwh)
         ).astype(np.float32)
-
         n_agents = int(actual_grid_power_t.shape[0])
         voltage_total = self.w_voltage_pen * psi_v_raw
         v_sum = float(np.sum(v_violation))
@@ -62,15 +53,11 @@ class NormalReward(RewardFn):
         else:
             v_weights = np.zeros((n_agents,), dtype=np.float32)
         r_safe_v = (n_agents * voltage_total * v_weights).astype(np.float32)
-
         line_total = self.w_line_pen * psi_line_raw
         r_safe_line = np.full((n_agents,), line_total, dtype=np.float32)
-
         trafo_total = self.w_trafo_pen * psi_trafo_raw
         r_safe_trafo = np.full((n_agents,), trafo_total, dtype=np.float32)
-
         r_soc_pen = np.zeros((n_agents,), dtype=np.float32)
-
         total = (-r_purchase_cost + r_export_subsidy - r_soc_pen - r_safe_v - r_safe_line - r_safe_trafo).astype(np.float32)
         components = {
             "r_purchase_cost": r_purchase_cost,

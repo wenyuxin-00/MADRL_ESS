@@ -1189,7 +1189,7 @@ def test_load_admm_mpc_rollout_package_rejects_version_mismatch(tmp_path):
         admm_mpc_nb.load_admm_mpc_rollout_package(saved_dir)
 
 
-def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
+def test_resolve_exact_admm_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -1214,7 +1214,7 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_returns_exact_di
     prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
     base_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, prefix)
 
-    resolved = admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
+    resolved = admm_mpc_nb.resolve_exact_admm_mpc_rollout_package_dir(
         prefix,
         cfg=cfg,
         prediction_mode="normal",
@@ -1233,7 +1233,7 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_returns_exact_di
     assert resolved == base_dir.resolve()
 
 
-def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
+def test_resolve_exact_admm_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -1259,7 +1259,7 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_requires_exact_d
     admm_mpc_nb.save_admm_mpc_rollout_package(incompatible_package, tmp_path / f"{prefix.name}_badsolver")
 
     with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
-        admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
+        admm_mpc_nb.resolve_exact_admm_mpc_rollout_package_dir(
             prefix,
             cfg=cfg,
             prediction_mode="normal",

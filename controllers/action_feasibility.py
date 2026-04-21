@@ -1,16 +1,9 @@
-"""Controller-side local feasibility and action-gap diagnostics."""
-
 from __future__ import annotations
-
 from typing import Any
-
 import numpy as np
 import torch
-
 _ACTION_EPS = 1e-6
 _ACTION_TOL = 1e-5
-
-
 def build_safety_local_numpy(
     *,
     soc: np.ndarray,
@@ -28,7 +21,6 @@ def build_safety_local_numpy(
             np.asarray(p_max_kw, dtype=np.float32),
         ]
     ).astype(np.float32)
-
 
 def _canonicalize_actions_numpy(
     actions: np.ndarray | list[np.ndarray],
@@ -49,7 +41,6 @@ def _canonicalize_actions_numpy(
     elif action_array.shape[-1] != 2:
         raise ValueError(f"Expected action_dim=2, got shape {action_array.shape}.")
     return action_array.astype(np.float32, copy=False), squeezed
-
 
 def _canonicalize_actions_torch(
     actions: torch.Tensor,
@@ -75,7 +66,6 @@ def _canonicalize_actions_torch(
         raise ValueError(f"Expected action_dim=2, got shape {tuple(actions.shape)}.")
     return actions, squeezed
 
-
 def _local_bounds_numpy(
     safety_local: np.ndarray,
     *,
@@ -88,11 +78,9 @@ def _local_bounds_numpy(
     capacity_kwh = np.maximum(np.asarray(safety_local[..., 3], dtype=np.float32), _ACTION_EPS)
     p_max_kw = np.maximum(np.asarray(safety_local[..., 4], dtype=np.float32), _ACTION_EPS)
     pv_raw_kw = np.maximum(np.asarray(safety_local[..., 2], dtype=np.float32), 0.0)
-
     energy_now = soc * capacity_kwh
     eff = max(float(efficiency), _ACTION_EPS)
     dt = max(float(dt_hours), _ACTION_EPS)
-
     energy_min = float(soc_min) * capacity_kwh
     energy_max = float(soc_max) * capacity_kwh
     charge_limit_kw = np.minimum(
@@ -104,7 +92,6 @@ def _local_bounds_numpy(
         np.maximum(0.0, (energy_now - energy_min) * eff / dt),
     )
     return -discharge_limit_kw, charge_limit_kw, p_max_kw, pv_raw_kw
-
 
 def _local_bounds_torch(
     safety_local: torch.Tensor,
@@ -118,11 +105,9 @@ def _local_bounds_torch(
     capacity_kwh = torch.clamp(safety_local[..., 3], min=_ACTION_EPS)
     p_max_kw = torch.clamp(safety_local[..., 4], min=_ACTION_EPS)
     pv_raw_kw = torch.clamp(safety_local[..., 2], min=0.0)
-
     energy_now = soc * capacity_kwh
     eff = max(float(efficiency), _ACTION_EPS)
     dt = max(float(dt_hours), _ACTION_EPS)
-
     energy_min = float(soc_min) * capacity_kwh
     energy_max = float(soc_max) * capacity_kwh
     charge_limit_kw = torch.minimum(
@@ -134,7 +119,6 @@ def _local_bounds_torch(
         torch.clamp((energy_now - energy_min) * eff / dt, min=0.0),
     )
     return -discharge_limit_kw, charge_limit_kw, p_max_kw, pv_raw_kw
-
 
 def compute_action_gap_metrics_numpy(
     safety_local: np.ndarray,
@@ -156,7 +140,6 @@ def compute_action_gap_metrics_numpy(
     battery_action_exec = executed[:, 0].astype(np.float32)
     pv_action_req = requested[:, 1].astype(np.float32)
     pv_action_exec = executed[:, 1].astype(np.float32)
-
     battery_power_req_kw = (battery_action_req * p_max_kw).astype(np.float32)
     battery_power_exec_kw = (battery_action_exec * p_max_kw).astype(np.float32)
     pv_util_req = (0.5 * (pv_action_req + 1.0)).astype(np.float32)
@@ -165,11 +148,9 @@ def compute_action_gap_metrics_numpy(
     pv_effective_exec_kw = (pv_util_exec * pv_raw_kw).astype(np.float32)
     pv_curtail_req_kw = (pv_raw_kw - pv_effective_req_kw).astype(np.float32)
     pv_curtail_exec_kw = (pv_raw_kw - pv_effective_exec_kw).astype(np.float32)
-
     battery_gap = np.abs(battery_power_req_kw - battery_power_exec_kw) / (p_max_kw + _ACTION_EPS)
     pv_gap = np.abs(pv_effective_req_kw - pv_effective_exec_kw) / np.maximum(pv_raw_kw, _ACTION_EPS)
     pv_gap = np.where(pv_raw_kw > _ACTION_EPS, pv_gap, 0.0).astype(np.float32)
-
     soc_penalty_unweighted = battery_gap.astype(np.float32)
     metrics = {
         "requested_action": requested.astype(np.float32),
@@ -193,7 +174,6 @@ def compute_action_gap_metrics_numpy(
         return {key: np.asarray(value[0], dtype=np.float32) for key, value in metrics.items()}
     return metrics
 
-
 def compute_action_gap_metrics_torch(
     safety_local: torch.Tensor,
     requested_actions: torch.Tensor,
@@ -213,7 +193,6 @@ def compute_action_gap_metrics_torch(
     battery_action_exec = executed[..., 0]
     pv_action_req = requested[..., 1]
     pv_action_exec = executed[..., 1]
-
     battery_power_req_kw = battery_action_req * p_max_kw
     battery_power_exec_kw = battery_action_exec * p_max_kw
     pv_util_req = 0.5 * (pv_action_req + 1.0)
@@ -222,11 +201,9 @@ def compute_action_gap_metrics_torch(
     pv_effective_exec_kw = pv_util_exec * pv_raw_kw
     pv_curtail_req_kw = pv_raw_kw - pv_effective_req_kw
     pv_curtail_exec_kw = pv_raw_kw - pv_effective_exec_kw
-
     battery_gap = (battery_power_req_kw - battery_power_exec_kw).abs() / torch.clamp(p_max_kw, min=_ACTION_EPS)
     pv_gap = (pv_effective_req_kw - pv_effective_exec_kw).abs() / torch.clamp(pv_raw_kw, min=_ACTION_EPS)
     pv_gap = torch.where(pv_raw_kw > _ACTION_EPS, pv_gap, torch.zeros_like(pv_gap))
-
     soc_penalty_unweighted = battery_gap
     metrics = {
         "requested_action": requested,
@@ -249,7 +226,6 @@ def compute_action_gap_metrics_torch(
     if squeezed:
         return {key: value.squeeze(0) for key, value in metrics.items()}
     return metrics
-
 
 def enforce_local_action_feasibility_torch(
     safety_local: torch.Tensor,
@@ -278,7 +254,6 @@ def enforce_local_action_feasibility_torch(
         return executed_actions.squeeze(0), metrics
     return executed_actions, metrics
 
-
 def action_info_to_numpy(action_info: dict[str, torch.Tensor] | None) -> dict[str, np.ndarray] | None:
     if action_info is None:
         return None
@@ -289,7 +264,6 @@ def action_info_to_numpy(action_info: dict[str, torch.Tensor] | None) -> dict[st
         else:
             converted[key] = np.asarray(value, dtype=np.float32)
     return converted
-
 
 def merge_action_info_into_step_info(
     info: dict[str, Any],
@@ -338,7 +312,6 @@ def merge_action_info_into_step_info(
     updated["r_soc_pen"] = penalty
     updated["r_action_pen"] = penalty
     return updated, penalty
-
 
 def validate_executed_actions_numpy(
     safety_local: np.ndarray,
@@ -391,4 +364,3 @@ def validate_executed_actions_numpy(
             f"for agent {bad_agent}: effective PV {pv_effective_kw[bad_agent]:.4f} kW, "
             f"valid range [0.0000, {pv_raw_kw[bad_agent]:.4f}] kW."
         )
-

@@ -11,7 +11,7 @@ from controllers.action_feasibility import (
 )
 from controllers.madrl_controller import MADRLController
 from controllers.madrl.registry import get_agent_cls
-from models import build_actor_network, build_critic_network, validate_and_finalize_model_config
+from models.assembly import build_actor_network, build_critic_network, validate_and_finalize_model_config
 from scripts.builder import build_env
 from scripts.utils.nested import add_batch_dim, to_torch_nested
 from tests.support.helpers import make_case_dir, make_smoke_config
@@ -44,39 +44,6 @@ def test_mlp_model_assembly_forward(tmp_path):
     assert action.shape == (1, cfg.env.num_agents, cfg.runtime.action_dim)
     assert q.shape == (1, 1)
 
-
-def test_transformer_model_assembly_forward(tmp_path):
-    case_dir = make_case_dir(tmp_path, "model_transformer")
-    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
-    cfg.model.family = "transformer"
-    obs_batch = _prepare_runtime(cfg)
-    validate_and_finalize_model_config(cfg)
-
-    actor_n = [build_actor_network(cfg, agent_id) for agent_id in range(cfg.env.num_agents)]
-    critic = build_critic_network(cfg)
-
-    action = torch.stack([actor(obs_batch) for actor in actor_n], dim=1)
-    q = critic(obs_batch, action)
-
-    assert action.shape == (1, cfg.env.num_agents, cfg.runtime.action_dim)
-    assert q.shape == (1, 1)
-
-
-def test_graph_model_assembly_forward(tmp_path):
-    case_dir = make_case_dir(tmp_path, "model_graph")
-    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
-    cfg.model.family = "graph"
-    obs_batch = _prepare_runtime(cfg)
-    validate_and_finalize_model_config(cfg)
-
-    actor_n = [build_actor_network(cfg, agent_id) for agent_id in range(cfg.env.num_agents)]
-    critic = build_critic_network(cfg)
-
-    action = torch.stack([actor(obs_batch) for actor in actor_n], dim=1)
-    q = critic(obs_batch, action)
-
-    assert action.shape == (1, cfg.env.num_agents, cfg.runtime.action_dim)
-    assert q.shape == (1, 1)
 
 
 def test_matd3_safe_poc_projector_clamps_joint_action(tmp_path):

@@ -1,19 +1,11 @@
-"""MADDPG agent implementation."""
-
 from __future__ import annotations
-
 import copy
-
 import torch
 import torch.nn.functional as F
-
 from controllers.madrl.base_agent import BaseAgent
-from models import build_actor_network, build_critic_network
+from models.assembly import build_actor_network, build_critic_network
 from scripts.utils.replay_buffer import to_torch_batch
-
-
 class MADDPG(BaseAgent):
-    """Multi-agent DDPG with centralized critic and decentralized actors."""
 
     def __init__(self, cfg: object, agent_id: int) -> None:
         self.cfg = cfg
@@ -26,13 +18,11 @@ class MADDPG(BaseAgent):
         self.tau = float(cfg.algo.tau)
         self.use_grad_clip = bool(cfg.model.use_grad_clip)
         self.grad_clip_norm = float(cfg.model.grad_clip_norm)
-
         self.actor = build_actor_network(cfg, self.agent_id).to(self.device)
         self.critic = build_critic_network(cfg).to(self.device)
         self.actor_target = copy.deepcopy(self.actor)
         self.critic_target = copy.deepcopy(self.critic)
         self._configure_runtime_acceleration()
-
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=float(cfg.train.actor_lr))
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(cfg.train.critic_lr))
 
@@ -52,7 +42,6 @@ class MADDPG(BaseAgent):
         reward = batch["reward"]
         next_obs = batch["next_obs"]
         done = batch["done"]
-
         with torch.no_grad():
             next_action = None if shared_ctx is None else shared_ctx.get("target_actor_actions_clean")
             if next_action is None:
@@ -64,21 +53,17 @@ class MADDPG(BaseAgent):
 
         current_q = self._critic_call(obs, action)
         critic_loss = F.mse_loss(current_q.float(), target_q.float())
-
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         if self.use_grad_clip:
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.grad_clip_norm)
         self.critic_optimizer.step()
-
         new_action = action.clone()
         new_action[:, self.agent_id] = self._actor_call(obs)
         actor_loss = -self._critic_call(obs, new_action).float().mean()
-
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         if self.use_grad_clip:
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.grad_clip_norm)
         self.actor_optimizer.step()
-
         self._soft_update()

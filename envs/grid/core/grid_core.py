@@ -1,22 +1,14 @@
-"""Core pandapower wrapper used by GridEnv."""
-
 from __future__ import annotations
-
 import dataclasses
 import warnings
 from typing import TYPE_CHECKING, Any
-
 import numpy as np
-
 from envs.grid.core.grid_types import GridStepResult
 from envs.grid.core.net_builder import apply_bus_injections, build_simbench_net
-
 if TYPE_CHECKING:
     from envs.grid.deployments import AgentDeployment
 
-
 class GridCore:
-    """One pandapower network instance for one environment."""
 
     def __init__(
         self,
@@ -27,12 +19,10 @@ class GridCore:
         self.grid_cfg = grid_cfg
         self.n_agents = len(deployments)
         self.agent_bus_ids = [deployment.bus_id for deployment in deployments]
-
         self.net = build_simbench_net(grid_cfg.sb_code)
         self.n_buses = int(len(self.net.bus))
         self.n_lines = int(len(self.net.line))
         self.n_trafos = int(len(getattr(self.net, "trafo", [])))
-
         bus_index_list = list(self.net.bus.index)
         self._bus_id_to_pos = {bus_id: pos for pos, bus_id in enumerate(bus_index_list)}
         for bus_id in self.agent_bus_ids:
@@ -65,7 +55,6 @@ class GridCore:
             if load_index is None and sgen_index is None:
                 self._fast_path_supported = False
             if load_index is None and sgen_index is not None:
-                # The generic path may create a missing load row on demand.
                 self._fast_path_supported = False
 
         self._last_valid = self._make_zero_result()
@@ -74,7 +63,6 @@ class GridCore:
         self._prev_converged: bool = False
 
     def reset(self, base_load_kw: np.ndarray, base_pv_kw: np.ndarray) -> None:
-        """Reset network state for a new episode."""
         del base_load_kw, base_pv_kw
         self._restore_agent_buses()
         self._last_valid = self._make_zero_result()
@@ -87,9 +75,7 @@ class GridCore:
         p_batt_kw: np.ndarray,
         base_load_kw: np.ndarray,
     ) -> GridStepResult:
-        """Apply the current injections and run one power-flow step."""
         self._restore_agent_buses()
-
         p_inject_kw = -(base_load_kw + p_batt_kw)
         bus_id_to_p_kw = {
             self.agent_bus_ids[i]: float(p_inject_kw[i]) for i in range(self.n_agents)
@@ -112,11 +98,8 @@ class GridCore:
             return dataclasses.replace(self._last_valid, converged=False)
 
     def _runpp_with_fallback(self) -> None:
-        """Run pandapower with warm-start cache plus stable fallback configurations."""
         import pandapower as pp
-
         base_kwargs = {"verbose": False}
-
         if self._last_success_kwargs is not None:
             warm_kwargs = dict(self._last_success_kwargs)
             if self._prev_converged:
@@ -165,7 +148,6 @@ class GridCore:
         )
         last_exc: Exception | None = None
         error_messages: list[str] = []
-
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             for extra_kwargs in attempts:
@@ -197,7 +179,6 @@ class GridCore:
         raise RuntimeError("pandapower.runpp failed without exposing an exception.")
 
     def _restore_agent_buses(self) -> None:
-        """Restore tracked load/sgen values before writing the next step."""
         for bus_id in self.agent_bus_ids:
             load_index = self._load_row_index_by_bus.get(bus_id)
             if load_index is not None and bus_id in self._original_load_p_mw:
@@ -212,7 +193,6 @@ class GridCore:
             q_mvar = 0.0
             sgen_index = self._sgen_row_index_by_bus.get(bus_id)
             load_index = self._load_row_index_by_bus.get(bus_id)
-
             if sgen_index is not None:
                 self.net.sgen.at[sgen_index, "p_mw"] = max(0.0, p_mw)
                 self.net.sgen.at[sgen_index, "q_mvar"] = q_mvar
@@ -229,12 +209,10 @@ class GridCore:
             apply_bus_injections(self.net, {bus_id: float(p_kw)})
 
     def _extract_result(self, *, converged: bool) -> GridStepResult:
-        """Extract the subset of pandapower results used by training and plots."""
         vm_pu = self.net.res_bus["vm_pu"].to_numpy(dtype=np.float32)
         va_degree = self.net.res_bus["va_degree"].to_numpy(dtype=np.float32)
         line_loading_pct = self.net.res_line["loading_percent"].to_numpy(dtype=np.float32)
         p_mw_from = self.net.res_line["p_from_mw"].to_numpy(dtype=np.float32)
-
         if self.n_trafos > 0 and hasattr(self.net, "res_trafo") and not self.net.res_trafo.empty:
             trafo_loading_pct = self.net.res_trafo["loading_percent"].to_numpy(dtype=np.float32)
             if "p_hv_mw" in self.net.res_trafo.columns:
@@ -249,22 +227,18 @@ class GridCore:
             [float(vm_pu[self._bus_id_to_pos[bus_id]]) for bus_id in self.agent_bus_ids],
             dtype=np.float32,
         )
-
         v_min = float(self.grid_cfg.v_min_pu)
         v_max = float(self.grid_cfg.v_max_pu)
-
         v_violation = np.maximum(0.0, v_min - agent_vm_pu) + np.maximum(
             0.0, agent_vm_pu - v_max
         )
         v_violation = v_violation.astype(np.float32)
-
         limit = float(self.grid_cfg.line_max_loading_pct)
         max_line_loading = float(np.max(line_loading_pct)) if line_loading_pct.size else 0.0
         max_trafo_loading = float(np.max(trafo_loading_pct)) if trafo_loading_pct.size else 0.0
         line_violation = float(max(0.0, max_line_loading - limit) / 100.0)
         trafo_violation = float(max(0.0, max_trafo_loading - limit) / 100.0)
         l_violation = float(max(line_violation, trafo_violation))
-
         bus_v_excess = (
             np.maximum(0.0, v_min - vm_pu) + np.maximum(0.0, vm_pu - v_max)
         ).astype(np.float32)
@@ -273,7 +247,6 @@ class GridCore:
         psi_v_raw = float(np.sum(bus_v_excess ** 2))
         psi_line_raw = float(np.sum(line_excess_arr ** 2))
         psi_trafo_raw = float(np.sum(trafo_excess_arr ** 2))
-
         return GridStepResult(
             converged=converged,
             vm_pu=vm_pu,
@@ -299,7 +272,6 @@ class GridCore:
         )
 
     def _make_zero_result(self) -> GridStepResult:
-        """Fallback result used before the first converged power flow."""
         return GridStepResult(
             converged=False,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),

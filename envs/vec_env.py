@@ -1,9 +1,5 @@
-"""Single-process vectorized environment wrapper."""
-
 from __future__ import annotations
-
 import numpy as np
-
 from envs.parallel_episode_sampling import (
     ParallelEpisodeSampler,
     validate_parallel_episode_sampling_mode,
@@ -11,15 +7,11 @@ from envs.parallel_episode_sampling import (
 )
 from scripts.utils.nested import stack_nested
 from scripts.utils.torch_runtime import derive_worker_seed
-
-
 def split_batched_actions(actions_n_batched, env_idx: int, num_agents: int):
-    """Extract one environment's per-agent actions from a batched action list."""
     return [
         np.asarray(actions_n_batched[agent_id][env_idx], dtype=np.float32)
         for agent_id in range(int(num_agents))
     ]
-
 
 def stack_step_outputs(
     obs_list,
@@ -28,16 +20,13 @@ def stack_step_outputs(
     truncated_list,
     info_list,
 ):
-    """Stack vector-environment step outputs into batched arrays."""
     batched_obs = stack_nested(obs_list)
     batched_reward = np.stack(reward_list, axis=0)
     batched_terminated = np.stack(terminated_list, axis=0)
     batched_truncated = np.stack(truncated_list, axis=0)
     return batched_obs, batched_reward, batched_terminated, batched_truncated, info_list
 
-
 class DummyVecEnv:
-    """Run multiple env copies sequentially in one process."""
 
     def __init__(
         self,
@@ -50,7 +39,6 @@ class DummyVecEnv:
     ):
         self.num_envs = int(num_envs)
         self.parallel_episode_sampling = validate_parallel_episode_sampling_mode(parallel_episode_sampling)
-
         if cfg is None:
             self.envs = [env_fn_or_cls() for _ in range(self.num_envs)]
             self.num_agents = self.envs[0].n
@@ -62,7 +50,6 @@ class DummyVecEnv:
         self._seeded_envs = [False] * self.num_envs
         self._episode_sampler: ParallelEpisodeSampler | None = None
         self._next_wave_indices: list[int] | None = None
-
         if self.parallel_episode_sampling == "unique_active":
             self._initialize_episode_sampler()
 
@@ -150,11 +137,9 @@ class DummyVecEnv:
         truncated_list: list[np.ndarray] = []
         info_list: list[dict] = []
         done_flags: list[bool] = []
-
         for env_idx, env in enumerate(self.envs):
             action_n = split_batched_actions(actions_n_batched, env_idx, self.num_agents)
             obs, reward, terminated, truncated, info = env.step(action_n)
-
             episode_done = bool(
                 info.get("episode_done", False)
                 or np.all(np.logical_or(np.asarray(terminated), np.asarray(truncated)))

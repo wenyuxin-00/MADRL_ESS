@@ -33,7 +33,7 @@ from scripts.utils.misocp_notebook_helpers import (
     plot_full_horizon_voltage,
     plot_root_exchange_alignment,
     replay_misocp_plan_package,
-    resolve_latest_compatible_misocp_plan_package_dir,
+    resolve_exact_misocp_plan_package_dir,
     save_misocp_plan_package,
     summarize_misocp_validation,
     validate_misocp_result_schema,
@@ -980,7 +980,7 @@ def test_misocp_plan_package_rejects_version_and_cfg_mismatches(tmp_path):
         replay_misocp_plan_package(cfg, saved_dir)
 
 
-def test_resolve_latest_compatible_misocp_plan_package_dir_returns_exact_dir(tmp_path):
+def test_resolve_exact_misocp_plan_package_dir_returns_exact_dir(tmp_path):
     cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
     package = build_misocp_plan_package(
         problem,
@@ -993,12 +993,12 @@ def test_resolve_latest_compatible_misocp_plan_package_dir_returns_exact_dir(tmp
     plans_root = tmp_path / "cached_plans"
     base_dir = save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5")
 
-    resolved = resolve_latest_compatible_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
+    resolved = resolve_exact_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
 
     assert resolved == base_dir.resolve()
 
 
-def test_resolve_latest_compatible_misocp_plan_package_dir_requires_exact_dir(tmp_path):
+def test_resolve_exact_misocp_plan_package_dir_requires_exact_dir(tmp_path):
     cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
     package = build_misocp_plan_package(
         problem,
@@ -1012,7 +1012,7 @@ def test_resolve_latest_compatible_misocp_plan_package_dir_requires_exact_dir(tm
     save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5_7ad699")
 
     with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
-        resolve_latest_compatible_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
+        resolve_exact_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
 
     message = str(exc_info.value)
     assert "2020-06-01_2020-06-05_agents5_7ad699" in message
@@ -1131,7 +1131,13 @@ def test_misocp_global_notebook_code_cells_compile():
     assert "config_profiles = importlib.reload(config_profiles)" in notebook_source
     assert "from controllers import mpc as mpc_pkg" in notebook_source
     assert "from controllers.mpc import global_socp_mpc as misocp_core" in notebook_source
+    assert "from scripts.utils import grid_notebook_workflow as grid_nb" in notebook_source
+    assert "from scripts.utils import misocp_notebook_helpers as misocp_nb" in notebook_source
     assert "misocp_core = importlib.reload(misocp_core)" in notebook_source
+    assert "grid_nb = importlib.reload(grid_nb)" in notebook_source
+    assert "misocp_nb = importlib.reload(misocp_nb)" in notebook_source
+    assert "Reloaded grid notebook helpers from:" in notebook_source
+    assert "Reloaded MISOCP notebook helpers from:" in notebook_source
     assert "validate_misocp_result_schema = misocp_nb.validate_misocp_result_schema" in notebook_source
     assert "build_floor_diagnostic_summary" in notebook_source
     assert "build_refinement_summary" in notebook_source

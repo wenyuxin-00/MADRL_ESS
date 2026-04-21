@@ -1,24 +1,15 @@
-"""Base utilities shared by MADRL agents."""
-
 from __future__ import annotations
-
 import importlib.util
 import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from typing import Any
-
 import numpy as np
 import torch
-
 from scripts.utils.nested import add_batch_dim, to_torch_nested
-
 _EMITTED_RUNTIME_WARNINGS: set[str] = set()
-
-
 class BaseAgent(ABC):
-    """Common actor-critic helpers shared by MADDPG and MATD3."""
 
     def _warn_runtime_once(self, message: str) -> None:
         if message in _EMITTED_RUNTIME_WARNINGS:
@@ -48,7 +39,6 @@ class BaseAgent(ABC):
             "compile_fallback_reason": None,
             "compiled_modules": [],
         }
-
         if self.device.type != "cuda":
             self.performance_summary["amp_fallback_reason"] = "CUDA device not in use."
             self.performance_summary["compile_fallback_reason"] = "CUDA device not in use."
@@ -180,12 +170,12 @@ class BaseAgent(ABC):
 
     @abstractmethod
     def act_from_torch_obs(self, obs_t: dict, noise_std: float) -> torch.Tensor:
-        """Select actions from already-device-placed torch observations."""
+        pass
 
     @abstractmethod
     def train(self, replay_buffer: Any, agent_n: list) -> None:
-        """Sample from a replay buffer and execute one update step."""
+        pass
 
     @abstractmethod
     def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
-        """Update the agent parameters from one sampled batch."""
+        pass

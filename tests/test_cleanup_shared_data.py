@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-from scripts.utils.cleanup_shared_data import (
-    _build_cli,
+from scripts.mainline_artifacts import (
     build_mainline_artifact_cleanup_plan,
     cleanup_mainline_artifacts,
     cleanup_shared_data_root,
+    purge_mainline_artifact_trash,
+    restore_mainline_artifact_trash,
 )
 
 
@@ -168,26 +167,40 @@ def test_cleanup_mainline_artifacts_dry_run_does_not_delete_candidates(tmp_path:
     result = cleanup_mainline_artifacts(tmp_path, dry_run=True)
 
     assert result["dry_run"] is True
-    assert result["removed_count"] == 0
+    assert result["staged_count"] == 0
+    assert result["batch_manifest_path"] is None
     assert paths["old_shared"].exists()
     assert paths["old_plan"].exists()
     assert paths["debug_dir"].exists()
     assert paths["price_dir"].exists()
 
 
-def test_cleanup_mainline_artifacts_removes_only_unprotected_candidates(tmp_path: Path) -> None:
+def test_cleanup_mainline_artifacts_stages_only_unprotected_candidates(tmp_path: Path) -> None:
     paths = _make_mainline_cleanup_tree(tmp_path)
 
     result = cleanup_mainline_artifacts(tmp_path, dry_run=False)
+    batch_manifest_path = Path(result["batch_manifest_path"])
+    batch_manifest = json.loads(batch_manifest_path.read_text(encoding="utf-8"))
+    staged_entries = {
+        entry["source"]: Path(entry["trash_path"])
+        for entry in batch_manifest["entries"]
+    }
 
     assert result["dry_run"] is False
-    assert result["removed_count"] == 6
+    assert result["staged_count"] == 6
+    assert batch_manifest_path.exists()
     assert not paths["lock_dir"].exists()
     assert not paths["tmp_dir"].exists()
     assert not paths["old_shared"].exists()
     assert not paths["old_plan"].exists()
     assert not paths["debug_dir"].exists()
     assert not paths["price_dir"].exists()
+    assert staged_entries[str(paths["lock_dir"])].exists()
+    assert staged_entries[str(paths["tmp_dir"])].exists()
+    assert staged_entries[str(paths["old_shared"])].exists()
+    assert staged_entries[str(paths["old_plan"])].exists()
+    assert staged_entries[str(paths["debug_dir"])].exists()
+    assert staged_entries[str(paths["price_dir"])].exists()
     assert paths["keep_shared"].exists()
     assert paths["protected_plan"].exists()
     assert paths["backup_plan"].exists()
@@ -196,8 +209,39 @@ def test_cleanup_mainline_artifacts_removes_only_unprotected_candidates(tmp_path
     assert paths["pv_dir"].exists()
 
 
-def test_cleanup_shared_data_cli_rejects_removed_legacy_schema_flag() -> None:
-    parser = _build_cli()
+def test_restore_mainline_artifact_trash_restores_latest_batch(tmp_path: Path) -> None:
+    paths = _make_mainline_cleanup_tree(tmp_path)
+    staged = cleanup_mainline_artifacts(tmp_path, dry_run=False)
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--purge-legacy-schema"])
+    result = restore_mainline_artifact_trash(tmp_path, dry_run=False)
+
+    assert result["dry_run"] is False
+    assert result["batch_id"] == staged["batch_id"]
+    assert result["restored_count"] == 6
+    assert paths["lock_dir"].exists()
+    assert paths["tmp_dir"].exists()
+    assert paths["old_shared"].exists()
+    assert paths["old_plan"].exists()
+    assert paths["debug_dir"].exists()
+    assert paths["price_dir"].exists()
+    assert Path(result["trash_root"]).exists()
+    assert list(Path(result["trash_root"]).iterdir()) == []
+
+
+def test_purge_mainline_artifact_trash_clears_latest_batch(tmp_path: Path) -> None:
+    paths = _make_mainline_cleanup_tree(tmp_path)
+    staged = cleanup_mainline_artifacts(tmp_path, dry_run=False)
+
+    result = purge_mainline_artifact_trash(tmp_path, dry_run=False)
+
+    assert result["dry_run"] is False
+    assert result["batch_id"] == staged["batch_id"]
+    assert result["purged_count"] == 6
+    assert not paths["lock_dir"].exists()
+    assert not paths["tmp_dir"].exists()
+    assert not paths["old_shared"].exists()
+    assert not paths["old_plan"].exists()
+    assert not paths["debug_dir"].exists()
+    assert not paths["price_dir"].exists()
+    assert Path(result["trash_root"]).exists()
+    assert list(Path(result["trash_root"]).iterdir()) == []

@@ -1,25 +1,17 @@
-"""Checkpoint helpers for training and notebook workflows."""
-
 from __future__ import annotations
-
 import json
 import re
 from datetime import datetime
 from pathlib import Path
-
-
 LATEST_CHECKPOINT_MANIFEST = "latest_checkpoint.json"
 TAGGED_CHECKPOINT_MANIFEST = "checkpoint_ep_{episode_tag}.json"
 ACTOR_TAG_PATTERN = re.compile(r"actor_agent_\d+_ep_(\d+)\.pth$")
 CRITIC_TAG_PATTERN = re.compile(r"critic_agent_\d+_ep_(\d+)\.pth$")
 RUN_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
-
-
 def slugify_checkpoint_token(value: str | None, *, default: str) -> str:
     text = str(value or "").strip().lower()
     text = RUN_TOKEN_PATTERN.sub("_", text).strip("_")
     return text or default
-
 
 def build_checkpoint_budget_token(
     *,
@@ -30,14 +22,12 @@ def build_checkpoint_budget_token(
         return f"steps{int(max_train_steps)}"
     return f"ep{int(train_episodes or 0)}"
 
-
 def _format_run_timestamp(timestamp: datetime | str | None = None) -> str:
     if timestamp is None:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
     if isinstance(timestamp, datetime):
         return timestamp.strftime("%Y%m%d_%H%M%S")
     return str(timestamp).strip()
-
 
 def build_training_run_label(
     *,
@@ -65,7 +55,6 @@ def build_training_run_label(
             time_token,
         ]
     )
-
 
 def build_training_run_paths(
     checkpoint_root,
@@ -104,7 +93,6 @@ def build_training_run_paths(
         "log_path": meta_dir / "train.log",
     }
 
-
 def find_latest_training_run(
     checkpoint_root,
     *,
@@ -135,22 +123,16 @@ def find_latest_training_run(
         raise FileNotFoundError(f"No run directories found under '{base_dir}'.")
     return candidates[-1]
 
-
 def get_algorithm_checkpoint_dir(model_dir, algorithm: str) -> Path:
-    """Return the algorithm-specific checkpoint directory."""
     return Path(model_dir) / algorithm
 
-
 def checkpoint_tag_exists(algo_dir, episode_tag: int) -> bool:
-    """Check whether the requested actor and critic checkpoint files exist."""
     algo_dir = Path(algo_dir)
     actor_files = list(algo_dir.glob(f"actor_agent_*_ep_{episode_tag}.pth"))
     critic_files = list(algo_dir.glob(f"critic_agent_*_ep_{episode_tag}.pth"))
     return bool(actor_files) and bool(critic_files)
 
-
 def infer_latest_checkpoint_tag(model_dir, algorithm: str) -> int:
-    """Infer the latest complete checkpoint tag by scanning filenames."""
     algo_dir = get_algorithm_checkpoint_dir(model_dir, algorithm)
     if not algo_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory does not exist: '{algo_dir}'")
@@ -172,7 +154,6 @@ def infer_latest_checkpoint_tag(model_dir, algorithm: str) -> int:
         )
     return common_tags[-1]
 
-
 def build_checkpoint_manifest(
     *,
     algorithm: str,
@@ -183,7 +164,6 @@ def build_checkpoint_manifest(
     episode_limit: int,
     save_dir,
 ) -> dict:
-    """Build the lightweight manifest stored next to saved checkpoints."""
     return {
         "algorithm": algorithm,
         "saved_episode_tag": int(saved_episode_tag),
@@ -194,25 +174,19 @@ def build_checkpoint_manifest(
         "save_dir": str(Path(save_dir).resolve()),
     }
 
-
 def write_checkpoint_manifest(algo_dir, manifest: dict) -> dict:
-    """Write both the latest and the tagged checkpoint manifests."""
     algo_dir = Path(algo_dir)
     algo_dir.mkdir(parents=True, exist_ok=True)
-
     latest_path = algo_dir / LATEST_CHECKPOINT_MANIFEST
     tagged_path = algo_dir / TAGGED_CHECKPOINT_MANIFEST.format(
         episode_tag=manifest["saved_episode_tag"]
     )
     payload = dict(manifest)
-
     latest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tagged_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
 
-
 def load_latest_checkpoint_manifest(model_dir, algorithm: str) -> dict:
-    """Load the latest checkpoint manifest for one algorithm."""
     algo_dir = get_algorithm_checkpoint_dir(model_dir, algorithm)
     manifest_path = algo_dir / LATEST_CHECKPOINT_MANIFEST
     if not manifest_path.exists():
@@ -221,12 +195,9 @@ def load_latest_checkpoint_manifest(model_dir, algorithm: str) -> dict:
         )
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
-
 def resolve_checkpoint_to_load(model_dir, algorithm: str, episode_tag: int | None = None) -> dict:
-    """Resolve which checkpoint tag should be loaded."""
     algo_dir = get_algorithm_checkpoint_dir(model_dir, algorithm)
     manifest = None
-
     if episode_tag is None:
         try:
             manifest = load_latest_checkpoint_manifest(model_dir, algorithm)

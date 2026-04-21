@@ -1,9 +1,5 @@
-"""Observation builder that reads exact precomputed sequence features."""
-
 from __future__ import annotations
-
 import numpy as np
-
 from envs.observation.base import ObservationBuilder
 from envs.observation.feature_blocks import (
     broadcast_scalar_feature,
@@ -16,12 +12,8 @@ from envs.observation.features import (
     resolve_sequence_features,
 )
 from envs.observation.normalization import ObservationNormalizer
-
 _SAFETY_LOCAL_FIELDS = ["soc_raw", "load_raw", "pv_raw", "battery_capacity_kwh", "p_max_kw"]
-
-
 class PrecomputedObservationBuilder(ObservationBuilder):
-    """Build structured observations from precomputed sequence features plus live state."""
 
     def __init__(
         self,
@@ -140,6 +132,3 @@ class PrecomputedObservationBuilder(ObservationBuilder):
                 values = self.normalizer.transform_sequence(spec.name, values)
             obs[spec.field_name()] = values.astype(np.float32)
         return obs
-
-
-__all__ = ["PrecomputedObservationBuilder"]

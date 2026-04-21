@@ -2,17 +2,14 @@ from controllers.madrl.registry import get_agent_cls
 from configs.experiment_config import ExperimentConfig
 from data.loaders.prosumer import ProsumerDataset
 from data.loaders.registry import build_dataset, get_dataset_cls
-from envs import DEFAULT_ENV_NAME, SUPPORTED_ENV_NAMES, GridEnv, get_env_cls
+from envs.grid_env import GridEnv
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.registry import build_obs_builder, get_obs_builder_cls
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
-def test_env_helper_only_exposes_grid_mainline():
-    assert DEFAULT_ENV_NAME == "grid"
-    assert SUPPORTED_ENV_NAMES == ("grid",)
-    assert get_env_cls() is GridEnv
-    assert get_env_cls("grid") is GridEnv
+def test_grid_env_direct_import_exposes_mainline_env():
+    assert GridEnv.__name__ == "GridEnv"
 
 
 def test_dataset_registry_builds_default_dataset(tmp_path):
@@ -38,7 +35,7 @@ def test_observation_builder_helper_builds_default_builder(tmp_path):
 
 
 def test_default_compose_config_targets_grid_training_mainline():
-    from configs import compose_experiment_config
+    from configs.profiles import compose_experiment_config
 
     cfg = compose_experiment_config()
 

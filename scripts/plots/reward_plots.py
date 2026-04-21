@@ -1,24 +1,15 @@
-"""Reward decomposition plotting helpers."""
-
 from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-
 _AGGREGATE_STYLES = {
     "grid_safety_penalty": ("#111827", "Grid penalty aggregate (signed contribution)"),
 }
-
-
 def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
     return pd.Series(data).rolling(window=window, min_periods=1).mean().to_numpy()
-
 
 def _load_reward_summary(reward_summary) -> dict[str, Any]:
     if isinstance(reward_summary, (str, Path)):
@@ -27,14 +18,12 @@ def _load_reward_summary(reward_summary) -> dict[str, Any]:
         return reward_summary
     raise TypeError("reward_summary must be a mapping or a path to a JSON file.")
 
-
 def plot_reward_decomposition(
     *,
     title: str = "Training Reward Decomposition",
     window: int = 20,
     reward_summary,
 ):
-    """Plot total reward and reward components over episodes."""
     resolved_summary = _load_reward_summary(reward_summary)
     if not resolved_summary:
         return None
@@ -54,7 +43,6 @@ def plot_reward_decomposition(
     fig, axs = plt.subplots(n_plots, 1, figsize=(10.5, 2.35 * n_plots), sharex=True)
     axs = np.atleast_1d(axs)
     fig.suptitle(title, fontsize=15)
-
     def _plot(ax, x_values, data, color, name):
         y_values = np.asarray(data, dtype=np.float32)
         ma = _moving_average(y_values, window=window)
@@ -68,7 +56,6 @@ def plot_reward_decomposition(
     plot_index = 0
     _plot(axs[plot_index], episodes, ep_total, "red", "1) Episode Total Reward (sum over agents)")
     plot_index += 1
-
     for aggregate_offset, (aggregate_key, values) in enumerate(aggregates.items(), start=plot_index + 1):
         color, label = _AGGREGATE_STYLES.get(
             aggregate_key,
@@ -76,7 +63,6 @@ def plot_reward_decomposition(
         )
         _plot(axs[aggregate_offset - 1], episodes, values, color, f"{aggregate_offset}) {label}")
     plot_index += len(aggregates)
-
     for component_offset, (component_key, payload) in enumerate(components.items(), start=plot_index + 1):
         label = str(payload.get("label", component_key))
         color = str(payload.get("color", "#2563eb"))

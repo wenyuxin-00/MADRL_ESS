@@ -1,18 +1,10 @@
-"""Isolated MATD3 safe-layer PoC implementation."""
-
 from __future__ import annotations
-
 import time
-
 import torch
 import torch.nn.functional as F
-
 from controllers.madrl.matd3 import MATD3
 from controllers.madrl.safety_projector import JointGridSafetyProjector
-
-
 class MATD3SafePOC(MATD3):
-    """MATD3 branch that projects joint actions before critic/actor updates."""
 
     def __init__(self, cfg: object, agent_id: int) -> None:
         super().__init__(cfg, agent_id)
@@ -118,7 +110,6 @@ class MATD3SafePOC(MATD3):
             batch_size=int(flat_candidate_actions.shape[0]),
             elapsed_s=projection_elapsed,
         )
-
         projected_policy_actions = flat_projected_actions.reshape(
             n_agents,
             batch_size,
@@ -131,13 +122,11 @@ class MATD3SafePOC(MATD3):
 
     def train_on_batch(self, batch: dict, agent_n: list, shared_ctx: dict | None = None) -> None:
         self.actor_pointer += 1
-
         obs = batch["obs"]
         action = batch["action"]
         reward = batch["reward"]
         next_obs = batch["next_obs"]
         done = batch["done"]
-
         with torch.no_grad():
             projected_next_action = self._get_projected_target_actions(next_obs, agent_n, shared_ctx)
             q1_next, q2_next = self._critic_target_call(next_obs, projected_next_action)
@@ -152,20 +141,17 @@ class MATD3SafePOC(MATD3):
             current_q2.float(),
             target_q_fp32,
         )
-
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         if self.use_grad_clip:
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.grad_clip_norm)
         self.critic_optimizer.step()
-
         if self.actor_pointer % self.policy_update_freq != 0:
             return
 
         projected_policy_actions = self._get_projected_policy_actions(obs, action, agent_n, shared_ctx)
         q1_policy, _ = self._critic_call(obs, projected_policy_actions[self.agent_id])
         actor_loss = -q1_policy.float().mean()
-
         self.actor_optimizer.zero_grad()
         if shared_ctx is None:
             actor_loss.backward()
@@ -186,6 +172,3 @@ class MATD3SafePOC(MATD3):
                 torch.nn.utils.clip_grad_norm_(agent.actor.parameters(), agent.grad_clip_norm)
             agent.actor_optimizer.step()
             agent._soft_update()
-
-
-__all__ = ["MATD3SafePOC"]

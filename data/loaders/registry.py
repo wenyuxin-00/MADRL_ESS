@@ -1,26 +1,17 @@
-"""Dataset helpers for the processed prosumer mainline."""
-
 from __future__ import annotations
-
 from pathlib import Path
-
 from data.loaders.prosumer import ProsumerDataset
-
 DATASET_REGISTRY: dict[str, type] = {
     "prosumer": ProsumerDataset,
 }
 _USE_CFG_VALUE = object()
-
-
 def register_dataset(name: str, dataset_cls: type) -> None:
     DATASET_REGISTRY[name] = dataset_cls
-
 
 def get_dataset_cls(name: str = "prosumer") -> type:
     if name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset '{name}', available: {list(DATASET_REGISTRY)}")
     return DATASET_REGISTRY[name]
-
 
 def _normalized_optional_date(value: str | None) -> str | None:
     if value is None:
@@ -28,10 +19,8 @@ def _normalized_optional_date(value: str | None) -> str | None:
     text = str(value).strip()
     return None if text == "" else text
 
-
 def _same_year_has_explicit_train_range(cfg) -> bool:
     return bool(_normalized_optional_date(cfg.data.train_start_date) or _normalized_optional_date(cfg.data.train_end_date))
-
 
 def _resolve_split_dates(
     cfg,
@@ -64,7 +53,6 @@ def _resolve_split_dates(
     if override_exclude_end_date is not _USE_CFG_VALUE:
         exclude_end_date = _normalized_optional_date(override_exclude_end_date)
     return selected_year, start_date, end_date, exclude_start_date, exclude_end_date
-
 
 def build_dataset(
     cfg,

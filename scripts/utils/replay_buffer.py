@@ -1,31 +1,12 @@
-"""Experience replay buffer utilities."""
-
 from __future__ import annotations
-
 import numpy as np
 import torch
-
 from scripts.utils.nested import NestedArray, to_torch_nested
-
-
 def _allocate_nested_storage(schema: dict[str, tuple[int, ...]], buffer_size: int) -> dict[str, np.ndarray]:
     return {
         key: np.zeros((buffer_size, *tuple(shape)), dtype=np.float32)
         for key, shape in schema.items()
     }
-
-
-def _store_nested_at(
-    storage: dict[str, np.ndarray],
-    payload: NestedArray,
-    *,
-    source_index: int,
-    target_index: int,
-) -> None:
-    assert isinstance(payload, dict)
-    for key, value in payload.items():
-        storage[key][target_index] = np.asarray(value[source_index], dtype=np.float32)
-
 
 def _store_nested_range(
     storage: dict[str, np.ndarray],
@@ -38,13 +19,11 @@ def _store_nested_range(
     for key, value in payload.items():
         storage[key][target_slice] = np.asarray(value[source_slice], dtype=np.float32)
 
-
 def _sample_nested(storage: dict[str, np.ndarray], indices: np.ndarray) -> dict[str, np.ndarray]:
     return {
         key: np.asarray(value[indices], dtype=np.float32).copy()
         for key, value in storage.items()
     }
-
 
 def _sample_nested_into(
     storage: dict[str, np.ndarray],
@@ -54,27 +33,8 @@ def _sample_nested_into(
     for key, value in storage.items():
         np.take(value, indices, axis=0, out=out[key])
 
-
-def _sample_nested_torch(
-    storage: dict[str, np.ndarray],
-    indices: np.ndarray,
-    device: torch.device,
-    *,
-    pin_memory: bool,
-    non_blocking: bool,
-) -> dict[str, torch.Tensor]:
-    batch: dict[str, torch.Tensor] = {}
-    for key, value in storage.items():
-        tensor = torch.from_numpy(np.ascontiguousarray(value[indices]))
-        if pin_memory and device.type == "cuda":
-            tensor = tensor.pin_memory()
-        batch[key] = tensor.to(device=device, non_blocking=non_blocking)
-    return batch
-
-
 def _tensor_to_numpy_view(tensor: torch.Tensor) -> np.ndarray:
     return tensor.numpy()
-
 
 def _tensor_nested_to_device(
     payload: dict[str, torch.Tensor],
@@ -88,9 +48,7 @@ def _tensor_nested_to_device(
         for key, tensor in payload.items()
     }
 
-
 class ReplayBuffer:
-    """Preallocated ring-buffer for canonical transition dictionaries."""
 
     def __init__(self, cfg: object) -> None:
         if not getattr(cfg.runtime, "observation_schema", None):
@@ -131,12 +89,10 @@ class ReplayBuffer:
         next_obs: NestedArray,
         done: np.ndarray,
     ) -> None:
-        """Store one batched env rollout step."""
         action = np.asarray(action, dtype=np.float32)
         reward = np.asarray(reward, dtype=np.float32)
         done = np.asarray(done, dtype=np.float32)
         num_envs = int(action.shape[0])
-
         first_block = min(num_envs, self.buffer_size - self.position)
         if first_block > 0:
             target_slice = slice(self.position, self.position + first_block)
@@ -181,7 +137,6 @@ class ReplayBuffer:
         self.current_size = min(self.current_size + num_envs, self.buffer_size)
 
     def sample(self) -> dict[str, NestedArray]:
-        """Sample a canonical transition batch as numpy arrays."""
         indices = self._sample_indices()
         return {
             "obs": _sample_nested(self.obs_storage, indices),
@@ -198,7 +153,6 @@ class ReplayBuffer:
         pin_memory: bool = False,
         non_blocking: bool = False,
     ) -> dict[str, NestedArray]:
-        """Sample a canonical transition batch directly as torch tensors."""
         resolved_device = torch.device(device)
         indices = self._sample_indices()
         staging = self._get_torch_staging_cache(
@@ -289,7 +243,6 @@ class ReplayBuffer:
             dtype=torch.float32,
             pin_memory=use_pinned,
         )
-
         cache = {
             "obs_tensors": obs_tensors,
             "obs_numpy": {key: _tensor_to_numpy_view(tensor) for key, tensor in obs_tensors.items()},
@@ -321,9 +274,7 @@ class ReplayBuffer:
             tensor = tensor.pin_memory()
         return tensor.to(device=device, non_blocking=non_blocking)
 
-
 def to_torch_batch(batch: dict[str, NestedArray], device: torch.device | str) -> dict[str, NestedArray]:
-    """Convert a sampled canonical batch to torch tensors."""
     return {
         "obs": to_torch_nested(batch["obs"], device),
         "action": to_torch_nested(batch["action"], device),
