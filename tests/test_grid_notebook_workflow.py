@@ -1972,3 +1972,60 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
 
     bundles = validate_compare_model_bundles(model_roots)
     assert set(bundles) == set(model_roots)
+
+
+def test_validate_compare_model_bundles_rejects_removed_legacy_reward_keys(tmp_path):
+    meta_dir = (tmp_path / "train_base" / "_meta")
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    payloads = {
+        "train_result.json": {"model_root": str((tmp_path / "train_base").resolve())},
+        "experiment_controls.json": {
+            "seed": 0,
+            "reward_controls": {
+                "w_action_pen": 2.0,
+            },
+            "forecast_controls": {"history_window": 96},
+            "model_controls": {"hidden_dim": 256},
+        },
+        "data_controls.json": {
+            "prediction_mode": "normal",
+            "agent_profiles": ["SFH12", "SFH14"],
+            "agent_bus_ids": [6, 10],
+            "load_scale": [1.0, 1.0],
+            "pv_scale": [1.0, 1.0],
+            "future_horizon": 24,
+            "train_year": 2019,
+            "test_year": 2020,
+            "test_start_date": 20200101,
+            "test_end_date": 20200103,
+        },
+        "battery_controls.json": {"battery_capacity": [5.0, 6.0], "max_charge_rate": 0.5},
+        "train_controls.json": {
+            "profile": "gpu_fast",
+            "model_family": "mlp",
+            "train_episodes": 10,
+            "max_train_steps": 100,
+            "num_envs": 2,
+            "vec_env_type": "subproc",
+            "batch_size": 256,
+            "buffer_size": 4096,
+            "update_interval": 1,
+            "updates_per_step": 1,
+            "policy_update_freq": 2,
+            "use_noise_decay": True,
+            "noise_std_init": 0.2,
+            "noise_std_min": 0.05,
+        },
+        "checkpoint_controls.json": {"experiment_name": "train_base"},
+    }
+    for filename, payload in payloads.items():
+        (meta_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="w_action_pen"):
+        validate_compare_model_bundles(
+            {
+                "train_base": tmp_path / "train_base",
+                "train_base_safe": tmp_path / "train_base",
+                "train_projection_safe": tmp_path / "train_base",
+            }
+        )

@@ -139,17 +139,23 @@ def _apply_runtime_controls(cfg, runtime_controls: dict[str, Any] | None) -> Non
 
 def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
     controls = dict(reward_controls or {})
-    _DEPRECATED_REWARD_KEYS = {"lambda_throughput"}
+    removed_reward_keys = {
+        "lambda_throughput": "Remove 'lambda_throughput'; it is no longer supported.",
+        "w_action_pen": "Use 'w_soc_pen' instead of 'w_action_pen'.",
+    }
+    removed_hits = sorted(set(controls).intersection(removed_reward_keys))
+    if removed_hits:
+        details = " ".join(removed_reward_keys[key] for key in removed_hits)
+        raise ValueError(f"Legacy reward_controls key(s) are no longer supported: {removed_hits}. {details}")
     _KNOWN_REWARD_KEYS = {
         "export_subsidy_eur_per_kwh",
         "import_price_markup_eur_per_kwh",
         "w_soc_pen",
-        "w_action_pen",
         "w_voltage_pen",
         "w_line_pen",
         "w_trafo_pen",
     }
-    unknown_keys = set(controls.keys()) - _KNOWN_REWARD_KEYS - _DEPRECATED_REWARD_KEYS
+    unknown_keys = set(controls.keys()) - _KNOWN_REWARD_KEYS
     if unknown_keys:
         raise ValueError(
             f"Unknown reward_controls key(s): {sorted(unknown_keys)}. "
@@ -157,8 +163,6 @@ def _apply_reward_controls(cfg, reward_controls: dict[str, Any] | None) -> None:
         )
     if "w_soc_pen" in controls:
         cfg.reward.w_soc_pen = float(controls["w_soc_pen"])
-    elif "w_action_pen" in controls:
-        cfg.reward.w_soc_pen = float(controls["w_action_pen"])
     numeric_fields = (
         "export_subsidy_eur_per_kwh",
         "import_price_markup_eur_per_kwh",

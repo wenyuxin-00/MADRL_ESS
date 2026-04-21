@@ -11,7 +11,9 @@ class NormalReward(RewardFn):
     """Purchase-cost reward with export subsidy and grid-safety penalties."""
 
     def __init__(self, cfg: object) -> None:
-        self.w_soc_pen = float(getattr(cfg.reward, "w_soc_pen", getattr(cfg.reward, "w_action_pen", 10.0)))
+        if hasattr(cfg.reward, "w_action_pen") and not hasattr(cfg.reward, "w_soc_pen"):
+            raise AttributeError("cfg.reward.w_action_pen is no longer supported; use cfg.reward.w_soc_pen instead.")
+        self.w_soc_pen = float(cfg.reward.w_soc_pen)
         self.export_subsidy_eur_per_kwh = float(getattr(cfg.reward, "export_subsidy_eur_per_kwh", 0.079))
         self.w_voltage_pen = float(cfg.reward.w_voltage_pen)
         self.w_line_pen = float(getattr(cfg.reward, "w_line_pen", 0.0))

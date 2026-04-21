@@ -16,7 +16,7 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         cfg.runtime.action_dim = int(env.action_space[0].shape[0])
 
         obs, _ = env.reset(episode_idx=0)
-        action_n = [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
+        action_n = [np.zeros((cfg.runtime.action_dim,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, _ = env.step(action_n)
         done = np.logical_or(np.asarray(terminated), np.asarray(truncated)).astype(np.float32)
 

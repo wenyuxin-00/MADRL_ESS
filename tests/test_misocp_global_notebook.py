@@ -980,7 +980,7 @@ def test_misocp_plan_package_rejects_version_and_cfg_mismatches(tmp_path):
         replay_misocp_plan_package(cfg, saved_dir)
 
 
-def test_resolve_latest_compatible_misocp_plan_package_dir_prefers_newest_matching_prefix(tmp_path):
+def test_resolve_latest_compatible_misocp_plan_package_dir_returns_exact_dir(tmp_path):
     cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
     package = build_misocp_plan_package(
         problem,
@@ -992,22 +992,31 @@ def test_resolve_latest_compatible_misocp_plan_package_dir_prefers_newest_matchi
     )
     plans_root = tmp_path / "cached_plans"
     base_dir = save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5")
-    newer_dir = save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5_7ad699")
-
-    base_manifest_path = base_dir / "manifest.json"
-    base_manifest = json.loads(base_manifest_path.read_text(encoding="utf-8"))
-    base_manifest["plan_package_version"] = 3
-    base_manifest["saved_at_utc"] = "2026-01-01T00:00:00+00:00"
-    base_manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
-
-    newer_manifest_path = newer_dir / "manifest.json"
-    newer_manifest = json.loads(newer_manifest_path.read_text(encoding="utf-8"))
-    newer_manifest["saved_at_utc"] = "2026-04-15T12:00:00+00:00"
-    newer_manifest_path.write_text(json.dumps(newer_manifest, indent=2), encoding="utf-8")
 
     resolved = resolve_latest_compatible_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
 
-    assert resolved == newer_dir.resolve()
+    assert resolved == base_dir.resolve()
+
+
+def test_resolve_latest_compatible_misocp_plan_package_dir_requires_exact_dir(tmp_path):
+    cfg, problem, full_input, result = _make_real_problem_fixture(tmp_path)
+    package = build_misocp_plan_package(
+        problem,
+        full_input,
+        result,
+        controller_label="Global MISOCP (single_window)",
+        export_subsidy=float(cfg.reward.export_subsidy_eur_per_kwh),
+        cfg=cfg,
+    )
+    plans_root = tmp_path / "cached_plans"
+    save_misocp_plan_package(package, plans_root / "2020-06-01_2020-06-05_agents5_7ad699")
+
+    with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
+        resolve_latest_compatible_misocp_plan_package_dir(plans_root / "2020-06-01_2020-06-05_agents5")
+
+    message = str(exc_info.value)
+    assert "2020-06-01_2020-06-05_agents5_7ad699" in message
+    assert "exact package directory" in message
 
 
 def test_misocp_notebook_plot_helpers_return_figures():

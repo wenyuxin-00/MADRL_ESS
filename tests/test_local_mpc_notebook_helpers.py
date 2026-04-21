@@ -309,7 +309,7 @@ def test_replay_local_mpc_rollout_package_rejects_solver_fingerprint_mismatch(tm
         )
 
 
-def test_resolve_latest_compatible_local_mpc_rollout_package_dir_prefers_newest_match(tmp_path):
+def test_resolve_latest_compatible_local_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -324,7 +324,6 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_prefers_newest_
 
     prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
     base_dir = local_mpc_nb.save_local_mpc_rollout_package(package, prefix)
-    newer_dir = local_mpc_nb.save_local_mpc_rollout_package(package, tmp_path / f"{prefix.name}_newer")
 
     resolved = local_mpc_nb.resolve_latest_compatible_local_mpc_rollout_package_dir(
         prefix,
@@ -333,10 +332,10 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_prefers_newest_
     )
 
     assert base_dir.exists()
-    assert resolved == newer_dir.resolve()
+    assert resolved == base_dir.resolve()
 
 
-def test_resolve_latest_compatible_local_mpc_rollout_package_dir_reports_candidate_reasons(tmp_path):
+def test_resolve_latest_compatible_local_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -353,7 +352,7 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_reports_candida
     prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
     local_mpc_nb.save_local_mpc_rollout_package(package, tmp_path / f"{prefix.name}_badsolver")
 
-    with pytest.raises(FileNotFoundError, match="Expected prefix='2020-06-01_2020-06-02_agents2_normal_lstm'") as exc_info:
+    with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
         local_mpc_nb.resolve_latest_compatible_local_mpc_rollout_package_dir(
             prefix,
             cfg=cfg,
@@ -361,6 +360,5 @@ def test_resolve_latest_compatible_local_mpc_rollout_package_dir_reports_candida
         )
 
     message = str(exc_info.value)
-    assert "discovered_candidates=" in message
-    assert "local_mpc_solver_fingerprint mismatch at 'objective_mode'" in message
-    assert "Please run notebooks/madrl/local_MPC.ipynb" in message
+    assert "2020-06-01_2020-06-02_agents2_normal_lstm_badsolver" in message
+    assert "exact rollout package directory" in message

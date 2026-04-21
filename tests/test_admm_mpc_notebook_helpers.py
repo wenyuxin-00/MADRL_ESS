@@ -1189,7 +1189,7 @@ def test_load_admm_mpc_rollout_package_rejects_version_mismatch(tmp_path):
         admm_mpc_nb.load_admm_mpc_rollout_package(saved_dir)
 
 
-def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_prefers_newest_match(tmp_path):
+def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_returns_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -1213,7 +1213,6 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_prefers_newest_m
 
     prefix = tmp_path / "2020-06-01_2020-06-02_agents2_normal_lstm"
     base_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, prefix)
-    newer_dir = admm_mpc_nb.save_admm_mpc_rollout_package(package, tmp_path / f"{prefix.name}_newer")
 
     resolved = admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
         prefix,
@@ -1231,10 +1230,10 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_prefers_newest_m
     )
 
     assert base_dir.exists()
-    assert resolved == newer_dir.resolve()
+    assert resolved == base_dir.resolve()
 
 
-def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_reports_candidate_reasons(tmp_path):
+def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_requires_exact_dir(tmp_path):
     cfg = _make_cfg(future_horizon=4, n_agents=2, test_end_date="2020-06-02")
     cfg.env.episode_limit = 96
     cfg.forecast.type = "lstm"
@@ -1259,7 +1258,7 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_reports_candidat
     )
     admm_mpc_nb.save_admm_mpc_rollout_package(incompatible_package, tmp_path / f"{prefix.name}_badsolver")
 
-    with pytest.raises(FileNotFoundError, match="Expected prefix='2020-06-01_2020-06-02_agents2_normal_lstm'") as exc_info:
+    with pytest.raises(FileNotFoundError, match="requires one exact package directory") as exc_info:
         admm_mpc_nb.resolve_latest_compatible_admm_mpc_rollout_package_dir(
             prefix,
             cfg=cfg,
@@ -1276,6 +1275,5 @@ def test_resolve_latest_compatible_admm_mpc_rollout_package_dir_reports_candidat
         )
 
     message = str(exc_info.value)
-    assert "discovered_candidates=" in message
-    assert "admm_solver_fingerprint mismatch at 'max_iters'" in message
-    assert "Please run notebooks/madrl/ADMM_mpc.ipynb" in message
+    assert "2020-06-01_2020-06-02_agents2_normal_lstm_badsolver" in message
+    assert "exact rollout package directory" in message

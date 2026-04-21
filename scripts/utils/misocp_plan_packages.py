@@ -1,0 +1,1107 @@
+"""Cached plan package helpers for the global MISOCP notebook flow."""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY, PRICE_PROTOCOL_VERSION
+
+_PLAN_PACKAGE_VERSION = 12
+_CFG_FLOAT_RTOL = 1e-6
+_CFG_FLOAT_ATOL = 1e-6
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, pd.Series):
+        return value.to_dict()
+    return value
+
+
+def _build_cfg_snapshot_from_cfg(cfg: Any) -> dict[str, Any]:
+    return {
+        "test_start_date": str(getattr(getattr(cfg, "data", None), "test_start_date", "")),
+        "test_end_date": str(getattr(getattr(cfg, "data", None), "test_end_date", "")),
+        "agent_profiles": [str(value) for value in list(getattr(getattr(cfg, "data", None), "agent_profiles", []))],
+        "agent_bus_ids": [int(value) for value in list(getattr(getattr(cfg, "grid", None), "agent_bus_ids", []))],
+        "load_scale": [float(value) for value in list(getattr(getattr(cfg, "data", None), "load_scale", []))],
+        "pv_scale": [float(value) for value in list(getattr(getattr(cfg, "data", None), "pv_scale", []))],
+        "future_horizon": int(getattr(getattr(cfg, "env", None), "future_horizon", 0)),
+        "sb_code": str(getattr(getattr(cfg, "grid", None), "sb_code", "")),
+        "line_max_loading_pct": float(getattr(getattr(cfg, "grid", None), "line_max_loading_pct", np.nan)),
+        "v_min_pu": float(getattr(getattr(cfg, "grid", None), "v_min_pu", np.nan)),
+        "v_max_pu": float(getattr(getattr(cfg, "grid", None), "v_max_pu", np.nan)),
+        "battery_capacity": [float(value) for value in list(getattr(getattr(cfg, "env", None), "battery_capacity", []))],
+        "max_charge_rate": float(getattr(getattr(cfg, "env", None), "max_charge_rate", np.nan)),
+        "efficiency": float(getattr(getattr(cfg, "env", None), "efficiency", np.nan)),
+        "init_soc": float(getattr(getattr(cfg, "env", None), "init_soc", np.nan)),
+        "soc_min": float(getattr(getattr(cfg, "env", None), "soc_min", np.nan)),
+        "soc_max": float(getattr(getattr(cfg, "env", None), "soc_max", np.nan)),
+        "soc_target": float(getattr(getattr(cfg, "env", None), "soc_target", np.nan)),
+        "export_subsidy_eur_per_kwh": float(
+            getattr(getattr(cfg, "reward", None), "export_subsidy_eur_per_kwh", np.nan)
+        ),
+        IMPORT_PRICE_MARKUP_KEY: float(getattr(getattr(cfg, "reward", None), IMPORT_PRICE_MARKUP_KEY, 0.0)),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+        "branch_current_tiebreaker_eur_per_pu_step": float(
+            getattr(getattr(cfg, "mpc", None), "branch_current_tiebreaker_eur_per_pu_step", 0.0)
+        ),
+        "physics_refinement_mode": str(getattr(getattr(cfg, "mpc", None), "physics_refinement_mode", "none")),
+        "physics_refinement_slack_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_ratio", 2e-2)
+        ),
+        "physics_refinement_slack_abs_floor_eur": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": [
+            float(value)
+            for value in list(
+                getattr(getattr(cfg, "mpc", None), "physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+            )
+        ],
+        "physics_refinement_slack_abs_floor_schedule_eur": [
+            float(value)
+            for value in list(
+                getattr(
+                    getattr(cfg, "mpc", None),
+                    "physics_refinement_slack_abs_floor_schedule_eur",
+                    [2.0, 5.0],
+                )
+            )
+        ],
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_aggressive_third_tier_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        "physics_refinement_aggressive_third_tier_abs_floor_eur": float(
+            getattr(
+                getattr(cfg, "mpc", None),
+                "physics_refinement_aggressive_third_tier_abs_floor_eur",
+                10.0,
+            )
+        ),
+        "physics_refinement_cap_utilization_trigger": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        "physics_refinement_branch_l_gap_ratio_trigger": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        "physics_refinement_time_limit_sec": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_time_limit_sec", 20.0)
+        ),
+        "physics_refinement_total_time_limit_sec": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "physics_refinement_target_mean_solver_gap_kw": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        "physics_refinement_target_max_solver_gap_kw": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        "physics_refinement_target_export_gap_ratio": float(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        "physics_refinement_use_full_start": bool(
+            getattr(getattr(cfg, "mpc", None), "physics_refinement_use_full_start", True)
+        ),
+    }
+
+
+def _build_problem_snapshot(problem: Any) -> dict[str, Any]:
+    line_branch_indices = getattr(problem.network, "line_branch_indices", None)
+    return {
+        "n_agents": int(problem.n_agents),
+        "n_buses": int(problem.n_buses),
+        "n_branches": int(problem.n_branches),
+        "dt_hours": float(getattr(problem, "dt_hours", np.nan)),
+        "capacity_mwh": np.asarray(getattr(problem, "capacity_mwh", np.zeros(0, dtype=np.float32)), dtype=np.float32).tolist(),
+        "v_min_sq": float(getattr(problem, "v_min_sq", np.nan)),
+        "v_max_sq": float(getattr(problem, "v_max_sq", np.nan)),
+        "trafo_limit_mva": float(getattr(problem, "trafo_limit_mva", np.nan)),
+        IMPORT_PRICE_MARKUP_KEY: float(getattr(problem, "import_price_markup_eur_per_kwh", 0.0)),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+        "branch_current_tiebreaker_eur_per_pu_step": float(
+            getattr(problem, "branch_current_tiebreaker_eur_per_pu_step", 0.0)
+        ),
+        "physics_refinement_mode": str(getattr(problem, "physics_refinement_mode", "none")),
+        "physics_refinement_slack_ratio": float(getattr(problem, "physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            getattr(problem, "physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": [
+            float(value) for value in list(getattr(problem, "physics_refinement_slack_ratio_schedule", (2e-2, 5e-2)))
+        ],
+        "physics_refinement_slack_abs_floor_schedule_eur": [
+            float(value)
+            for value in list(getattr(problem, "physics_refinement_slack_abs_floor_schedule_eur", (2.0, 5.0)))
+        ],
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            getattr(problem, "physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_aggressive_third_tier_ratio": float(
+            getattr(problem, "physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        "physics_refinement_aggressive_third_tier_abs_floor_eur": float(
+            getattr(problem, "physics_refinement_aggressive_third_tier_abs_floor_eur", 10.0)
+        ),
+        "physics_refinement_cap_utilization_trigger": float(
+            getattr(problem, "physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        "physics_refinement_branch_l_gap_ratio_trigger": float(
+            getattr(problem, "physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        "physics_refinement_time_limit_sec": float(getattr(problem, "physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            getattr(problem, "physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "physics_refinement_target_mean_solver_gap_kw": float(
+            getattr(problem, "physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        "physics_refinement_target_max_solver_gap_kw": float(
+            getattr(problem, "physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        "physics_refinement_target_export_gap_ratio": float(
+            getattr(problem, "physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        "physics_refinement_use_full_start": bool(getattr(problem, "physics_refinement_use_full_start", True)),
+        "agent_q_base_zeroed": bool(
+            np.allclose(
+                np.asarray(problem.network.q_base_mvar, dtype=np.float32)[
+                    np.asarray(problem.network.agent_bus_positions, dtype=np.int32)
+                ],
+                0.0,
+                atol=_CFG_FLOAT_ATOL,
+            )
+        ),
+        "network": {
+            "bus_ids": np.asarray(problem.network.bus_ids, dtype=np.int32).tolist(),
+            "p_base_mw": np.asarray(problem.network.p_base_mw, dtype=np.float32).tolist(),
+            "q_base_mvar": np.asarray(problem.network.q_base_mvar, dtype=np.float32).tolist(),
+            "agent_bus_positions": np.asarray(problem.network.agent_bus_positions, dtype=np.int32).tolist(),
+            "line_branch_indices": (
+                None if line_branch_indices is None else np.asarray(line_branch_indices, dtype=np.int32).tolist()
+            ),
+            "branch_is_trafo": np.asarray(
+                getattr(problem.network, "branch_is_trafo", np.zeros((int(problem.n_branches),), dtype=bool)),
+                dtype=bool,
+            ).tolist(),
+        },
+    }
+
+
+def _build_problem_view(problem_snapshot: dict[str, Any]) -> SimpleNamespace:
+    network_snapshot = dict(problem_snapshot["network"])
+    network = SimpleNamespace(
+        bus_ids=np.asarray(network_snapshot["bus_ids"], dtype=np.int32),
+        p_base_mw=np.asarray(network_snapshot["p_base_mw"], dtype=np.float32),
+        q_base_mvar=np.asarray(network_snapshot.get("q_base_mvar", np.zeros(0, dtype=np.float32)), dtype=np.float32),
+        agent_bus_positions=np.asarray(network_snapshot["agent_bus_positions"], dtype=np.int32),
+        line_branch_indices=(
+            None
+            if network_snapshot.get("line_branch_indices") is None
+            else np.asarray(network_snapshot["line_branch_indices"], dtype=np.int32)
+        ),
+        branch_is_trafo=np.asarray(network_snapshot["branch_is_trafo"], dtype=bool),
+    )
+    return SimpleNamespace(
+        network=network,
+        n_agents=int(problem_snapshot["n_agents"]),
+        n_buses=int(problem_snapshot["n_buses"]),
+        n_branches=int(problem_snapshot["n_branches"]),
+        dt_hours=float(problem_snapshot["dt_hours"]),
+        capacity_mwh=np.asarray(problem_snapshot["capacity_mwh"], dtype=np.float32),
+        v_min_sq=float(problem_snapshot["v_min_sq"]),
+        v_max_sq=float(problem_snapshot["v_max_sq"]),
+        trafo_limit_mva=float(problem_snapshot["trafo_limit_mva"]),
+        import_price_markup_eur_per_kwh=float(problem_snapshot.get(IMPORT_PRICE_MARKUP_KEY, 0.0)),
+        branch_current_tiebreaker_eur_per_pu_step=float(
+            problem_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
+        ),
+        physics_refinement_mode=str(problem_snapshot.get("physics_refinement_mode", "none")),
+        physics_refinement_slack_ratio=float(problem_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        physics_refinement_slack_abs_floor_eur=float(
+            problem_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        physics_refinement_slack_ratio_schedule=[
+            float(value)
+            for value in list(problem_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2]))
+        ],
+        physics_refinement_slack_abs_floor_schedule_eur=[
+            float(value)
+            for value in list(problem_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0]))
+        ],
+        physics_refinement_enable_aggressive_third_tier=bool(
+            problem_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        physics_refinement_aggressive_third_tier_ratio=float(
+            problem_snapshot.get("physics_refinement_aggressive_third_tier_ratio", 1e-1)
+        ),
+        physics_refinement_aggressive_third_tier_abs_floor_eur=float(
+            problem_snapshot.get("physics_refinement_aggressive_third_tier_abs_floor_eur", 10.0)
+        ),
+        physics_refinement_cap_utilization_trigger=float(
+            problem_snapshot.get("physics_refinement_cap_utilization_trigger", 0.95)
+        ),
+        physics_refinement_branch_l_gap_ratio_trigger=float(
+            problem_snapshot.get("physics_refinement_branch_l_gap_ratio_trigger", 0.01)
+        ),
+        physics_refinement_time_limit_sec=float(problem_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        physics_refinement_total_time_limit_sec=float(
+            problem_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        physics_refinement_target_mean_solver_gap_kw=float(
+            problem_snapshot.get("physics_refinement_target_mean_solver_gap_kw", 3.0)
+        ),
+        physics_refinement_target_max_solver_gap_kw=float(
+            problem_snapshot.get("physics_refinement_target_max_solver_gap_kw", 15.0)
+        ),
+        physics_refinement_target_export_gap_ratio=float(
+            problem_snapshot.get("physics_refinement_target_export_gap_ratio", 0.05)
+        ),
+        physics_refinement_use_full_start=bool(problem_snapshot.get("physics_refinement_use_full_start", True)),
+    )
+
+
+def _raise_mismatch(field_name: str, expected: Any, actual: Any) -> None:
+    raise ValueError(
+        f"MISOCP plan package mismatch at '{field_name}': expected={expected!r}, actual={actual!r}."
+    )
+
+
+def _assert_strict_match(field_name: str, expected: Any, actual: Any) -> None:
+    if expected != actual:
+        _raise_mismatch(field_name, expected, actual)
+
+
+def _assert_float_match(field_name: str, expected: float, actual: float) -> None:
+    if not math.isclose(float(expected), float(actual), rel_tol=_CFG_FLOAT_RTOL, abs_tol=_CFG_FLOAT_ATOL):
+        _raise_mismatch(field_name, expected, actual)
+
+
+def _assert_float_sequence_match(field_name: str, expected: list[float], actual: list[float]) -> None:
+    expected_array = np.asarray(expected, dtype=np.float64)
+    actual_array = np.asarray(actual, dtype=np.float64)
+    if expected_array.shape != actual_array.shape:
+        _raise_mismatch(field_name, expected, actual)
+    if not np.allclose(expected_array, actual_array, rtol=_CFG_FLOAT_RTOL, atol=_CFG_FLOAT_ATOL):
+        _raise_mismatch(field_name, expected, actual)
+
+
+def _assert_int_sequence_match(field_name: str, expected: list[int], actual: list[int]) -> None:
+    if [int(value) for value in expected] != [int(value) for value in actual]:
+        _raise_mismatch(field_name, expected, actual)
+
+
+def _assert_str_sequence_match(field_name: str, expected: list[str], actual: list[str]) -> None:
+    if [str(value) for value in expected] != [str(value) for value in actual]:
+        _raise_mismatch(field_name, expected, actual)
+
+
+def _assert_cfg_snapshot_matches(expected_snapshot: dict[str, Any], actual_snapshot: dict[str, Any]) -> None:
+    for field_name in (
+        "test_start_date",
+        "test_end_date",
+        "future_horizon",
+        "sb_code",
+    ):
+        _assert_strict_match(field_name, expected_snapshot[field_name], actual_snapshot[field_name])
+    _assert_str_sequence_match("agent_profiles", expected_snapshot["agent_profiles"], actual_snapshot["agent_profiles"])
+    _assert_int_sequence_match("agent_bus_ids", expected_snapshot["agent_bus_ids"], actual_snapshot["agent_bus_ids"])
+    _assert_float_sequence_match("load_scale", expected_snapshot["load_scale"], actual_snapshot["load_scale"])
+    _assert_float_sequence_match("pv_scale", expected_snapshot["pv_scale"], actual_snapshot["pv_scale"])
+    _assert_float_sequence_match(
+        "battery_capacity",
+        expected_snapshot["battery_capacity"],
+        actual_snapshot["battery_capacity"],
+    )
+    for field_name in (
+        "line_max_loading_pct",
+        "v_min_pu",
+        "v_max_pu",
+        "max_charge_rate",
+        "efficiency",
+        "init_soc",
+        "soc_min",
+        "soc_max",
+        "soc_target",
+        "export_subsidy_eur_per_kwh",
+        IMPORT_PRICE_MARKUP_KEY,
+        "branch_current_tiebreaker_eur_per_pu_step",
+        "physics_refinement_slack_ratio",
+        "physics_refinement_slack_abs_floor_eur",
+        "physics_refinement_aggressive_third_tier_ratio",
+        "physics_refinement_aggressive_third_tier_abs_floor_eur",
+        "physics_refinement_cap_utilization_trigger",
+        "physics_refinement_branch_l_gap_ratio_trigger",
+        "physics_refinement_time_limit_sec",
+        "physics_refinement_total_time_limit_sec",
+        "physics_refinement_target_mean_solver_gap_kw",
+        "physics_refinement_target_max_solver_gap_kw",
+        "physics_refinement_target_export_gap_ratio",
+    ):
+        _assert_float_match(field_name, expected_snapshot[field_name], actual_snapshot[field_name])
+    _assert_float_sequence_match(
+        "physics_refinement_slack_ratio_schedule",
+        expected_snapshot["physics_refinement_slack_ratio_schedule"],
+        actual_snapshot["physics_refinement_slack_ratio_schedule"],
+    )
+    _assert_float_sequence_match(
+        "physics_refinement_slack_abs_floor_schedule_eur",
+        expected_snapshot["physics_refinement_slack_abs_floor_schedule_eur"],
+        actual_snapshot["physics_refinement_slack_abs_floor_schedule_eur"],
+    )
+    for field_name in (
+        "physics_refinement_mode",
+        "physics_refinement_enable_aggressive_third_tier",
+        "physics_refinement_use_full_start",
+    ):
+        _assert_strict_match(field_name, expected_snapshot[field_name], actual_snapshot[field_name])
+
+
+def _assert_full_input_structure_matches(expected_full_input: Any, actual_full_input: Any) -> None:
+    _assert_strict_match(
+        "horizon_steps",
+        int(expected_full_input.horizon_steps),
+        int(actual_full_input.horizon_steps),
+    )
+    _assert_int_sequence_match(
+        "episode_offsets",
+        np.asarray(expected_full_input.episode_offsets, dtype=np.int32).tolist(),
+        np.asarray(actual_full_input.episode_offsets, dtype=np.int32).tolist(),
+    )
+    _assert_int_sequence_match(
+        "episode_lengths",
+        np.asarray(expected_full_input.episode_lengths, dtype=np.int32).tolist(),
+        np.asarray(actual_full_input.episode_lengths, dtype=np.int32).tolist(),
+    )
+    _assert_int_sequence_match(
+        "episode_indices",
+        np.asarray(expected_full_input.episode_indices, dtype=np.int32).tolist(),
+        np.asarray(actual_full_input.episode_indices, dtype=np.int32).tolist(),
+    )
+    _assert_str_sequence_match(
+        "timestamps",
+        [str(value) for value in tuple(expected_full_input.timestamps)],
+        [str(value) for value in tuple(actual_full_input.timestamps)],
+    )
+
+
+def format_solver_summary(*args: Any, **kwargs: Any) -> pd.Series:
+    from scripts.utils.misocp_notebook_helpers import format_solver_summary as _format_solver_summary
+
+    return _format_solver_summary(*args, **kwargs)
+
+def build_full_horizon_step_df(*args: Any, **kwargs: Any) -> pd.DataFrame:
+    from scripts.utils.misocp_notebook_helpers import build_full_horizon_step_df as _build_full_horizon_step_df
+
+    return _build_full_horizon_step_df(*args, **kwargs)
+
+def build_debug_tables(*args: Any, **kwargs: Any) -> dict[str, pd.DataFrame]:
+    from scripts.utils.misocp_notebook_helpers import build_debug_tables as _build_debug_tables
+
+    return _build_debug_tables(*args, **kwargs)
+
+def build_misocp_validation_artifacts(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from scripts.utils.misocp_notebook_helpers import (
+        build_misocp_validation_artifacts as _build_misocp_validation_artifacts,
+    )
+
+    return _build_misocp_validation_artifacts(*args, **kwargs)
+
+
+def build_misocp_plan_package(
+    problem: Any,
+    full_input: Any,
+    result: Any,
+    *,
+    controller_label: str,
+    export_subsidy: float,
+    cfg: Any | None = None,
+    cfg_snapshot: dict[str, Any] | None = None,
+    extra_meta: dict[str, Any] | None = None,
+    diagnostic_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble a disk-friendly MISOCP plan package without replay data."""
+
+    if cfg_snapshot is None:
+        if cfg is None:
+            raise ValueError("Provide either cfg or cfg_snapshot when building a MISOCP plan package.")
+        cfg_snapshot = _build_cfg_snapshot_from_cfg(cfg)
+    if not bool(getattr(result, "has_solution", False)):
+        raise ValueError("Cannot package a MISOCP result without a feasible incumbent.")
+
+    solved_result = result
+    manifest = {
+        "plan_package_version": int(_PLAN_PACKAGE_VERSION),
+        "controller_label": str(controller_label),
+        "saved_at_utc": pd.Timestamp.utcnow().isoformat(),
+        "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+        "horizon_steps": int(full_input.horizon_steps),
+        "episode_offsets": np.asarray(full_input.episode_offsets, dtype=np.int32).tolist(),
+        "episode_lengths": np.asarray(full_input.episode_lengths, dtype=np.int32).tolist(),
+        "episode_indices": np.asarray(full_input.episode_indices, dtype=np.int32).tolist(),
+        "cfg_snapshot": dict(cfg_snapshot),
+        "problem_snapshot": _build_problem_snapshot(problem),
+        "extra_meta": dict(extra_meta or {}),
+        "diagnostics_stage": "commit4_adaptive_refinement_ladder",
+        "validation_root_power_source": "trafo_p_signed_kw",
+        "agent_q_base_zeroed": bool(
+            np.allclose(
+                np.asarray(problem.network.q_base_mvar, dtype=np.float32)[
+                    np.asarray(problem.network.agent_bus_positions, dtype=np.int32)
+                ],
+                0.0,
+                atol=_CFG_FLOAT_ATOL,
+            )
+        ),
+        "physical_tiebreaker_weight": float(getattr(solved_result, "physical_tiebreaker_weight", 0.0)),
+        "validation_fix_stage": "commit4_adaptive_refinement_ladder",
+        "physics_refinement_mode": str(getattr(solved_result, "physics_refinement_mode", "none")),
+        "physics_refinement_status": str(getattr(solved_result, "physics_refinement_status", "not_enabled")),
+        "physics_refinement_slack_ratio": float(cfg_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": list(
+            cfg_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+        ),
+        "physics_refinement_slack_abs_floor_schedule_eur": list(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0])
+        ),
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            cfg_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_time_limit_sec": float(cfg_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            cfg_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "diagnostics_floor_stage": "min_sum_branch_l",
+    }
+    solve_summary = {
+        **format_solver_summary(
+            solved_result,
+            total_steps=int(full_input.horizon_steps),
+            episode_count=int(np.asarray(full_input.episode_lengths, dtype=np.int32).size),
+        ).to_dict(),
+        "agent_purchase_cost_eur": float(solved_result.agent_purchase_cost_eur),
+        "agent_export_subsidy_eur": float(solved_result.agent_export_subsidy_eur),
+        "agent_net_cost_eur": float(solved_result.agent_net_cost_eur),
+        "feeder_purchase_cost_eur": float(solved_result.feeder_purchase_cost_eur),
+        "feeder_export_subsidy_eur": float(solved_result.feeder_export_subsidy_eur),
+        "feeder_net_cost_eur": float(solved_result.feeder_net_cost_eur),
+        "throughput_regularization_eur": float(solved_result.throughput_regularization_eur),
+        "throughput_regularization_weight": float(solved_result.throughput_regularization_weight),
+        "physical_tiebreaker_eur": float(getattr(solved_result, "physical_tiebreaker_eur", 0.0)),
+        "physical_tiebreaker_weight": float(getattr(solved_result, "physical_tiebreaker_weight", 0.0)),
+        "num_vars": int(solved_result.model_size.num_vars),
+        "num_binary_vars": int(solved_result.model_size.num_binary_vars),
+        "num_linear_constraints": int(solved_result.model_size.num_linear_constraints),
+        "num_quadratic_constraints": int(solved_result.model_size.num_quadratic_constraints),
+        "simultaneous_agent_steps": int(solved_result.simultaneous_agent_steps),
+        "simultaneous_step_ratio": float(solved_result.simultaneous_step_ratio),
+        "max_simultaneous_kw": float(solved_result.max_simultaneous_kw),
+        "sanity_warning": str(getattr(solved_result, "sanity_warning", "")),
+        "debug_artifacts": dict(getattr(solved_result, "debug_artifacts", {})),
+        "export_subsidy_eur_per_kwh": float(export_subsidy),
+        IMPORT_PRICE_MARKUP_KEY: float(cfg_snapshot.get(IMPORT_PRICE_MARKUP_KEY, 0.0)),
+        "branch_current_tiebreaker_eur_per_pu_step": float(
+            cfg_snapshot.get("branch_current_tiebreaker_eur_per_pu_step", 0.0)
+        ),
+        "physics_refinement_mode": str(getattr(solved_result, "physics_refinement_mode", "none")),
+        "physics_refinement_status": str(getattr(solved_result, "physics_refinement_status", "not_enabled")),
+        "physics_refinement_slack_ratio": float(cfg_snapshot.get("physics_refinement_slack_ratio", 2e-2)),
+        "physics_refinement_slack_abs_floor_eur": float(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_eur", 2.0)
+        ),
+        "physics_refinement_slack_ratio_schedule": list(
+            cfg_snapshot.get("physics_refinement_slack_ratio_schedule", [2e-2, 5e-2])
+        ),
+        "physics_refinement_slack_abs_floor_schedule_eur": list(
+            cfg_snapshot.get("physics_refinement_slack_abs_floor_schedule_eur", [2.0, 5.0])
+        ),
+        "physics_refinement_enable_aggressive_third_tier": bool(
+            cfg_snapshot.get("physics_refinement_enable_aggressive_third_tier", False)
+        ),
+        "physics_refinement_time_limit_sec": float(cfg_snapshot.get("physics_refinement_time_limit_sec", 20.0)),
+        "physics_refinement_total_time_limit_sec": float(
+            cfg_snapshot.get("physics_refinement_total_time_limit_sec", 40.0)
+        ),
+        "stage1_primary_objective_eur": float(getattr(solved_result, "stage1_primary_objective_eur", float("nan"))),
+        "stage2_primary_objective_eur": float(getattr(solved_result, "stage2_primary_objective_eur", float("nan"))),
+        "stage2_objective_slack_eur": float(getattr(solved_result, "stage2_objective_slack_eur", float("nan"))),
+        "stage2_branch_l_objective": float(getattr(solved_result, "stage2_branch_l_objective", float("nan"))),
+        "physics_refinement_runtime_sec": float(getattr(solved_result, "physics_refinement_runtime_sec", 0.0)),
+        "floor_p95_soc_slack": float(getattr(solved_result, "floor_p95_soc_slack", float("nan"))),
+        "floor_mean_abs_solver_feeder_gap_kw": float(
+            getattr(solved_result, "floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+        ),
+        "floor_primary_objective_eur": float(getattr(solved_result, "floor_primary_objective_eur", float("nan"))),
+        "floor_primary_delta_signed_eur": float(
+            getattr(solved_result, "floor_primary_delta_signed_eur", float("nan"))
+        ),
+        "floor_primary_delta_positive_eur": float(
+            getattr(solved_result, "floor_primary_delta_positive_eur", float("nan"))
+        ),
+        "physics_refinement_slack_cap_eur": float(
+            getattr(solved_result, "physics_refinement_slack_cap_eur", float("nan"))
+        ),
+        "initial_physics_refinement_slack_cap_eur": float(
+            getattr(solved_result, "initial_physics_refinement_slack_cap_eur", float("nan"))
+        ),
+        "returned_primary_objective_eur": float(
+            getattr(solved_result, "returned_primary_objective_eur", float("nan"))
+        ),
+        "returned_primary_delta_abs_eur": float(
+            getattr(solved_result, "returned_primary_delta_abs_eur", float("nan"))
+        ),
+        "returned_primary_delta_pct": float(getattr(solved_result, "returned_primary_delta_pct", float("nan"))),
+        "floor_accepted_tier": getattr(solved_result, "floor_accepted_tier", None),
+        "used_physics_refinement_tier": getattr(solved_result, "used_physics_refinement_tier", None),
+        "total_tiers_configured": int(getattr(solved_result, "total_tiers_configured", 0)),
+        "physics_refinement_attempt_count": int(getattr(solved_result, "physics_refinement_attempt_count", 0)),
+        "physics_refinement_attempt_caps_eur": [
+            float(value)
+            for value in list(getattr(solved_result, "physics_refinement_attempt_caps_eur", None) or [])
+        ],
+        "physics_refinement_cap_utilization": float(
+            getattr(solved_result, "physics_refinement_cap_utilization", float("nan"))
+        ),
+        "branch_l_gap_ratio_to_floor": float(
+            getattr(solved_result, "branch_l_gap_ratio_to_floor", float("nan"))
+        ),
+        "returned_mean_abs_solver_feeder_gap_kw": float(
+            getattr(solved_result, "returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+        ),
+        "returned_max_solver_feeder_gap_kw": float(
+            getattr(solved_result, "returned_max_solver_feeder_gap_kw", float("nan"))
+        ),
+        "returned_mean_abs_export_gap_ratio": float(
+            getattr(solved_result, "returned_mean_abs_export_gap_ratio", float("nan"))
+        ),
+        "high_budget_refinement_warn": bool(getattr(solved_result, "high_budget_refinement_warn", False)),
+        "returned_solution_source": str(getattr(solved_result, "returned_solution_source", "stage1")),
+        "formulation_tightening_required": bool(
+            getattr(solved_result, "formulation_tightening_required", False)
+        ),
+        "negative_floor_delta_warn": bool(getattr(solved_result, "negative_floor_delta_warn", False)),
+        "refinement_status_counts": {
+            str(key): int(value)
+            for key, value in dict(getattr(solved_result, "refinement_status_counts", None) or {}).items()
+        },
+        "economics_scope": "agent_only",
+        "diagnostics_stage": "commit4_adaptive_refinement_ladder",
+        "diagnostics_floor_stage": "min_sum_branch_l",
+        "chunk_summaries": [dict(item) for item in list(getattr(solved_result, "chunk_summaries", []) or [])],
+    }
+    if diagnostic_summary:
+        solve_summary.update(dict(diagnostic_summary))
+    return {
+        "manifest": manifest,
+        "full_input": full_input,
+        "result": solved_result,
+        "solve_summary": solve_summary,
+    }
+
+
+def save_misocp_plan_package(package: dict[str, Any], target_dir: str | Path) -> Path:
+    """Persist a MISOCP plan package to a deterministic directory layout."""
+
+    target_path = Path(target_dir).resolve()
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    manifest = dict(package["manifest"])
+    full_input = package["full_input"]
+    result = package["result"]
+    solve_summary = dict(package["solve_summary"])
+
+    (target_path / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    (target_path / "solve_summary.json").write_text(
+        json.dumps(solve_summary, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    np.savez_compressed(
+        target_path / "full_input.npz",
+        wholesale_price_seq=np.asarray(full_input.wholesale_price_seq, dtype=np.float32),
+        import_price_seq=np.asarray(full_input.import_price_seq, dtype=np.float32),
+        load_seq=np.asarray(full_input.load_seq, dtype=np.float32),
+        pv_seq=np.asarray(full_input.pv_seq, dtype=np.float32),
+        soc_init=np.asarray(full_input.soc_init, dtype=np.float32),
+        timestamps=np.asarray(tuple(full_input.timestamps), dtype=np.str_),
+        episode_offsets=np.asarray(full_input.episode_offsets, dtype=np.int32),
+        episode_lengths=np.asarray(full_input.episode_lengths, dtype=np.int32),
+        episode_indices=np.asarray(full_input.episode_indices, dtype=np.int32),
+    )
+    np.savez_compressed(
+        target_path / "solve_result.npz",
+        agent_net_grid_mw=np.asarray(result.agent_net_grid_mw, dtype=np.float32),
+        agent_import_mw=np.asarray(result.agent_import_mw, dtype=np.float32),
+        agent_export_mw=np.asarray(result.agent_export_mw, dtype=np.float32),
+        battery_charge_mw=np.asarray(result.battery_charge_mw, dtype=np.float32),
+        battery_discharge_mw=np.asarray(result.battery_discharge_mw, dtype=np.float32),
+        pv_curtail_mw=np.asarray(result.pv_curtail_mw, dtype=np.float32),
+        energy_mwh=np.asarray(result.energy_mwh, dtype=np.float32),
+        branch_p_pu=np.asarray(result.branch_p_pu, dtype=np.float32),
+        branch_q_pu=np.asarray(result.branch_q_pu, dtype=np.float32),
+        branch_i2_pu=np.asarray(result.branch_i2_pu, dtype=np.float32),
+        bus_v_sq=np.asarray(result.bus_v_sq, dtype=np.float32),
+        root_import_mw=np.asarray(result.root_import_mw, dtype=np.float32),
+        root_export_mw=np.asarray(result.root_export_mw, dtype=np.float32),
+        root_p_kw=np.asarray(result.root_p_kw, dtype=np.float32),
+        root_q_kvar=np.asarray(result.root_q_kvar, dtype=np.float32),
+        bus_vm_pu=np.asarray(result.bus_vm_pu, dtype=np.float32),
+        line_loading_pct=np.asarray(result.line_loading_pct, dtype=np.float32),
+        trafo_loading_pct=np.asarray(result.trafo_loading_pct, dtype=np.float32),
+        simultaneous_charge_discharge_kw=np.asarray(result.simultaneous_charge_discharge_kw, dtype=np.float32),
+    )
+    return target_path
+
+
+def resolve_latest_compatible_misocp_plan_package_dir(target_dir: str | Path) -> Path:
+    """Resolve one exact cached MISOCP plan package directory.
+
+    The legacy name is preserved for notebook import stability, but the resolver
+    no longer scans sibling directories or auto-selects the newest compatible
+    cache. Callers must provide one exact package directory.
+    """
+
+    target_path = Path(target_dir).expanduser().resolve()
+    required_names = ("manifest.json", "full_input.npz", "solve_result.npz", "solve_summary.json")
+
+    if target_path.exists():
+        if not target_path.is_dir():
+            raise NotADirectoryError(f"Expected a MISOCP plan package directory, got file: {target_path}")
+        manifest_path = target_path / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"MISOCP plan package is incomplete at {target_path}: missing manifest.json.")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"MISOCP plan package manifest is invalid JSON at {target_path}.") from exc
+        version = int(manifest.get("plan_package_version", -1))
+        missing_required = [name for name in required_names if not (target_path / name).exists()]
+        if version != int(_PLAN_PACKAGE_VERSION) or missing_required:
+            missing_display = f", missing={','.join(missing_required)}" if missing_required else ""
+            raise ValueError(
+                "Exact MISOCP plan package is not compatible at "
+                f"{target_path}: version={version}, expected={_PLAN_PACKAGE_VERSION}{missing_display}. "
+                "Re-run MISOCP_global.ipynb to regenerate it."
+            )
+        return target_path
+
+    parent_dir = target_path.parent
+    prefix = target_path.name
+    discovered_candidates: list[str] = []
+    if parent_dir.exists():
+        for candidate_dir in parent_dir.iterdir():
+            if not candidate_dir.is_dir():
+                continue
+            if candidate_dir.name != prefix and not candidate_dir.name.startswith(f"{prefix}_"):
+                continue
+            discovered_candidates.append(candidate_dir.name)
+
+    discovered_text = ", ".join(sorted(discovered_candidates)) if discovered_candidates else "none"
+    raise FileNotFoundError(
+        "MISOCP cached-plan resolution now requires one exact package directory. "
+        f"Requested path does not exist: {target_path}. Matching candidates under '{parent_dir}': {discovered_text}. "
+        "Please run notebooks/madrl/global_MISOCP.ipynb first and pass the exact package directory."
+    )
+
+
+def load_misocp_plan_package(target_dir: str | Path) -> dict[str, Any]:
+    """Load a saved MISOCP plan package and reconstruct real dataclasses."""
+
+    from controllers.mpc.global_socp_mpc import FullHorizonProblemInput, MISOCPResult, ModelSize
+
+    target_path = Path(target_dir).resolve()
+    manifest_path = target_path / "manifest.json"
+    full_input_path = target_path / "full_input.npz"
+    solve_result_path = target_path / "solve_result.npz"
+    solve_summary_path = target_path / "solve_summary.json"
+
+    missing_files = [
+        str(path.name)
+        for path in (manifest_path, full_input_path, solve_result_path, solve_summary_path)
+        if not path.exists()
+    ]
+    if missing_files:
+        raise FileNotFoundError(
+            f"MISOCP plan package is incomplete at {target_path}: missing {', '.join(missing_files)}."
+        )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if int(manifest.get("plan_package_version", -1)) != int(_PLAN_PACKAGE_VERSION):
+        raise ValueError(
+            "Unsupported MISOCP plan package version at "
+            f"{target_path}: expected={_PLAN_PACKAGE_VERSION}, actual={manifest.get('plan_package_version')!r}. "
+            "This cache predates the adaptive slack ladder / tiered floor accept / floor-distance gate / time-budget refinement semantics. "
+            "Re-run MISOCP_global.ipynb to regenerate it."
+        )
+    solve_summary = json.loads(solve_summary_path.read_text(encoding="utf-8"))
+
+    with np.load(full_input_path, allow_pickle=False) as full_input_archive:
+        full_input = FullHorizonProblemInput(
+            wholesale_price_seq=np.asarray(full_input_archive["wholesale_price_seq"], dtype=np.float32),
+            import_price_seq=np.asarray(full_input_archive["import_price_seq"], dtype=np.float32),
+            load_seq=np.asarray(full_input_archive["load_seq"], dtype=np.float32),
+            pv_seq=np.asarray(full_input_archive["pv_seq"], dtype=np.float32),
+            soc_init=np.asarray(full_input_archive["soc_init"], dtype=np.float32),
+            timestamps=tuple(str(value) for value in np.asarray(full_input_archive["timestamps"]).tolist()),
+            episode_offsets=np.asarray(full_input_archive["episode_offsets"], dtype=np.int32),
+            episode_lengths=np.asarray(full_input_archive["episode_lengths"], dtype=np.int32),
+            episode_indices=np.asarray(full_input_archive["episode_indices"], dtype=np.int32),
+        )
+    with np.load(solve_result_path, allow_pickle=False) as result_archive:
+        model_size = ModelSize(
+            num_vars=int(solve_summary["num_vars"]),
+            num_binary_vars=int(solve_summary["num_binary_vars"]),
+            num_linear_constraints=int(solve_summary["num_linear_constraints"]),
+            num_quadratic_constraints=int(solve_summary["num_quadratic_constraints"]),
+        )
+        result = MISOCPResult(
+            status_code=int(solve_summary["status_code"]),
+            status_label=str(solve_summary["status_label"]),
+            has_solution=bool(solve_summary["has_solution"]),
+            time_limit_feasible=bool(solve_summary["time_limit_feasible"]),
+            solve_time_sec=float(solve_summary["solve_time_sec"]),
+            mip_gap=float(solve_summary["mip_gap"]),
+            best_bound=float(solve_summary["best_bound"]),
+            objective_value=float(solve_summary["objective_value"]),
+            agent_purchase_cost_eur=float(solve_summary["agent_purchase_cost_eur"]),
+            agent_export_subsidy_eur=float(solve_summary["agent_export_subsidy_eur"]),
+            agent_net_cost_eur=float(solve_summary["agent_net_cost_eur"]),
+            feeder_purchase_cost_eur=float(solve_summary["feeder_purchase_cost_eur"]),
+            feeder_export_subsidy_eur=float(solve_summary["feeder_export_subsidy_eur"]),
+            feeder_net_cost_eur=float(solve_summary["feeder_net_cost_eur"]),
+            throughput_regularization_eur=float(solve_summary["throughput_regularization_eur"]),
+            throughput_regularization_weight=float(solve_summary["throughput_regularization_weight"]),
+            physical_tiebreaker_eur=float(solve_summary.get("physical_tiebreaker_eur", 0.0)),
+            physical_tiebreaker_weight=float(solve_summary.get("physical_tiebreaker_weight", 0.0)),
+            model_size=model_size,
+            debug_artifacts=dict(solve_summary.get("debug_artifacts", {})),
+            agent_net_grid_mw=np.asarray(result_archive["agent_net_grid_mw"], dtype=np.float32),
+            agent_import_mw=np.asarray(result_archive["agent_import_mw"], dtype=np.float32),
+            agent_export_mw=np.asarray(result_archive["agent_export_mw"], dtype=np.float32),
+            battery_charge_mw=np.asarray(result_archive["battery_charge_mw"], dtype=np.float32),
+            battery_discharge_mw=np.asarray(result_archive["battery_discharge_mw"], dtype=np.float32),
+            pv_curtail_mw=np.asarray(result_archive["pv_curtail_mw"], dtype=np.float32),
+            energy_mwh=np.asarray(result_archive["energy_mwh"], dtype=np.float32),
+            branch_p_pu=np.asarray(result_archive["branch_p_pu"], dtype=np.float32),
+            branch_q_pu=np.asarray(result_archive["branch_q_pu"], dtype=np.float32),
+            branch_i2_pu=np.asarray(result_archive["branch_i2_pu"], dtype=np.float32),
+            bus_v_sq=np.asarray(result_archive["bus_v_sq"], dtype=np.float32),
+            root_import_mw=np.asarray(result_archive["root_import_mw"], dtype=np.float32),
+            root_export_mw=np.asarray(result_archive["root_export_mw"], dtype=np.float32),
+            root_p_kw=np.asarray(result_archive["root_p_kw"], dtype=np.float32),
+            root_q_kvar=np.asarray(result_archive["root_q_kvar"], dtype=np.float32),
+            bus_vm_pu=np.asarray(result_archive["bus_vm_pu"], dtype=np.float32),
+            line_loading_pct=np.asarray(result_archive["line_loading_pct"], dtype=np.float32),
+            trafo_loading_pct=np.asarray(result_archive["trafo_loading_pct"], dtype=np.float32),
+            simultaneous_charge_discharge_kw=np.asarray(
+                result_archive["simultaneous_charge_discharge_kw"],
+                dtype=np.float32,
+            ),
+            simultaneous_agent_steps=int(solve_summary["simultaneous_agent_steps"]),
+            simultaneous_step_ratio=float(solve_summary["simultaneous_step_ratio"]),
+            max_simultaneous_kw=float(solve_summary["max_simultaneous_kw"]),
+            sol_count=int(solve_summary["sol_count"]),
+            node_count=float(solve_summary["node_count"]),
+            iter_count=float(solve_summary["iter_count"]),
+            bar_iter_count=float(solve_summary["bar_iter_count"]),
+            sanity_warning=str(solve_summary.get("sanity_warning", "")),
+            horizon_steps=int(manifest["horizon_steps"]),
+            solve_mode=str(solve_summary["solve_mode"]),
+            episode_offsets=np.asarray(manifest["episode_offsets"], dtype=np.int32),
+            episode_lengths=np.asarray(manifest["episode_lengths"], dtype=np.int32),
+            chunk_summaries=[dict(item) for item in list(solve_summary.get("chunk_summaries", []) or [])],
+            no_retry_or_fallback_used=bool(solve_summary.get("no_retry_or_fallback_used", True)),
+            chunk_retry_count=int(solve_summary.get("chunk_retry_count", 0)),
+            stage1_primary_objective_eur=float(solve_summary.get("stage1_primary_objective_eur", float("nan"))),
+            stage2_primary_objective_eur=float(solve_summary.get("stage2_primary_objective_eur", float("nan"))),
+            stage2_objective_slack_eur=float(solve_summary.get("stage2_objective_slack_eur", float("nan"))),
+            stage2_branch_l_objective=float(solve_summary.get("stage2_branch_l_objective", float("nan"))),
+            physics_refinement_mode=str(solve_summary.get("physics_refinement_mode", "none")),
+            physics_refinement_status=str(solve_summary.get("physics_refinement_status", "not_enabled")),
+            physics_refinement_runtime_sec=float(solve_summary.get("physics_refinement_runtime_sec", 0.0)),
+            floor_p95_soc_slack=float(solve_summary.get("floor_p95_soc_slack", float("nan"))),
+            floor_mean_abs_solver_feeder_gap_kw=float(
+                solve_summary.get("floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            floor_primary_objective_eur=float(solve_summary.get("floor_primary_objective_eur", float("nan"))),
+            floor_primary_delta_signed_eur=float(
+                solve_summary.get("floor_primary_delta_signed_eur", float("nan"))
+            ),
+            floor_primary_delta_positive_eur=float(
+                solve_summary.get("floor_primary_delta_positive_eur", float("nan"))
+            ),
+            physics_refinement_slack_cap_eur=float(
+                solve_summary.get("physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            initial_physics_refinement_slack_cap_eur=float(
+                solve_summary.get("initial_physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            returned_primary_objective_eur=float(
+                solve_summary.get("returned_primary_objective_eur", float("nan"))
+            ),
+            returned_primary_delta_abs_eur=float(
+                solve_summary.get("returned_primary_delta_abs_eur", float("nan"))
+            ),
+            returned_primary_delta_pct=float(solve_summary.get("returned_primary_delta_pct", float("nan"))),
+            floor_accepted_tier=solve_summary.get("floor_accepted_tier"),
+            used_physics_refinement_tier=solve_summary.get("used_physics_refinement_tier"),
+            total_tiers_configured=int(solve_summary.get("total_tiers_configured", 0)),
+            physics_refinement_attempt_count=int(solve_summary.get("physics_refinement_attempt_count", 0)),
+            physics_refinement_attempt_caps_eur=[
+                float(value) for value in list(solve_summary.get("physics_refinement_attempt_caps_eur", []) or [])
+            ],
+            physics_refinement_cap_utilization=float(
+                solve_summary.get("physics_refinement_cap_utilization", float("nan"))
+            ),
+            branch_l_gap_ratio_to_floor=float(
+                solve_summary.get("branch_l_gap_ratio_to_floor", float("nan"))
+            ),
+            returned_mean_abs_solver_feeder_gap_kw=float(
+                solve_summary.get("returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            returned_max_solver_feeder_gap_kw=float(
+                solve_summary.get("returned_max_solver_feeder_gap_kw", float("nan"))
+            ),
+            returned_mean_abs_export_gap_ratio=float(
+                solve_summary.get("returned_mean_abs_export_gap_ratio", float("nan"))
+            ),
+            high_budget_refinement_warn=bool(solve_summary.get("high_budget_refinement_warn", False)),
+            returned_solution_source=str(solve_summary.get("returned_solution_source", "stage1")),
+            formulation_tightening_required=bool(
+                solve_summary.get("formulation_tightening_required", False)
+            ),
+            negative_floor_delta_warn=bool(solve_summary.get("negative_floor_delta_warn", False)),
+            refinement_status_counts={
+                str(key): int(value)
+                for key, value in dict(solve_summary.get("refinement_status_counts", {}) or {}).items()
+            },
+        )
+
+    problem_view = _build_problem_view(manifest["problem_snapshot"])
+    try:
+        step_df = build_full_horizon_step_df(problem_view, full_input, result)
+        build_debug_tables(
+            problem_view,
+            full_input,
+            result,
+            step_df=step_df,
+            agent_profiles=list(manifest["cfg_snapshot"]["agent_profiles"]),
+            agent_bus_ids=list(manifest["cfg_snapshot"]["agent_bus_ids"]),
+        )
+    except Exception as exc:  # pragma: no cover - exercised through round-trip tests
+        raise RuntimeError(
+            f"Loaded MISOCP plan package at {target_path} failed compatibility self-check: {exc}"
+        ) from exc
+
+    return {
+        "manifest": manifest,
+        "full_input": full_input,
+        "result": result,
+        "solve_summary": solve_summary,
+        "problem_view": problem_view,
+    }
+
+
+def replay_misocp_plan_package(
+    cfg: Any,
+    target_dir: str | Path,
+    *,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Replay a cached MISOCP plan package through pandapower without re-solving."""
+
+    from controllers.mpc import GlobalMISOCPProblem
+    from scripts.builder import build_env
+    from scripts.utils.grid_notebook_workflow import PERFECT_PREDICTION_MODE, build_comparison_cfg
+
+    package = load_misocp_plan_package(target_dir)
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode=PERFECT_PREDICTION_MODE)
+    current_cfg_snapshot = _build_cfg_snapshot_from_cfg(comparison_cfg)
+    _assert_cfg_snapshot_matches(package["manifest"]["cfg_snapshot"], current_cfg_snapshot)
+
+    env = build_env(comparison_cfg, mode="test")
+    try:
+        problem = GlobalMISOCPProblem.from_env(env, comparison_cfg)
+        current_full_input = problem.build_full_horizon_input(env)
+        _assert_full_input_structure_matches(package["full_input"], current_full_input)
+        controller_label = str(label or package["manifest"]["controller_label"])
+        replay_artifacts = build_misocp_validation_artifacts(
+            env,
+            problem,
+            package["full_input"],
+            package["result"],
+            controller_label=controller_label,
+            export_subsidy=float(package["solve_summary"]["export_subsidy_eur_per_kwh"]),
+            agent_profiles=list(current_cfg_snapshot["agent_profiles"]),
+            agent_bus_ids=list(current_cfg_snapshot["agent_bus_ids"]),
+            v_min_pu=float(current_cfg_snapshot["v_min_pu"]),
+            v_max_pu=float(current_cfg_snapshot["v_max_pu"]),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to replay cached MISOCP plan package at {Path(target_dir).resolve()}: {exc}"
+        ) from exc
+    finally:
+        env.close()
+
+    rollout = replay_artifacts["rollout"]
+    if (
+        not replay_artifacts["agent_df"].empty
+        and {"purchase_cost", "export_subsidy", "objective_total"}.issubset(replay_artifacts["agent_df"].columns)
+    ):
+        rollout.summary = (
+            replay_artifacts["agent_df"]
+            .groupby(["controller", "agent_profile"], as_index=False)[["purchase_cost", "export_subsidy", "objective_total"]]
+            .sum()
+        )
+    rollout.meta.update(
+        {
+            "controller": controller_label,
+            "soc_mode": "continuous",
+            "solve_mode": str(package["result"].solve_mode),
+            "global_oracle_runtime_sec": float(
+                package["solve_summary"].get("total_runtime_sec", package["solve_summary"]["solve_time_sec"])
+            ),
+            "global_oracle_gap": float(package["solve_summary"]["mip_gap"]),
+            "global_misocp_gap": float(package["solve_summary"]["mip_gap"]),
+            "global_oracle_status_label": str(package["solve_summary"]["status_label"]),
+            "global_oracle_debug_artifacts": dict(package["solve_summary"].get("debug_artifacts", {})),
+            "is_near_optimal": bool(str(package["result"].solve_mode) == "chunked_window"),
+            "no_retry_or_fallback_used": bool(package["solve_summary"].get("no_retry_or_fallback_used", True)),
+            "chunk_retry_count": int(package["solve_summary"].get("chunk_retry_count", 0)),
+            "plan_package_dir": str(Path(target_dir).resolve()),
+            "plan_package_version": int(package["manifest"]["plan_package_version"]),
+            "loaded_from_cached_plan": True,
+            "economics_scope": str(package["solve_summary"].get("economics_scope", "agent_only")),
+            "agent_purchase_cost_eur": float(package["solve_summary"]["agent_purchase_cost_eur"]),
+            "agent_export_subsidy_eur": float(package["solve_summary"]["agent_export_subsidy_eur"]),
+            "agent_net_cost_eur": float(package["solve_summary"]["agent_net_cost_eur"]),
+            "feeder_purchase_cost_eur": float(package["solve_summary"]["feeder_purchase_cost_eur"]),
+            "feeder_export_subsidy_eur": float(package["solve_summary"]["feeder_export_subsidy_eur"]),
+            "feeder_net_cost_eur": float(package["solve_summary"]["feeder_net_cost_eur"]),
+            "export_subsidy_eur_per_kwh": float(package["solve_summary"]["export_subsidy_eur_per_kwh"]),
+            IMPORT_PRICE_MARKUP_KEY: float(
+                package["manifest"]["cfg_snapshot"].get(IMPORT_PRICE_MARKUP_KEY, 0.0)
+            ),
+            "physical_tiebreaker_weight": float(package["manifest"].get("physical_tiebreaker_weight", 0.0)),
+            "physics_refinement_mode": str(package["solve_summary"].get("physics_refinement_mode", "none")),
+            "physics_refinement_status": str(package["solve_summary"].get("physics_refinement_status", "not_enabled")),
+            "physics_refinement_runtime_sec": float(package["solve_summary"].get("physics_refinement_runtime_sec", 0.0)),
+            "stage1_primary_objective_eur": float(
+                package["solve_summary"].get("stage1_primary_objective_eur", float("nan"))
+            ),
+            "stage2_primary_objective_eur": float(
+                package["solve_summary"].get("stage2_primary_objective_eur", float("nan"))
+            ),
+            "stage2_objective_slack_eur": float(
+                package["solve_summary"].get("stage2_objective_slack_eur", float("nan"))
+            ),
+            "stage2_branch_l_objective": float(
+                package["solve_summary"].get("stage2_branch_l_objective", float("nan"))
+            ),
+            "floor_p95_soc_slack": float(package["solve_summary"].get("floor_p95_soc_slack", float("nan"))),
+            "floor_mean_abs_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("floor_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "floor_primary_objective_eur": float(
+                package["solve_summary"].get("floor_primary_objective_eur", float("nan"))
+            ),
+            "floor_primary_delta_signed_eur": float(
+                package["solve_summary"].get("floor_primary_delta_signed_eur", float("nan"))
+            ),
+            "floor_primary_delta_positive_eur": float(
+                package["solve_summary"].get("floor_primary_delta_positive_eur", float("nan"))
+            ),
+            "physics_refinement_slack_cap_eur": float(
+                package["solve_summary"].get("physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "initial_physics_refinement_slack_cap_eur": float(
+                package["solve_summary"].get("initial_physics_refinement_slack_cap_eur", float("nan"))
+            ),
+            "returned_primary_objective_eur": float(
+                package["solve_summary"].get("returned_primary_objective_eur", float("nan"))
+            ),
+            "returned_primary_delta_abs_eur": float(
+                package["solve_summary"].get("returned_primary_delta_abs_eur", float("nan"))
+            ),
+            "returned_primary_delta_pct": float(
+                package["solve_summary"].get("returned_primary_delta_pct", float("nan"))
+            ),
+            "floor_accepted_tier": package["solve_summary"].get("floor_accepted_tier"),
+            "used_physics_refinement_tier": package["solve_summary"].get("used_physics_refinement_tier"),
+            "total_tiers_configured": int(package["solve_summary"].get("total_tiers_configured", 0)),
+            "physics_refinement_attempt_count": int(
+                package["solve_summary"].get("physics_refinement_attempt_count", 0)
+            ),
+            "physics_refinement_attempt_caps_eur": [
+                float(value)
+                for value in list(package["solve_summary"].get("physics_refinement_attempt_caps_eur", []) or [])
+            ],
+            "physics_refinement_cap_utilization": float(
+                package["solve_summary"].get("physics_refinement_cap_utilization", float("nan"))
+            ),
+            "branch_l_gap_ratio_to_floor": float(
+                package["solve_summary"].get("branch_l_gap_ratio_to_floor", float("nan"))
+            ),
+            "returned_mean_abs_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("returned_mean_abs_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_max_solver_feeder_gap_kw": float(
+                package["solve_summary"].get("returned_max_solver_feeder_gap_kw", float("nan"))
+            ),
+            "returned_mean_abs_export_gap_ratio": float(
+                package["solve_summary"].get("returned_mean_abs_export_gap_ratio", float("nan"))
+            ),
+            "high_budget_refinement_warn": bool(
+                package["solve_summary"].get("high_budget_refinement_warn", False)
+            ),
+            "returned_solution_source": str(package["solve_summary"].get("returned_solution_source", "stage1")),
+            "formulation_tightening_required": bool(
+                package["solve_summary"].get("formulation_tightening_required", False)
+            ),
+            "negative_floor_delta_warn": bool(package["solve_summary"].get("negative_floor_delta_warn", False)),
+            "refinement_status_counts": {
+                str(key): int(value)
+                for key, value in dict(package["solve_summary"].get("refinement_status_counts", {}) or {}).items()
+            },
+            "validation_root_power_source": str(package["manifest"].get("validation_root_power_source", "")),
+            "agent_q_base_zeroed": bool(package["manifest"].get("agent_q_base_zeroed", False)),
+            "diagnostics_stage": str(package["manifest"].get("diagnostics_stage", "")),
+            "diagnostics_floor_stage": str(package["manifest"].get("diagnostics_floor_stage", "")),
+            "chunk_summaries": [dict(item) for item in list(package["solve_summary"].get("chunk_summaries", []) or [])],
+        }
+    )
+    replay_artifacts["package"] = package
+    replay_artifacts["rollout"] = rollout
+    return replay_artifacts
+
+
+__all__ = [
+    "build_misocp_plan_package",
+    "load_misocp_plan_package",
+    "replay_misocp_plan_package",
+    "resolve_latest_compatible_misocp_plan_package_dir",
+    "save_misocp_plan_package",
+]

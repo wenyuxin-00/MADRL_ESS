@@ -86,26 +86,17 @@ def test_apply_runtime_controls_rejects_legacy_cache_keys(tmp_path, deprecated_k
         _apply_runtime_controls(cfg, {deprecated_key: value})
 
 
-def test_apply_reward_controls_supports_w_soc_pen_and_compat(tmp_path):
+def test_apply_reward_controls_supports_w_soc_pen_only(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
     _apply_reward_controls(cfg, {"w_soc_pen": 5.0})
     assert cfg.reward.w_soc_pen == pytest.approx(5.0)
-
-    cfg2 = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
-    _apply_reward_controls(cfg2, {"w_action_pen": 3.0})
-    assert cfg2.reward.w_soc_pen == pytest.approx(3.0)
-
-
-def test_apply_reward_controls_ignores_lambda_throughput(tmp_path):
-    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
     _apply_reward_controls(
         cfg,
         {
             "export_subsidy_eur_per_kwh": 0.081,
             "import_price_markup_eur_per_kwh": 0.205,
-            "lambda_throughput": 0.123,
             "w_soc_pen": 0.0,
         },
     )
@@ -113,6 +104,14 @@ def test_apply_reward_controls_ignores_lambda_throughput(tmp_path):
     assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
     assert cfg.reward.import_price_markup_eur_per_kwh == pytest.approx(0.205)
     assert cfg.reward.w_soc_pen == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("legacy_key", ["w_action_pen", "lambda_throughput"])
+def test_apply_reward_controls_rejects_removed_legacy_keys(tmp_path, legacy_key):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    with pytest.raises(ValueError, match=legacy_key):
+        _apply_reward_controls(cfg, {legacy_key: 1.0})
 
 
 def test_apply_reward_controls_rejects_unknown_keys(tmp_path):
