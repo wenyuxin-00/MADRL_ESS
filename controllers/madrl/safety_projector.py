@@ -10,7 +10,6 @@ SAFE_POC_ALGO_NAME = 'MATD3_SAFE_POC'
 SAFETY_LOCAL_FIELD_NAMES = ('soc_raw', 'load_raw', 'pv_raw', 'battery_capacity_kwh', 'p_max_kw')
 SAFETY_LOCAL_DIM = len(SAFETY_LOCAL_FIELD_NAMES)
 _SAFETY_EPS = 1e-06
-
 def is_safe_poc_algorithm(cfg_or_name: Any) -> bool:
     if isinstance(cfg_or_name, str):
         name = cfg_or_name
@@ -18,12 +17,10 @@ def is_safe_poc_algorithm(cfg_or_name: Any) -> bool:
         algo_cfg = getattr(cfg_or_name, 'algo', None)
         name = getattr(algo_cfg, 'name', '')
     return str(name) == SAFE_POC_ALGO_NAME
-
 def _row_norm_sq(rows: torch.Tensor) -> torch.Tensor:
     if rows.numel() == 0:
         return torch.zeros((int(rows.shape[0]),), dtype=rows.dtype, device=rows.device)
     return torch.clamp(torch.sum(rows * rows, dim=-1), min=_SAFETY_EPS)
-
 @dataclass(frozen=True)
 class ProjectionDiagnostics:
     enabled: bool
@@ -38,12 +35,9 @@ class ProjectionDiagnostics:
     pre_trafo_export_violation_kw: float = 0.0
     post_trafo_import_violation_kw: float = 0.0
     post_trafo_export_violation_kw: float = 0.0
-
     def to_dict(self) -> dict[str, float | int | bool]:
         return {'enabled': bool(self.enabled), 'batch_size': int(self.batch_size), 'projected_fraction': float(self.projected_fraction), 'mean_abs_delta': float(self.mean_abs_delta), 'max_abs_delta': float(self.max_abs_delta), 'mean_abs_delta_kw': float(self.mean_abs_delta_kw), 'pre_violation': float(self.pre_violation), 'post_violation': float(self.post_violation), 'pre_trafo_import_violation_kw': float(self.pre_trafo_import_violation_kw), 'pre_trafo_export_violation_kw': float(self.pre_trafo_export_violation_kw), 'post_trafo_import_violation_kw': float(self.post_trafo_import_violation_kw), 'post_trafo_export_violation_kw': float(self.post_trafo_export_violation_kw)}
-
 class JointGridSafetyProjector(nn.Module):
-
     def __init__(self, *, n_agents: int, voltage_sensitivity: np.ndarray, line_loading_sensitivity: np.ndarray, trafo_power_sensitivity: np.ndarray, voltage_base: np.ndarray, line_loading_base: np.ndarray, trafo_power_base_kw: np.ndarray, voltage_min_pu: float, voltage_max_pu: float, line_limit_pct: float, trafo_limit_pct: float, trafo_rating_kw: np.ndarray, efficiency: float, dt_hours: float, soc_min: float, soc_max: float, projector_mode: str, projection_iters: int, voltage_margin_pu: float, line_margin_pct: float, trafo_margin_pct: float, linearization_delta_kw: float) -> None:
         super().__init__()
         self.n_agents = int(n_agents)
@@ -93,7 +87,6 @@ class JointGridSafetyProjector(nn.Module):
         combined_constraint_rows = torch.cat(combined_rows, dim=0)
         self.register_buffer('combined_constraint_rows', combined_constraint_rows)
         self.register_buffer('combined_constraint_row_norm_sq', _row_norm_sq(combined_constraint_rows))
-
     @classmethod
     def from_cfg(cls, cfg: Any, *, device: torch.device | str | None=None) -> 'JointGridSafetyProjector':
         deployments = build_agent_deployments(cfg)
@@ -133,7 +126,6 @@ class JointGridSafetyProjector(nn.Module):
         if device is not None:
             projector = projector.to(device=torch.device(device))
         return projector
-
     def _extract_safety_local(self, obs_t: dict[str, torch.Tensor], *, dtype: torch.dtype) -> tuple[torch.Tensor, bool]:
         if 'safety_local' not in obs_t:
             raise KeyError("Observation does not contain 'safety_local'. Enable the safety-aware observation schema before using MATD3_SAFE_POC.")
@@ -142,13 +134,11 @@ class JointGridSafetyProjector(nn.Module):
         if squeezed:
             safety_local = safety_local.unsqueeze(0)
         return (safety_local.to(dtype=dtype), squeezed)
-
     @staticmethod
     def _as_work_dtype(buffer: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         if buffer.dtype == dtype and buffer.device == device:
             return buffer
         return buffer.to(device=device, dtype=dtype)
-
     def _local_bounds_kw(self, safety_local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         soc = torch.clamp(safety_local[..., 0], min=self.soc_min, max=self.soc_max)
         capacity_kwh = torch.clamp(safety_local[..., 3], min=_SAFETY_EPS)
@@ -162,7 +152,6 @@ class JointGridSafetyProjector(nn.Module):
         charge_limit_kw = torch.minimum(p_max_kw, torch.clamp((energy_max - energy_now) / (eff * dt), min=0.0))
         discharge_limit_kw = torch.minimum(p_max_kw, torch.clamp((energy_now - energy_min) * eff / dt, min=0.0))
         return (-discharge_limit_kw, charge_limit_kw, p_max_kw, pv_raw_kw)
-
     def _affine_terms(self, safety_local: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         base_net_load_kw = (safety_local[..., 1] - safety_local[..., 2]).to(dtype=dtype)
         voltage_sensitivity = self._as_work_dtype(self.voltage_sensitivity, dtype=dtype, device=device)[:, :self.n_agents]
@@ -179,7 +168,6 @@ class JointGridSafetyProjector(nn.Module):
         if trafo_sensitivity.numel() > 0:
             trafo_affine = trafo_affine + base_net_load_kw @ trafo_sensitivity.transpose(0, 1)
         return (voltage_affine, line_affine, trafo_affine)
-
     def _trafo_power_violation_terms(self, *, x_kw: torch.Tensor, trafo_affine: torch.Tensor, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = int(x_kw.shape[0])
         zero = torch.zeros((batch_size,), dtype=dtype, device=device)
@@ -192,7 +180,6 @@ class JointGridSafetyProjector(nn.Module):
         import_violation = torch.sum(torch.clamp(trafo_power - trafo_import_limit_kw.unsqueeze(0), min=0.0), dim=-1)
         export_violation = torch.sum(torch.clamp(-trafo_power - trafo_export_limit_kw.unsqueeze(0), min=0.0), dim=-1)
         return (import_violation, export_violation)
-
     def _approximate_violation(self, *, x_kw: torch.Tensor, voltage_affine: torch.Tensor, line_affine: torch.Tensor, trafo_affine: torch.Tensor, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         voltage_sensitivity = self._as_work_dtype(self.voltage_sensitivity, dtype=dtype, device=device)
         line_sensitivity = self._as_work_dtype(self.line_loading_sensitivity, dtype=dtype, device=device)
@@ -206,7 +193,6 @@ class JointGridSafetyProjector(nn.Module):
         trafo_import_violation, trafo_export_violation = self._trafo_power_violation_terms(x_kw=x_kw, trafo_affine=trafo_affine, dtype=dtype, device=device)
         trafo_violation = trafo_import_violation + trafo_export_violation
         return torch.sum(voltage_high + voltage_low, dim=-1) + line_violation + trafo_violation
-
     def _project_rows_sequential(self, x_kw: torch.Tensor, rows: torch.Tensor, bounds: torch.Tensor, row_norm_sq: torch.Tensor) -> torch.Tensor:
         if rows.numel() == 0 or bounds.numel() == 0:
             return x_kw
@@ -218,7 +204,6 @@ class JointGridSafetyProjector(nn.Module):
             correction = torch.clamp(violation, min=0.0).unsqueeze(-1) * row.unsqueeze(0) / row_norm_sq[idx]
             x_kw = x_kw - correction
         return x_kw
-
     def _project_rows_batched(self, x_kw: torch.Tensor, rows: torch.Tensor, bounds: torch.Tensor, row_norm_sq: torch.Tensor) -> torch.Tensor:
         if rows.numel() == 0 or bounds.numel() == 0:
             return x_kw
@@ -231,7 +216,6 @@ class JointGridSafetyProjector(nn.Module):
         violations = x_kw @ rows.transpose(0, 1) - bounds
         correction_weights = torch.clamp(violations, min=0.0) / row_norm_sq.unsqueeze(0)
         return x_kw - correction_weights @ rows
-
     def _combined_bounds(self, *, voltage_affine: torch.Tensor, line_affine: torch.Tensor, trafo_affine: torch.Tensor, voltage_low_limit: float, voltage_high_limit: float, line_limit: float, trafo_import_limit_kw: torch.Tensor, trafo_export_limit_kw: torch.Tensor) -> torch.Tensor:
         bounds = [voltage_high_limit - voltage_affine, voltage_affine - voltage_low_limit]
         if line_affine.shape[-1] > 0:
@@ -240,14 +224,12 @@ class JointGridSafetyProjector(nn.Module):
             bounds.append(trafo_import_limit_kw.unsqueeze(0) - trafo_affine)
             bounds.append(trafo_export_limit_kw.unsqueeze(0) + trafo_affine)
         return torch.cat(bounds, dim=-1)
-
     @staticmethod
     def _clamp_joint_action_kw(x_kw: torch.Tensor, *, battery_lower_kw: torch.Tensor, battery_upper_kw: torch.Tensor, pv_curtail_upper_kw: torch.Tensor, n_agents: int) -> torch.Tensor:
         battery_kw = torch.clamp(x_kw[..., :n_agents], min=battery_lower_kw, max=battery_upper_kw)
         pv_curtail_kw = torch.maximum(x_kw[..., n_agents:], torch.zeros_like(pv_curtail_upper_kw))
         pv_curtail_kw = torch.minimum(pv_curtail_kw, pv_curtail_upper_kw)
         return torch.cat([battery_kw, pv_curtail_kw], dim=-1)
-
     def project_actions_from_safety_local(self, safety_local: torch.Tensor, raw_actions: torch.Tensor, *, return_diagnostics: bool=False) -> torch.Tensor | tuple[torch.Tensor, dict[str, float | int | bool]]:
         squeezed = raw_actions.ndim == 2
         if squeezed:
@@ -331,7 +313,6 @@ class JointGridSafetyProjector(nn.Module):
         projected_any = torch.any(delta.reshape(delta.shape[0], -1) > 1e-05, dim=-1)
         diagnostics = ProjectionDiagnostics(enabled=True, batch_size=int(battery_action.shape[0]), projected_fraction=float(projected_any.float().mean().item()), mean_abs_delta=float(delta.mean().item()), max_abs_delta=float(delta.max().item()), mean_abs_delta_kw=float(delta_kw.mean().item()), pre_violation=float(pre_violation.mean().item()) if pre_violation is not None else 0.0, post_violation=float(post_violation.mean().item()), pre_trafo_import_violation_kw=float(pre_trafo_import_violation.mean().item()), pre_trafo_export_violation_kw=float(pre_trafo_export_violation.mean().item()), post_trafo_import_violation_kw=float(post_trafo_import_violation.mean().item()), post_trafo_export_violation_kw=float(post_trafo_export_violation.mean().item()))
         return (projected_actions, diagnostics.to_dict())
-
     def project_actions(self, obs_t: dict[str, torch.Tensor], raw_actions: torch.Tensor, *, return_diagnostics: bool=False) -> torch.Tensor | tuple[torch.Tensor, dict[str, float | int | bool]]:
         safety_local, _ = self._extract_safety_local(obs_t, dtype=torch.float32)
         return self.project_actions_from_safety_local(safety_local, raw_actions, return_diagnostics=return_diagnostics)

@@ -3,7 +3,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any, Iterator
-from scripts.utils.madrl_shared_data import _shared_data_root
+from predictors.shared_data import _shared_data_root
 from scripts.utils.project_paths import get_artifact_root, project_root
 _PROTECTION_MANIFEST_RELATIVE_PATH = Path('artifacts') / '_protection' / 'latest_results_manifest.json'
 _SUPPORTED_FORECAST_SIGNAL_DIRS = frozenset({'wholesale_price', 'load', 'pv'})

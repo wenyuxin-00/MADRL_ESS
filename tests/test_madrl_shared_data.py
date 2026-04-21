@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from scripts.utils.madrl_shared_data import (
+from predictors.shared_data import (
     build_shared_data_status_summary,
     ensure_madrl_shared_data,
     select_shared_data_episode_indices,

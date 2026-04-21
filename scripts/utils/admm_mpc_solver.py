@@ -12,21 +12,17 @@ _THROUGHPUT_TIEBREAKER_EUR_PER_KWH = 1e-08
 _NPOS_TIEBREAKER_EUR_PER_KWH = 1e-09
 _ADMM_RESIDUAL_BALANCING_MU = 10.0
 _ADMM_RESIDUAL_BALANCING_TAU = 2.0
-
 def _load_gurobi():
     import gurobipy as gp
     return (gp, gp.GRB)
-
 def _create_model(gp: Any, name: str):
     model = gp.Model(name)
     model.Params.OutputFlag = 0
     return model
-
 def _wrap_gurobi_error(detail: str, exc: Exception) -> RuntimeError:
     error = RuntimeError(f'Direct day optimization requires a working Gurobi installation/license: {detail}: {exc}')
     error.__cause__ = exc
     return error
-
 @dataclass(frozen=True)
 class AdmmMpcWindowData:
     wholesale_price_seq: np.ndarray
@@ -45,15 +41,12 @@ class AdmmMpcWindowData:
     export_subsidy_eur_per_kwh: float
     import_price_markup_eur_per_kwh: float
     dt_hours: float
-
     @property
     def horizon(self) -> int:
         return int(self.import_price_eur_per_kwh.shape[0])
-
     @property
     def n_agents(self) -> int:
         return int(self.load_seq.shape[0])
-
 @dataclass(frozen=True)
 class AdmmMpcSurrogateCache:
     trafo_limit_kw: float
@@ -61,13 +54,11 @@ class AdmmMpcSurrogateCache:
     alpha_netload_kw: np.ndarray
     alpha_netload_window_kw: np.ndarray
     horizon_steps: int
-
 @dataclass(frozen=True)
 class _AdmmMpcWindowSurrogate:
     baseline_root_p_kw: np.ndarray
     export_overload_mask: np.ndarray
     import_overload_mask: np.ndarray
-
 @dataclass(frozen=True)
 class _AdmmMpcLocalWarmStart:
     charge_kw: np.ndarray
@@ -76,7 +67,6 @@ class _AdmmMpcLocalWarmStart:
     net_load_kw: np.ndarray
     n_pos_kw: np.ndarray
     energy_kwh: np.ndarray
-
 @dataclass
 class AdmmMpcWarmStartCache:
     horizon_steps: int
@@ -90,7 +80,6 @@ class AdmmMpcWarmStartCache:
     u_kw: np.ndarray | None = None
     rho_final: float | None = None
     local_solvers: tuple[Any, ...] | None = None
-
 @dataclass(frozen=True)
 class _AdmmMpcLocalSolveResult:
     charge_kw: np.ndarray
@@ -102,7 +91,6 @@ class _AdmmMpcLocalSolveResult:
     contribution_kw: np.ndarray
     solve_time_sec: float
     status: str
-
 @dataclass(frozen=True)
 class AdmmMpcWindowResult:
     charge_kw: np.ndarray
@@ -124,7 +112,6 @@ class AdmmMpcWindowResult:
     rho_final: float
     solver_status: str
     history_df: pd.DataFrame
-
 @dataclass(frozen=True)
 class AdmmMpcStepResult:
     executed_charge_kw: np.ndarray
@@ -140,22 +127,18 @@ class AdmmMpcStepResult:
     solve_time_sec: float
     rho_final: float
     warm_start_cache: AdmmMpcWarmStartCache
-
 def _coerce_1d(values: np.ndarray, *, name: str) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32).reshape(-1)
     if array.size == 0:
         raise ValueError(f'{name} must not be empty.')
     return array.astype(np.float32, copy=False)
-
 def _coerce_2d(values: np.ndarray, *, name: str) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     if array.ndim != 2:
         raise ValueError(f'{name} must be 2D, got shape {array.shape}.')
     return array.astype(np.float32, copy=False)
-
 def _clamp_rho(value: float, *, rho_min: float, rho_max: float) -> float:
     return float(np.clip(float(value), float(rho_min), float(rho_max)))
-
 def _duplicate_last_shift_2d(values: np.ndarray) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     if array.ndim != 2:
@@ -167,7 +150,6 @@ def _duplicate_last_shift_2d(values: np.ndarray) -> np.ndarray:
         shifted[:, :-1] = array[:, 1:]
     shifted[:, -1] = array[:, -1]
     return shifted.astype(np.float32, copy=False)
-
 def _shift_energy_warm_start(values: np.ndarray, *, current_energy_kwh: np.ndarray) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     current = np.asarray(current_energy_kwh, dtype=np.float32).reshape(-1)
@@ -184,23 +166,19 @@ def _shift_energy_warm_start(values: np.ndarray, *, current_energy_kwh: np.ndarr
     if array.shape[1] > 1:
         shifted[:, -1] = array[:, -1]
     return shifted.astype(np.float32, copy=False)
-
 def _status_label(model, grb) -> str:
     mapping = {int(grb.OPTIMAL): 'optimal', int(grb.SUBOPTIMAL): 'suboptimal', int(grb.INFEASIBLE): 'infeasible', int(grb.INF_OR_UNBD): 'inf_or_unbd', int(grb.UNBOUNDED): 'unbounded', int(grb.TIME_LIMIT): 'time_limit'}
     return mapping.get(int(model.Status), f'status_{int(model.Status)}')
-
 def _validate_prices(window_data: AdmmMpcWindowData) -> None:
     price_gap = np.asarray(window_data.import_price_eur_per_kwh, dtype=np.float32) - np.float32(window_data.export_subsidy_eur_per_kwh)
     min_gap = float(np.min(price_gap))
     if min_gap < -1e-09:
         raise ValueError(f'Rolling ADMM-MPC requires import_price_eur_per_kwh >= export_subsidy_eur_per_kwh, got min(import_price - subsidy)={min_gap:.6f}.')
-
 def _day_episode_length(dt_hours: float) -> int:
     resolved = int(round(24.0 / float(dt_hours)))
     if abs(float(dt_hours) * resolved - 24.0) > 1e-09:
         raise ValueError(f'ADMM MPC requires dt in hours with one full day per episode, got dt_hours={dt_hours} and resolved episode_length={resolved}.')
     return resolved
-
 def _objective_from_net_load(net_load_kw: np.ndarray, import_price_eur_per_kwh: np.ndarray, export_subsidy_eur_per_kwh: float, dt_hours: float) -> float:
     net_load = _coerce_2d(net_load_kw, name='net_load_kw')
     import_price = _coerce_1d(import_price_eur_per_kwh, name='import_price_eur_per_kwh')
@@ -209,14 +187,12 @@ def _objective_from_net_load(net_load_kw: np.ndarray, import_price_eur_per_kwh: 
     grid_import_kw = np.maximum(net_load, 0.0)
     grid_export_kw = np.maximum(-net_load, 0.0)
     return float(np.sum(float(dt_hours) * (import_price.reshape(1, -1) * grid_import_kw - float(export_subsidy_eur_per_kwh) * grid_export_kw)))
-
 def _compute_surrogate_root_p_kw(net_load_kw: np.ndarray, surrogate_cache: AdmmMpcSurrogateCache) -> np.ndarray:
     net_load = _coerce_2d(net_load_kw, name='net_load_kw')
     alpha_window = _coerce_2d(surrogate_cache.alpha_netload_window_kw, name='alpha_netload_window_kw')
     if net_load.shape != alpha_window.shape:
         raise ValueError(f'net_load_kw shape {net_load.shape} must match alpha_netload_window_kw {alpha_window.shape}.')
     return (float(surrogate_cache.trafo_base_kw) + np.sum(alpha_window * net_load, axis=0)).astype(np.float32, copy=False)
-
 def build_admm_mpc_surrogate_cache(cfg, env, *, horizon_steps: int) -> AdmmMpcSurrogateCache:
     projector = _get_grid_projector(cfg, env)
     alpha_netload_kw = _battery_to_netload_sensitivity(projector).astype(np.float32, copy=False)
@@ -228,7 +204,6 @@ def build_admm_mpc_surrogate_cache(cfg, env, *, horizon_steps: int) -> AdmmMpcSu
     if trafo_limit_kw is None or not np.isfinite(float(trafo_limit_kw)):
         raise ValueError('Unable to resolve a transformer power reference limit for ADMM MPC.')
     return AdmmMpcSurrogateCache(trafo_limit_kw=float(trafo_limit_kw), trafo_base_kw=float(trafo_base_kw[0]), alpha_netload_kw=alpha_netload_kw, alpha_netload_window_kw=alpha_window, horizon_steps=int(horizon_steps))
-
 def build_admm_mpc_window_data(cfg, env, raw_obs) -> AdmmMpcWindowData:
     wholesale_price = _coerce_1d(np.asarray(raw_obs[WHOLESALE_PRICE_SEQ_FIELD], dtype=np.float32), name=WHOLESALE_PRICE_SEQ_FIELD)
     load_seq = _coerce_2d(np.asarray(raw_obs['load_seq'], dtype=np.float32), name='load_seq')
@@ -248,17 +223,14 @@ def build_admm_mpc_window_data(cfg, env, raw_obs) -> AdmmMpcWindowData:
     data = AdmmMpcWindowData(wholesale_price_seq=wholesale_price.copy(), wholesale_price_eur_per_kwh=wholesale_price.copy(), import_price_eur_per_kwh=import_price.copy(), load_seq=load_seq.copy(), pv_seq=pv_seq.copy(), battery_capacity_kwh=battery_capacity_kwh.copy(), p_max_kw=p_max_kw.copy(), eff_charge=np.full((load_seq.shape[0],), float(env.eff), dtype=np.float32), eff_discharge=np.full((load_seq.shape[0],), float(env.eff), dtype=np.float32), energy_init_kwh=energy_init_kwh.copy(), energy_ref_kwh=energy_ref_kwh.copy(), energy_min_kwh=(float(env.soc_min) * battery_capacity_kwh).astype(np.float32, copy=False), energy_max_kwh=(float(env.soc_max) * battery_capacity_kwh).astype(np.float32, copy=False), export_subsidy_eur_per_kwh=float(getattr(cfg.reward, 'export_subsidy_eur_per_kwh', 0.079)), import_price_markup_eur_per_kwh=import_price_markup, dt_hours=float(env.dt))
     _validate_prices(data)
     return data
-
 def resolve_default_terminal_cost_weight(window_data: AdmmMpcWindowData, *, multiplier: float=1.0) -> np.ndarray:
     mean_import_price = float(np.mean(np.asarray(window_data.import_price_eur_per_kwh, dtype=np.float32)))
     weights = float(multiplier) * 2.0 * mean_import_price / np.maximum(np.asarray(window_data.battery_capacity_kwh, dtype=np.float32), 1.0)
     return np.asarray(weights, dtype=np.float32)
-
 def _build_window_surrogate(window_data: AdmmMpcWindowData, surrogate_cache: AdmmMpcSurrogateCache) -> _AdmmMpcWindowSurrogate:
     baseline_net_load = (np.asarray(window_data.load_seq, dtype=np.float32) - np.asarray(window_data.pv_seq, dtype=np.float32)).astype(np.float32, copy=False)
     baseline_root_p_kw = (float(surrogate_cache.trafo_base_kw) + np.sum(np.asarray(surrogate_cache.alpha_netload_window_kw, dtype=np.float32) * baseline_net_load, axis=0)).astype(np.float32, copy=False)
     return _AdmmMpcWindowSurrogate(baseline_root_p_kw=baseline_root_p_kw, export_overload_mask=baseline_root_p_kw < -float(surrogate_cache.trafo_limit_kw) - 1e-06, import_overload_mask=baseline_root_p_kw > float(surrogate_cache.trafo_limit_kw) + 1e-06)
-
 def _project_contribution_copies(v_kw: np.ndarray, lower_bound_kw: np.ndarray) -> np.ndarray:
     v = _coerce_2d(v_kw, name='v_kw')
     lower_bound = _coerce_1d(lower_bound_kw, name='lower_bound_kw')
@@ -274,20 +246,16 @@ def _project_contribution_copies(v_kw: np.ndarray, lower_bound_kw: np.ndarray) -
             continue
         projected[:, step_idx] += np.float32((float(lower_bound[step_idx]) - total_value) / n_agents)
     return projected.astype(np.float32, copy=False)
-
 def _build_default_projected_copies(window_data: AdmmMpcWindowData, surrogate_cache: AdmmMpcSurrogateCache) -> np.ndarray:
     baseline_net_load = (np.asarray(window_data.load_seq, dtype=np.float32) - np.asarray(window_data.pv_seq, dtype=np.float32)).astype(np.float32, copy=False)
     baseline_contrib = (np.asarray(surrogate_cache.alpha_netload_window_kw, dtype=np.float32) * baseline_net_load).astype(np.float32, copy=False)
     lower_bound = np.full((window_data.horizon,), -float(surrogate_cache.trafo_limit_kw) - float(surrogate_cache.trafo_base_kw), dtype=np.float32)
     return _project_contribution_copies(baseline_contrib, lower_bound)
-
 def _compute_default_rho(window_data: AdmmMpcWindowData, surrogate_cache: AdmmMpcSurrogateCache) -> float:
     baseline_net_load = (np.asarray(window_data.load_seq, dtype=np.float32) - np.asarray(window_data.pv_seq, dtype=np.float32)).astype(np.float32, copy=False)
     alpha_window = np.asarray(surrogate_cache.alpha_netload_window_kw, dtype=np.float32)
     return float(np.mean(np.asarray(window_data.import_price_eur_per_kwh, dtype=np.float32)) * float(window_data.dt_hours) / max(1.0, float(np.mean(np.abs(alpha_window * baseline_net_load)))))
-
 class _ReusableAdmmMpcLocalQPSolver:
-
     def __init__(self, *, agent_idx: int, horizon_steps: int, battery_capacity_kwh: float, p_max_kw: float, dt_hours: float, eff_charge: float, eff_discharge: float, energy_min_kwh: float, energy_max_kwh: float) -> None:
         self.agent_idx = int(agent_idx)
         self.T = int(horizon_steps)
@@ -319,18 +287,15 @@ class _ReusableAdmmMpcLocalQPSolver:
             self.model.addConstr(self.energy[step_idx + 1] == self.energy[step_idx] + self.eff_charge * self.dt * self.charge[step_idx] - self.dt / self.eff_discharge * self.discharge[step_idx], name=f'energy_balance_{step_idx}')
         self.model.ModelSense = self.grb.MINIMIZE
         self.model.update()
-
     def dispose(self) -> None:
         dispose = getattr(self.model, 'dispose', None)
         if callable(dispose):
             dispose()
-
     def _apply_window_data(self, window_data: AdmmMpcWindowData) -> None:
         self._energy_init_constr.RHS = float(window_data.energy_init_kwh[self.agent_idx])
         for step_idx in range(self.T):
             self._pv_curtail_ub_constrs[step_idx].RHS = float(window_data.pv_seq[self.agent_idx, step_idx])
             self._net_load_balance_constrs[step_idx].RHS = float(window_data.load_seq[self.agent_idx, step_idx] - window_data.pv_seq[self.agent_idx, step_idx])
-
     def _apply_warm_start(self, warm_start: _AdmmMpcLocalWarmStart | None) -> None:
         if warm_start is None:
             return
@@ -342,7 +307,6 @@ class _ReusableAdmmMpcLocalQPSolver:
             self.n_pos[step_idx].Start = float(warm_start.n_pos_kw[step_idx])
         for step_idx in range(self.T + 1):
             self.energy[step_idx].Start = float(warm_start.energy_kwh[step_idx])
-
     def solve(self, *, window_data: AdmmMpcWindowData, alpha_kw: np.ndarray, z_kw: np.ndarray, u_kw: np.ndarray, rho: float, terminal_ref_kwh: float, terminal_cost_weight_eur_per_kwh2: float, warm_start: _AdmmMpcLocalWarmStart | None) -> _AdmmMpcLocalSolveResult:
         alpha = _coerce_1d(alpha_kw, name='alpha_kw')
         z = _coerce_1d(z_kw, name='z_kw')
@@ -379,7 +343,6 @@ class _ReusableAdmmMpcLocalQPSolver:
         n_pos_kw = np.asarray([self.n_pos[t].X for t in range(self.T)], dtype=np.float32)
         energy_kwh = np.asarray([self.energy[t].X for t in range(self.T + 1)], dtype=np.float32)
         return _AdmmMpcLocalSolveResult(charge_kw=charge_kw, discharge_kw=discharge_kw, pv_curtail_kw=pv_curtail_kw, net_load_kw=net_load_kw, n_pos_kw=n_pos_kw, energy_kwh=energy_kwh, contribution_kw=(alpha * net_load_kw).astype(np.float32, copy=False), solve_time_sec=solve_time_sec, status=status)
-
 def _make_local_warm_start_cache(warm_start_cache: AdmmMpcWarmStartCache | None, *, window_data: AdmmMpcWindowData) -> list[_AdmmMpcLocalWarmStart | None]:
     if warm_start_cache is None:
         return [None] * window_data.n_agents
@@ -393,7 +356,6 @@ def _make_local_warm_start_cache(warm_start_cache: AdmmMpcWarmStartCache | None,
     n_pos = _duplicate_last_shift_2d(np.asarray(warm_start_cache.n_pos_kw, dtype=np.float32))
     energy = _shift_energy_warm_start(np.asarray(warm_start_cache.energy_kwh, dtype=np.float32), current_energy_kwh=np.asarray(window_data.energy_init_kwh, dtype=np.float32))
     return [_AdmmMpcLocalWarmStart(charge_kw=charge[agent_idx], discharge_kw=discharge[agent_idx], pv_curtail_kw=pv_curtail[agent_idx], net_load_kw=net_load[agent_idx], n_pos_kw=n_pos[agent_idx], energy_kwh=energy[agent_idx]) for agent_idx in range(window_data.n_agents)]
-
 def _copy_local_solvers(warm_start_cache: AdmmMpcWarmStartCache | None, *, window_data: AdmmMpcWindowData) -> tuple[_ReusableAdmmMpcLocalQPSolver, ...] | None:
     if warm_start_cache is None or warm_start_cache.local_solvers is None:
         return None
@@ -403,7 +365,6 @@ def _copy_local_solvers(warm_start_cache: AdmmMpcWarmStartCache | None, *, windo
     if len(local_solvers) != window_data.n_agents:
         return None
     return local_solvers
-
 def _build_or_reuse_local_solvers(warm_start_cache: AdmmMpcWarmStartCache | None, *, window_data: AdmmMpcWindowData) -> tuple[_ReusableAdmmMpcLocalQPSolver, ...]:
     reused = _copy_local_solvers(warm_start_cache, window_data=window_data)
     if reused is not None:
@@ -414,16 +375,13 @@ def _build_or_reuse_local_solvers(warm_start_cache: AdmmMpcWarmStartCache | None
             if callable(dispose):
                 dispose()
     return tuple((_ReusableAdmmMpcLocalQPSolver(agent_idx=agent_idx, horizon_steps=window_data.horizon, battery_capacity_kwh=float(window_data.battery_capacity_kwh[agent_idx]), p_max_kw=float(window_data.p_max_kw[agent_idx]), dt_hours=float(window_data.dt_hours), eff_charge=float(window_data.eff_charge[agent_idx]), eff_discharge=float(window_data.eff_discharge[agent_idx]), energy_min_kwh=float(window_data.energy_min_kwh[agent_idx]), energy_max_kwh=float(window_data.energy_max_kwh[agent_idx])) for agent_idx in range(window_data.n_agents)))
-
 def solve_admm_mpc_window(window_data: AdmmMpcWindowData, surrogate_cache: AdmmMpcSurrogateCache, *, terminal_cost_weight_eur_per_kwh2: np.ndarray, warm_start_cache: AdmmMpcWarmStartCache | None, rho_init: float, rho_min: float, rho_max: float, rho_adaptation: str | None, max_iters: int, max_iters_first_step: int, primal_tol: float, dual_tol: float) -> AdmmMpcWindowResult:
     window_result, _ = _solve_admm_mpc_window_with_cache(window_data, surrogate_cache, terminal_cost_weight_eur_per_kwh2=terminal_cost_weight_eur_per_kwh2, warm_start_cache=warm_start_cache, rho_init=rho_init, rho_min=rho_min, rho_max=rho_max, rho_adaptation=rho_adaptation, max_iters=max_iters, max_iters_first_step=max_iters_first_step, primal_tol=primal_tol, dual_tol=dual_tol)
     return window_result
-
 def _build_next_warm_start_cache(window_result: AdmmMpcWindowResult, *, z_kw: np.ndarray, u_kw: np.ndarray, rho_final: float, local_solvers: tuple[_ReusableAdmmMpcLocalQPSolver, ...]) -> AdmmMpcWarmStartCache:
     n_agents, horizon = window_result.charge_kw.shape
     n_pos_kw = np.maximum(window_result.net_load_kw, 0.0).astype(np.float32, copy=False)
     return AdmmMpcWarmStartCache(horizon_steps=int(horizon), charge_kw=np.asarray(window_result.charge_kw, dtype=np.float32).copy(), discharge_kw=np.asarray(window_result.discharge_kw, dtype=np.float32).copy(), pv_curtail_kw=np.asarray(window_result.pv_curtail_kw, dtype=np.float32).copy(), net_load_kw=np.asarray(window_result.net_load_kw, dtype=np.float32).copy(), n_pos_kw=np.asarray(n_pos_kw, dtype=np.float32).copy(), energy_kwh=np.asarray(window_result.energy_kwh, dtype=np.float32).copy(), z_kw=np.asarray(z_kw, dtype=np.float32).reshape(n_agents, horizon).copy(), u_kw=np.asarray(u_kw, dtype=np.float32).reshape(n_agents, horizon).copy(), rho_final=float(rho_final), local_solvers=tuple(local_solvers))
-
 def _solve_admm_mpc_window_with_cache(window_data: AdmmMpcWindowData, surrogate_cache: AdmmMpcSurrogateCache, *, terminal_cost_weight_eur_per_kwh2: np.ndarray, warm_start_cache: AdmmMpcWarmStartCache | None, rho_init: float, rho_min: float, rho_max: float, rho_adaptation: str | None, max_iters: int, max_iters_first_step: int, primal_tol: float, dual_tol: float) -> tuple[AdmmMpcWindowResult, AdmmMpcWarmStartCache]:
     _validate_prices(window_data)
     if int(surrogate_cache.horizon_steps) != int(window_data.horizon):
@@ -501,7 +459,6 @@ def _solve_admm_mpc_window_with_cache(window_data: AdmmMpcWindowData, surrogate_
     window_result = AdmmMpcWindowResult(charge_kw=charge_kw, discharge_kw=discharge_kw, pv_curtail_kw=pv_curtail_kw, pv_effective_kw=pv_effective_kw, net_load_kw=net_load_kw, grid_import_kw=np.maximum(net_load_kw, 0.0).astype(np.float32, copy=False), grid_export_kw=np.maximum(-net_load_kw, 0.0).astype(np.float32, copy=False), energy_kwh=energy_kwh, surrogate_root_p_kw=_compute_surrogate_root_p_kw(net_load_kw, surrogate_cache), baseline_root_p_kw=window_surrogate.baseline_root_p_kw, objective_eur=float(_objective_from_net_load(net_load_kw, import_price_eur_per_kwh=window_data.import_price_eur_per_kwh, export_subsidy_eur_per_kwh=window_data.export_subsidy_eur_per_kwh, dt_hours=window_data.dt_hours)), converged=bool(converged), iterations=int(len(history_rows)), final_primal_residual=float(final_primal), final_dual_residual=float(final_dual), solve_time_sec=float(perf_counter() - started_at), rho_final=float(_clamp_rho(rho, rho_min=rho_min, rho_max=rho_max)), solver_status='admm_mpc_converged' if converged else 'admm_mpc_not_converged', history_df=pd.DataFrame(history_rows))
     next_cache = _build_next_warm_start_cache(window_result, z_kw=z_kw, u_kw=u_kw, rho_final=float(_clamp_rho(rho, rho_min=rho_min, rho_max=rho_max)), local_solvers=local_solvers)
     return (window_result, next_cache)
-
 def _clip_first_step_battery_power_kw(env, requested_battery_power_kw: np.ndarray) -> np.ndarray:
     battery_power_kw = np.asarray(requested_battery_power_kw, dtype=np.float32)
     e_t = np.asarray(env.soc, dtype=np.float32) * np.asarray(env.agent_c_bat, dtype=np.float32)
@@ -513,7 +470,6 @@ def _clip_first_step_battery_power_kw(env, requested_battery_power_kw: np.ndarra
     p_max_charge = np.minimum(p_max, np.maximum(0.0, (e_max - e_t) / (eff * dt)))
     p_max_discharge = np.minimum(p_max, np.maximum(0.0, (e_t - e_min) * eff / dt))
     return np.clip(battery_power_kw, -p_max_discharge, p_max_charge).astype(np.float32)
-
 def _first_step_action_array(env, window_result: AdmmMpcWindowResult) -> np.ndarray:
     requested_battery_power_kw = (np.asarray(window_result.charge_kw[:, 0], dtype=np.float32) - np.asarray(window_result.discharge_kw[:, 0], dtype=np.float32)).astype(np.float32, copy=False)
     clipped_battery_power_kw = _clip_first_step_battery_power_kw(env, requested_battery_power_kw)
@@ -526,7 +482,6 @@ def _first_step_action_array(env, window_result: AdmmMpcWindowResult) -> np.ndar
     pv_utilization[valid_mask] = (pv_effective_kw[valid_mask] / pv_raw_kw[valid_mask]).astype(np.float32, copy=False)
     pv_action = np.clip(2.0 * pv_utilization - 1.0, -1.0, 1.0).astype(np.float32, copy=False)
     return np.stack([battery_action, pv_action], axis=-1).astype(np.float32, copy=False)
-
 def run_admm_mpc_step(env, raw_obs, cfg, *, surrogate_cache: AdmmMpcSurrogateCache, warm_start_cache: AdmmMpcWarmStartCache | None, rho_init: float, rho_min: float, rho_max: float, rho_adaptation: str | None, max_iters: int, max_iters_first_step: int, primal_tol: float, dual_tol: float, terminal_cost_weight_eur_per_kwh2: np.ndarray) -> AdmmMpcStepResult:
     window_data = build_admm_mpc_window_data(cfg, env, raw_obs)
     window_result, next_cache = _solve_admm_mpc_window_with_cache(window_data, surrogate_cache, terminal_cost_weight_eur_per_kwh2=terminal_cost_weight_eur_per_kwh2, warm_start_cache=warm_start_cache, rho_init=float(rho_init), rho_min=float(rho_min), rho_max=float(rho_max), rho_adaptation=rho_adaptation, max_iters=int(max_iters), max_iters_first_step=int(max_iters_first_step), primal_tol=float(primal_tol), dual_tol=float(dual_tol))

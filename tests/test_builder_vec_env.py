@@ -3,7 +3,7 @@ import pytest
 from envs.subproc_vec_env import SubprocVecEnv
 from envs.vec_env import DummyVecEnv
 from scripts.builder import _build_train_vec_env, build_env, build_train_runner
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
 
 

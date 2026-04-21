@@ -7,7 +7,7 @@ from envs.parallel_episode_sampling import ParallelEpisodeSampler, validate_wave
 from envs.subproc_vec_env import SubprocVecEnv
 from envs.vec_env import DummyVecEnv
 from scripts.builder import _build_train_vec_env
-from scripts.run_train_mainline import _apply_train_controls
+from scripts.mainline_madrl import _apply_train_controls
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 

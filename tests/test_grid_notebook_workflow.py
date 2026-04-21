@@ -61,11 +61,11 @@ from scripts.utils.grid_notebook_workflow import (
     resolve_forecast_backend,
     validate_compare_model_bundles,
 )
-from scripts.utils.forecast_shared_preset import (
+from predictors.mainline_forecast import (
     get_managed_lstm_forecast_controls,
     merge_managed_forecast_controls,
 )
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
 
 
@@ -294,7 +294,7 @@ def test_forecast_lstm_notebook_uses_shared_forecast_preset():
     notebook_path = repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb"
     joined_source = "\n".join(_load_code_cells(notebook_path))
 
-    assert "get_managed_lstm_forecast_controls" in joined_source
+    assert "get_mainline_forecast_controls" in joined_source
     assert "hidden_size = 128" not in joined_source
     assert "batch_size = 1024" not in joined_source
     assert "epochs = 20" not in joined_source

@@ -10,14 +10,10 @@ from unittest.mock import patch
 import pytest
 
 from configs.profiles import compose_experiment_config, recommended_gpu_fast_num_envs
-from scripts.run_train_mainline import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
+from scripts.mainline_madrl import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
-from scripts.utils.train_mainline_launcher import (
-    _monitor_process_progress,
-    build_train_mainline_command,
-    prepare_train_mainline_launch,
-)
+from predictors.shared_data import ensure_madrl_shared_data
+from scripts.mainline_madrl import _monitor_process_progress
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
@@ -39,35 +35,6 @@ def test_gpu_fast_profile_defaults_are_predictable_with_28_threads(tmp_path):
     assert cfg.train.update_interval == 1
     assert cfg.train.updates_per_step == 2
     assert cfg.train.use_noise_decay is True
-
-
-def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
-    launch = prepare_train_mainline_launch(
-        project_root=tmp_path,
-        experiment_controls={"seed": 7, "algorithm": "MATD3"},
-        data_controls={"prediction_mode": "perfect"},
-        battery_controls={"battery_capacity": [25.0, 25.0, 25.0, 25.0, 25.0], "max_charge_rate": 0.4},
-        train_controls={"profile": "gpu_fast", "launch_mode": "external", "train_episodes": 100},
-        checkpoint_controls={"experiment_name": "grid_mainline"},
-        env_name="GridTrainMainline",
-        run_number=3,
-    )
-    command = build_train_mainline_command(launch, python_executable="python")
-
-    assert Path(launch["experiment_controls_path"]).exists()
-    assert Path(launch["data_controls_path"]).exists()
-    assert Path(launch["battery_controls_path"]).exists()
-    assert Path(launch["train_controls_path"]).exists()
-    assert Path(launch["checkpoint_controls_path"]).exists()
-    assert Path(launch["meta_dir"]).exists()
-    assert Path(launch["model_root"]).parts[-4:-1] == ("MATD3", "perfect", "grid_mainline")
-    assert command[:3] == ["python", "-m", "scripts.run_train_mainline"]
-    assert "--battery-controls" in command
-    assert "--checkpoint-controls" in command
-    assert "--env-name" in command
-    assert "GridTrainMainline" in command
-    assert "--run-number" in command
-    assert "3" in command
 
 
 @pytest.mark.parametrize(
@@ -191,10 +158,10 @@ def test_monitor_process_progress_reports_at_episode_intervals(monkeypatch, tmp_
             return SimpleNamespace(st_mtime_ns=stat_counter["value"])
         return original_stat(self)
 
-    monkeypatch.setattr("scripts.utils.train_mainline_launcher._load_progress_payload", fake_load_progress)
+    monkeypatch.setattr("scripts.mainline_madrl._load_progress_payload", fake_load_progress)
     monkeypatch.setattr(Path, "stat", fake_stat)
     monkeypatch.setattr("builtins.print", lambda message: printed.append(str(message)))
-    monkeypatch.setattr("scripts.utils.train_mainline_launcher.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("scripts.mainline_madrl.time.sleep", lambda _seconds: None)
 
     last_payload = _monitor_process_progress(
         DummyProcess(),
@@ -324,7 +291,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "scripts.run_train_mainline",
+        "scripts.mainline_madrl",
         "--experiment-controls",
         str(experiment_path),
         "--data-controls",
@@ -502,7 +469,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "scripts.run_train_mainline",
+        "scripts.mainline_madrl",
         "--experiment-controls",
         str(experiment_path),
         "--data-controls",

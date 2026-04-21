@@ -16,6 +16,3 @@ class LSTMForecastModel(nn.Module):
             raise ValueError(f'Input tensor must be 2D or 3D, got {x.dim()}D.')
         out, _ = self.lstm(x)
         return self.head(out[:, -1, :])
-
-class LSTMPricePredictor(LSTMForecastModel):
-    pass

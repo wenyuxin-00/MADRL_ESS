@@ -9,7 +9,7 @@ import pytest
 
 from controllers.action_feasibility import _local_bounds_numpy, build_safety_local_numpy
 from envs.rewards import NormalReward
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
 N_AGENTS = 3

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from scripts.builder import build_train_runner
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from predictors.shared_data import ensure_madrl_shared_data
 from scripts.utils.torch_runtime import STRICT_REPRO_RUNTIME_MODE
 from tests.support.helpers import make_smoke_config
 
