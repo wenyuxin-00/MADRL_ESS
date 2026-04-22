@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from envs.rewards import NormalReward
+from envs.rewards.NormalReward import NormalReward
 
 
 def _make_cfg():

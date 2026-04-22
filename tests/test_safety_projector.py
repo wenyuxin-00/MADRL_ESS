@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from controllers.madrl.safety_projector import JointGridSafetyProjector
-from envs.grid.core.grid_types import GridStepResult
+from envs.grid.core.grid_core import GridStepResult
 
 
 def _make_projector(*, base_power_kw: float, limit_kw: float, mode: str = "joint_linearized") -> JointGridSafetyProjector:
@@ -57,18 +57,9 @@ def _fake_grid_result(*, p_hv_mw: float, loading_percent: float = 0.0) -> GridSt
     return GridStepResult(
         converged=True,
         vm_pu=np.zeros(0, dtype=np.float32),
-        va_degree=np.zeros(0, dtype=np.float32),
         line_loading_pct=np.zeros(0, dtype=np.float32),
         trafo_loading_pct=np.array([loading_percent], dtype=np.float32),
-        p_mw_from=np.zeros(0, dtype=np.float32),
-        agent_vm_pu=np.zeros(0, dtype=np.float32),
         v_violation=np.zeros(0, dtype=np.float32),
-        line_violation=0.0,
-        trafo_violation=max(loading_percent - 100.0, 0.0) / 100.0,
-        l_violation=max(loading_percent - 100.0, 0.0) / 100.0,
-        n_buses=0,
-        n_lines=0,
-        n_trafos=1,
         trafo_p_signed_kw=np.array([p_hv_mw * 1000.0], dtype=np.float32),
     )
 

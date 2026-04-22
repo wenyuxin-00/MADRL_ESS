@@ -226,8 +226,6 @@ def _load_signal_matrix_from_source(source: SignalCsvSource, signal_name: str, *
     if values.ndim == 2 and values.shape[1] == 1:
         values = values.reshape(-1)
     return (frame, values, value_columns)
-def load_signal_matrix_from_source(source: SignalCsvSource, signal_name: str, *, split: str) -> tuple[pd.DataFrame, np.ndarray, tuple[str, ...]]:
-    return _load_signal_matrix_from_source(source, signal_name, split=split)
 def select_signal_source_columns(source: SignalCsvSource, column_indices: Sequence[int]) -> SignalCsvSource:
     selected_indices = tuple((int(index) for index in column_indices))
     if not selected_indices:
@@ -235,12 +233,6 @@ def select_signal_source_columns(source: SignalCsvSource, column_indices: Sequen
     if any((index < 0 or index >= len(source.value_columns) for index in selected_indices)):
         raise IndexError(f'Requested column_indices={selected_indices} for source columns={source.value_columns}.')
     return SignalCsvSource(signal_name=source.signal_name, value_columns=tuple((source.value_columns[index] for index in selected_indices)), column_indices=selected_indices, source_kind=source.source_kind, dataset_kwargs=copy.deepcopy(source.dataset_kwargs))
-def _load_signal_segments_from_source(source: SignalCsvSource, signal_name: str, *, split: str, drop_warmup: bool=False) -> tuple[pd.DataFrame, list[np.ndarray], tuple[str, ...]]:
-    working, segment_frames, value_columns = _load_signal_segment_frames_from_source(source, signal_name, split=split, drop_warmup=drop_warmup)
-    segments = _extract_segment_value_arrays(segment_frames, value_columns)
-    if not segments:
-        raise ValueError(f"Signal source split='{split}' does not contain any segments for signal '{signal_name}'.")
-    return (working, segments, value_columns)
 def _load_signal_segment_frames_from_source(source: SignalCsvSource, signal_name: str, *, split: str, drop_warmup: bool=False) -> tuple[pd.DataFrame, list[pd.DataFrame], tuple[str, ...]]:
     frame, value_columns = _load_prosumer_signal_frame_from_source(source, signal_name, split=split)
     if drop_warmup and 'is_warmup' in frame.columns:
@@ -288,8 +280,20 @@ def _temporal_split_items(items: Sequence[pd.DataFrame | np.ndarray], *, train_r
             raise ValueError('No validation segments are long enough for the requested history/prediction windows.')
         val_items = [fallback_tail]
     return {'train_segments': train_items, 'val_segments': val_items, 'segment_summaries': segment_summaries}
-def temporal_split_segment_frames(segment_frames: list[pd.DataFrame], *, train_ratio: float=0.7, val_ratio: float=0.15, seq_len: int, pred_len: int) -> dict[str, object]:
-    return _temporal_split_items(segment_frames, train_ratio=train_ratio, val_ratio=val_ratio, seq_len=seq_len, pred_len=pred_len)
+def _build_series_window_pair(series: np.ndarray, *, total_window: int, seq_len: int, scaler: object | None) -> tuple[np.ndarray, np.ndarray]:
+    normalized = np.asarray(series, dtype=np.float32)
+    if scaler is not None:
+        normalized = scaler.transform(normalized.reshape(-1, 1)).reshape(-1).astype(np.float32)
+    windows = np.lib.stride_tricks.sliding_window_view(normalized, total_window).astype(np.float32)
+    return (windows[:, :seq_len].astype(np.float32), windows[:, seq_len:].astype(np.float32))
+def _build_time_feature_history(segment_frame: pd.DataFrame, *, seq_len: int, pred_len: int, time_feature_mode: str) -> np.ndarray:
+    total_window = int(seq_len) + int(pred_len)
+    timestamps = coerce_timestamp_index(segment_frame['timestamp'].tolist())
+    time_features = encode_forecast_time_features(timestamps, time_feature_mode).astype(np.float32)
+    if time_features.shape[1] == 0:
+        return np.empty((len(segment_frame) - total_window + 1, int(seq_len), 0), dtype=np.float32)
+    windows = np.lib.stride_tricks.sliding_window_view(time_features, window_shape=total_window, axis=0)
+    return np.moveaxis(windows, -1, 1).astype(np.float32)[:, :seq_len, :]
 def build_supervised_windows_from_time_feature_segments(segment_frames: list[pd.DataFrame], *, value_columns: Sequence[str], seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None, time_feature_mode: str=TIME_FEATURE_MODE_NONE) -> tuple[np.ndarray, np.ndarray]:
     total_window = int(seq_len) + int(pred_len)
     x_parts: list[np.ndarray] = []
@@ -299,21 +303,12 @@ def build_supervised_windows_from_time_feature_segments(segment_frames: list[pd.
         if values.shape[0] < total_window:
             continue
         normalized_values = _apply_physical_normalization(values, physical_scale_by_column)
-        timestamps = coerce_timestamp_index(segment_frame['timestamp'].tolist())
-        time_features = encode_forecast_time_features(timestamps, time_feature_mode).astype(np.float32)
-        time_windows = np.lib.stride_tricks.sliding_window_view(time_features, window_shape=total_window, axis=0)
-        time_windows = np.moveaxis(time_windows, -1, 1).astype(np.float32)
+        time_history = _build_time_feature_history(segment_frame, seq_len=seq_len, pred_len=pred_len, time_feature_mode=time_feature_mode)
         for column_idx in range(normalized_values.shape[1]):
-            series = normalized_values[:, column_idx].astype(np.float32)
-            if scaler is not None:
-                series = scaler.transform(series.reshape(-1, 1)).reshape(-1).astype(np.float32)
-            value_windows = np.lib.stride_tricks.sliding_window_view(series, total_window).astype(np.float32)
-            value_history = value_windows[:, :seq_len].reshape(-1, seq_len, 1).astype(np.float32)
-            if time_windows.shape[2] > 0:
-                x_parts.append(np.concatenate([value_history, time_windows[:, :seq_len, :]], axis=2))
-            else:
-                x_parts.append(value_history)
-            y_parts.append(value_windows[:, seq_len:].astype(np.float32))
+            value_history, targets = _build_series_window_pair(normalized_values[:, column_idx], total_window=total_window, seq_len=seq_len, scaler=scaler)
+            value_history = value_history.reshape(-1, int(seq_len), 1).astype(np.float32)
+            x_parts.append(np.concatenate([value_history, time_history], axis=2) if time_history.shape[2] else value_history)
+            y_parts.append(targets)
     if not x_parts:
         raise ValueError('No valid supervised windows could be built from the provided multi-column time-feature segments.')
     return (np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0))
@@ -341,49 +336,31 @@ def summarize_signal_values(values: np.ndarray | list[np.ndarray]) -> dict[str, 
     else:
         flattened = np.asarray(values, dtype=np.float32).reshape(-1)
     return {'min': float(np.min(flattened)), 'max': float(np.max(flattened)), 'mean': float(np.mean(flattened)), 'std': float(np.std(flattened))}
-def build_supervised_windows_from_matrix(values: np.ndarray, *, seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None) -> tuple[np.ndarray, np.ndarray]:
-    values = _apply_physical_normalization(_reshape_signal_values(values), physical_scale_by_column)
+def _build_supervised_windows_from_arrays(chunks: Sequence[np.ndarray], *, seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None, source_label: str='segment') -> tuple[np.ndarray, np.ndarray]:
     total_window = int(seq_len) + int(pred_len)
-    if values.shape[0] < total_window:
-        raise ValueError(f'Signal matrix is too short for seq_len={seq_len} and pred_len={pred_len}: shape={values.shape}')
     x_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
-    for column_idx in range(values.shape[1]):
-        series = values[:, column_idx].astype(np.float32)
-        if scaler is not None:
-            series = scaler.transform(series.reshape(-1, 1)).reshape(-1).astype(np.float32)
-        windows = np.lib.stride_tricks.sliding_window_view(series, total_window)
-        x_parts.append(windows[:, :seq_len].astype(np.float32))
-        y_parts.append(windows[:, seq_len:].astype(np.float32))
-    return (np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0))
-def build_supervised_windows_from_segments(segments: list[np.ndarray], *, seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None) -> tuple[np.ndarray, np.ndarray]:
-    x_parts: list[np.ndarray] = []
-    y_parts: list[np.ndarray] = []
-    skipped_segments = 0
-    for segment in segments:
-        segment_matrix = _reshape_signal_values(segment)
-        if segment_matrix.shape[0] < int(seq_len) + int(pred_len):
-            skipped_segments += 1
+    skipped_chunks = 0
+    for chunk in chunks:
+        values = _apply_physical_normalization(_reshape_signal_values(chunk), physical_scale_by_column)
+        if values.shape[0] < total_window:
+            skipped_chunks += 1
             continue
-        x_chunk, y_chunk = build_supervised_windows_from_matrix(segment_matrix, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=physical_scale_by_column)
-        x_parts.append(x_chunk)
-        y_parts.append(y_chunk)
-    if not x_parts:
-        raise ValueError(f'No valid supervised windows could be built from the provided segments. All {len(segments)} segments were shorter than seq_len + pred_len.')
-    if skipped_segments:
-        print(f'[forecast] skipped {skipped_segments} short segment(s) while building supervised windows.')
-    return (np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0))
-def temporal_split_segments(segments: list[np.ndarray], *, train_ratio: float=0.7, val_ratio: float=0.15, seq_len: int, pred_len: int) -> dict[str, object]:
-    return _temporal_split_items([_reshape_signal_values(segment) for segment in segments], train_ratio=train_ratio, val_ratio=val_ratio, seq_len=seq_len, pred_len=pred_len)
-def make_matrix_loader(values: np.ndarray | list[np.ndarray], *, seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None, batch_size: int, shuffle: bool, device: str | torch.device | TorchRuntimeState='cpu', pin_memory: bool | None=None) -> DataLoader:
-    if isinstance(values, list):
-        x, y = build_supervised_windows_from_segments(values, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=physical_scale_by_column)
-    else:
-        x, y = build_supervised_windows_from_matrix(values, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=physical_scale_by_column)
-    dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
-    resolved_device = resolve_device(device)
-    return DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=shuffle, pin_memory=resolved_device.type == 'cuda' if pin_memory is None else bool(pin_memory))
-def make_tensor_loader(x: np.ndarray, y: np.ndarray, *, batch_size: int, shuffle: bool, device: str | torch.device | TorchRuntimeState='cpu', pin_memory: bool | None=None) -> DataLoader:
+        for column_idx in range(values.shape[1]):
+            x_chunk, y_chunk = _build_series_window_pair(values[:, column_idx], total_window=total_window, seq_len=seq_len, scaler=scaler)
+            x_parts.append(x_chunk)
+            y_parts.append(y_chunk)
+    if x_parts:
+        if skipped_chunks and len(chunks) > 1:
+            print(f'[forecast] skipped {skipped_chunks} short {source_label}(s) while building supervised windows.')
+        return (np.concatenate(x_parts, axis=0), np.concatenate(y_parts, axis=0))
+    if len(chunks) == 1:
+        values = _reshape_signal_values(np.asarray(chunks[0], dtype=np.float32))
+        raise ValueError(f'Signal {source_label} is too short for seq_len={seq_len} and pred_len={pred_len}: shape={values.shape}')
+    raise ValueError(f'No valid supervised windows could be built from the provided {source_label}s. All {len(chunks)} {source_label}s were shorter than seq_len + pred_len.')
+def build_supervised_windows_from_matrix(values: np.ndarray, *, seq_len: int, pred_len: int, scaler: object | None, physical_scale_by_column: Sequence[float] | np.ndarray | float | None=None) -> tuple[np.ndarray, np.ndarray]:
+    return _build_supervised_windows_from_arrays([values], seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=physical_scale_by_column, source_label='matrix')
+def _make_tensor_loader(x: np.ndarray, y: np.ndarray, *, batch_size: int, shuffle: bool, device: str | torch.device | TorchRuntimeState='cpu', pin_memory: bool | None=None) -> DataLoader:
     dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
     resolved_device = resolve_device(device)
     return DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=shuffle, pin_memory=resolved_device.type == 'cuda' if pin_memory is None else bool(pin_memory))
@@ -655,42 +632,51 @@ def _build_signal_training_specs(local_cfg, signal_name: str, *, source: SignalC
                     raise FileNotFoundError(f"No source for component signal '{comp_signal}'. Ensure ProsumerDataset exposes load_{component}.")
             specs.append({'source': select_signal_source_columns(selected_source, [agent_index]), 'agent_index': agent_index, 'agent_profile': agent_profile, 'component': component})
     return specs
+def _prepare_signal_training_data(local_cfg, signal_name: str, *, source: SignalCsvSource, settings: dict[str, object], train_physical_scale: np.ndarray | None, runtime_state: TorchRuntimeState) -> dict[str, object]:
+    seq_len = int(local_cfg.forecast.history_window)
+    pred_len = int(local_cfg.env.future_horizon)
+    batch_size = int(local_cfg.forecast.lstm_batch_size)
+    _, train_segment_frames, value_columns = _load_signal_segment_frames_from_source(source, signal_name, split='train', drop_warmup=True)
+    train_ratio = float(local_cfg.forecast.lstm_train_ratio)
+    val_ratio = float(local_cfg.forecast.lstm_val_ratio)
+    if int(settings['input_size']) > 1:
+        split = _temporal_split_items(train_segment_frames, train_ratio=train_ratio, val_ratio=val_ratio, seq_len=seq_len, pred_len=pred_len)
+        train_values = _extract_segment_value_arrays(split['train_segments'], value_columns)
+        scaler = fit_signal_scaler(train_values, physical_scale_by_column=train_physical_scale, scaler_type=str(settings.get('scaler_type', 'standard')))
+        x_train, y_train = build_supervised_windows_from_time_feature_segments(split['train_segments'], value_columns=value_columns, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, time_feature_mode=str(settings['time_feature_mode']))
+        x_val, y_val = build_supervised_windows_from_time_feature_segments(split['val_segments'], value_columns=value_columns, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, time_feature_mode=str(settings['time_feature_mode']))
+        val_window_timestamps = _build_validation_window_timestamps(split['val_segments'], seq_len=seq_len, pred_len=pred_len)
+    else:
+        segment_values = _extract_segment_value_arrays(train_segment_frames, value_columns)
+        if not segment_values:
+            raise ValueError(f"Signal source split='train' does not contain any segments for signal '{signal_name}'.")
+        split = _temporal_split_items([_reshape_signal_values(segment) for segment in segment_values], train_ratio=train_ratio, val_ratio=val_ratio, seq_len=seq_len, pred_len=pred_len)
+        train_values = split['train_segments']
+        scaler = fit_signal_scaler(train_values, physical_scale_by_column=train_physical_scale, scaler_type=str(settings.get('scaler_type', 'standard')))
+        x_train, y_train = _build_supervised_windows_from_arrays(split['train_segments'], seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale)
+        x_val, y_val = _build_supervised_windows_from_arrays(split['val_segments'], seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale)
+        val_window_timestamps = None
+    return {'split': split, 'value_columns': value_columns, 'train_stats': summarize_signal_values(train_values), 'scaler': scaler, 'x_val': x_val, 'y_val': y_val, 'val_window_timestamps': val_window_timestamps, 'train_loader': _make_tensor_loader(x_train, y_train, batch_size=batch_size, shuffle=True, device=runtime_state.device, pin_memory=runtime_state.pin_memory), 'val_loader': _make_tensor_loader(x_val, y_val, batch_size=batch_size, shuffle=False, device=runtime_state.device, pin_memory=runtime_state.pin_memory)}
 def _train_single_signal_lstm(local_cfg, signal_name: str, *, source: SignalCsvSource, settings: dict[str, object], runtime_state: TorchRuntimeState, overrides: dict[str, object] | None=None, show_progress: bool=False, agent_index: int | None=None, agent_profile: str | None=None, component: str | None=None) -> dict[str, object]:
     seq_len = int(local_cfg.forecast.history_window)
     pred_len = int(local_cfg.env.future_horizon)
     physical_normalization_mode = resolve_signal_physical_normalization_mode(signal_name)
     train_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split='train')
     test_physical_scale = resolve_signal_physical_scale_from_source(source, signal_name, split='test')
-    x_val: np.ndarray | None = None
-    y_val: np.ndarray | None = None
-    val_window_timestamps: pd.DatetimeIndex | None = None
-    if int(settings['input_size']) > 1:
-        _, train_segment_frames, value_columns = _load_signal_segment_frames_from_source(source, signal_name, split='train', drop_warmup=True)
-        split = temporal_split_segment_frames(train_segment_frames, train_ratio=float(local_cfg.forecast.lstm_train_ratio), val_ratio=float(local_cfg.forecast.lstm_val_ratio), seq_len=seq_len, pred_len=pred_len)
-        train_values_only = _extract_segment_value_arrays(split['train_segments'], source.value_columns)
-        train_stats = summarize_signal_values(train_values_only)
-        scaler = fit_signal_scaler(train_values_only, physical_scale_by_column=train_physical_scale, scaler_type=str(settings.get('scaler_type', 'standard')))
-        x_train, y_train = build_supervised_windows_from_time_feature_segments(split['train_segments'], value_columns=value_columns, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, time_feature_mode=str(settings['time_feature_mode']))
-        x_val, y_val = build_supervised_windows_from_time_feature_segments(split['val_segments'], value_columns=value_columns, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, time_feature_mode=str(settings['time_feature_mode']))
-        val_window_timestamps = _build_validation_window_timestamps(split['val_segments'], seq_len=seq_len, pred_len=pred_len)
-        train_loader = make_tensor_loader(x_train, y_train, batch_size=int(local_cfg.forecast.lstm_batch_size), shuffle=True, device=runtime_state.device, pin_memory=runtime_state.pin_memory)
-        val_loader = make_tensor_loader(x_val, y_val, batch_size=int(local_cfg.forecast.lstm_batch_size), shuffle=False, device=runtime_state.device, pin_memory=runtime_state.pin_memory)
-        train_segment_count = len(split['train_segments'])
-        val_segment_count = len(split['val_segments'])
-    else:
-        _, train_segments, value_columns = _load_signal_segments_from_source(source, signal_name, split='train', drop_warmup=True)
-        split = temporal_split_segments(train_segments, train_ratio=float(local_cfg.forecast.lstm_train_ratio), val_ratio=float(local_cfg.forecast.lstm_val_ratio), seq_len=seq_len, pred_len=pred_len)
-        train_values_only = split['train_segments']
-        train_stats = summarize_signal_values(train_values_only)
-        scaler = fit_signal_scaler(train_values_only, physical_scale_by_column=train_physical_scale, scaler_type=str(settings.get('scaler_type', 'standard')))
-        train_loader = make_matrix_loader(train_values_only, seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, batch_size=int(local_cfg.forecast.lstm_batch_size), shuffle=True, device=runtime_state.device, pin_memory=runtime_state.pin_memory)
-        val_loader = make_matrix_loader(split['val_segments'], seq_len=seq_len, pred_len=pred_len, scaler=scaler, physical_scale_by_column=train_physical_scale, batch_size=int(local_cfg.forecast.lstm_batch_size), shuffle=False, device=runtime_state.device, pin_memory=runtime_state.pin_memory)
-        train_segment_count = len(train_values_only)
-        val_segment_count = len(split['val_segments'])
+    prepared = _prepare_signal_training_data(local_cfg, signal_name, source=source, settings=settings, train_physical_scale=train_physical_scale, runtime_state=runtime_state)
+    split = prepared['split']
+    value_columns = prepared['value_columns']
+    train_stats = prepared['train_stats']
+    scaler = prepared['scaler']
+    x_val = prepared['x_val']
+    y_val = prepared['y_val']
+    val_window_timestamps = prepared['val_window_timestamps']
+    train_loader = prepared['train_loader']
+    val_loader = prepared['val_loader']
     progress_name = signal_name if agent_profile is None else f'{signal_name}[{agent_profile}]'
     if component is not None:
         progress_name = f'{progress_name}/{component}'
-    print(f'[forecast] {progress_name}: train_segments={train_segment_count}, val_segments={val_segment_count}, columns={list(value_columns)}, train_stats={train_stats}, settings={settings}')
+    print(f"[forecast] {progress_name}: train_segments={len(split['train_segments'])}, val_segments={len(split['val_segments'])}, columns={list(value_columns)}, train_stats={train_stats}, settings={settings}")
     model = LSTMForecastModel(hidden_size=int(local_cfg.forecast.lstm_hidden_size), num_layers=int(local_cfg.forecast.lstm_num_layers), dropout=float(local_cfg.forecast.lstm_dropout), pred_len=pred_len, input_size=int(settings['input_size']))
     result = train_lstm_model(model, train_loader=train_loader, val_loader=val_loader, epochs=int(local_cfg.forecast.lstm_epochs), lr=float(local_cfg.forecast.lstm_lr), device=runtime_state, show_progress=show_progress, progress_label=f'{progress_name} epochs')
     hybrid_config = {'postprocess_mode': str(settings['postprocess_mode']), 'baseline_mode': str(settings['baseline_mode']), 'blend_weight': None, 'optimized_metric': None}

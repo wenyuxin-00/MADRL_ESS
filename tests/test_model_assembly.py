@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 import torch
 
-from controllers.action_feasibility import (
+from controllers.madrl.safety_projector import (
     build_safety_local_numpy,
     enforce_local_action_feasibility_torch,
     validate_executed_actions_numpy,
 )
+from controllers.madrl.base_agent import get_agent_cls
 from controllers.madrl_controller import MADRLController
-from controllers.madrl.registry import get_agent_cls
 from models.assembly import build_actor_network, build_critic_network, validate_and_finalize_model_config
 from scripts.builder import build_env
 from scripts.utils.nested import add_batch_dim, to_torch_nested

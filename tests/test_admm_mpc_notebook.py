@@ -35,13 +35,15 @@ def test_admm_mpc_notebook_contains_config_and_rollout_calls():
     assert "grid_nb.apply_notebook_experiment_settings(" in joined_source
     assert "collect_admm_mpc_rollout(" in joined_source
     assert "SHOW_PROGRESS = True" in joined_source
-    assert "SAVE_ADMM_MPC_ROLLOUT = True" in joined_source
-    assert "ADMM_MPC_ROLLOUT_TAG_OVERRIDE = None" in joined_source
+    assert "SAVE_ADMM_MPC_ROLLOUT" not in joined_source
+    assert "ADMM_MPC_ROLLOUT_TAG_OVERRIDE" not in joined_source
     assert "show_progress=SHOW_PROGRESS" in joined_source
-    assert "build_admm_mpc_rollout_package(" in joined_source
-    assert "save_admm_mpc_rollout_package(" in joined_source
-    assert "admm_mpc_rollout_package_dir" in joined_source
-    assert "plot_test_rollout(admm_mpc_rollout)" in joined_source
+    assert "build_admm_mpc_rollout_package(" not in joined_source
+    assert "save_admm_mpc_rollout_package(" not in joined_source
+    assert "admm_mpc_rollout_package_dir" not in joined_source
+    assert "admm_mpc_rollout_summary" in joined_source
+    assert "plot_rollout_dashboard(admm_mpc_rollout)" in joined_source
+    assert "plot_voltage_profile_comparison(admm_mpc_rollout)" in joined_source
     assert "plot_net_load_comparison(admm_mpc_rollout)" in joined_source
     assert "plot_battery_power_and_soc_comparison(admm_mpc_rollout)" in joined_source
     assert re.search(r'TEST_START_DATE\s*=\s*"\d{4}-\d{2}-\d{2}"', joined_source)

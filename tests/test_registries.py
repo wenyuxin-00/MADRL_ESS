@@ -1,10 +1,10 @@
-from controllers.madrl.registry import get_agent_cls
+from controllers.madrl.base_agent import get_agent_cls
 from configs.experiment_config import ExperimentConfig
 from data.loaders.prosumer import ProsumerDataset
 from data.loaders.registry import build_dataset, get_dataset_cls
 from envs.grid_env import GridEnv
 from envs.observation.default_builder import DefaultObservationBuilder
-from envs.observation.registry import build_obs_builder, get_obs_builder_cls
+from envs.observation.normalization import build_observation_normalizer
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
@@ -22,16 +22,20 @@ def test_dataset_registry_builds_default_dataset(tmp_path):
     assert get_dataset_cls("prosumer") is ProsumerDataset
 
 
-def test_observation_builder_helper_builds_default_builder(tmp_path):
+def test_default_observation_builder_builds_from_config(tmp_path):
     case_dir = make_case_dir(tmp_path, "obs_registry")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
-    builder = build_obs_builder(cfg)
+    builder = DefaultObservationBuilder(
+        local_features=cfg.obs.local_features,
+        sequence_features=cfg.obs.sequence_features,
+        future_horizon=cfg.env.future_horizon,
+        adjacency_type=cfg.obs.adjacency_type,
+        normalizer=build_observation_normalizer(cfg),
+    )
 
     assert isinstance(builder, DefaultObservationBuilder)
     assert builder.normalizer is not None
-    assert get_obs_builder_cls() is DefaultObservationBuilder
-    assert get_obs_builder_cls("default") is DefaultObservationBuilder
 
 
 def test_default_compose_config_targets_grid_training_mainline():

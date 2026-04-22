@@ -22,23 +22,23 @@
   - 不统计 `.conda/`、第三方依赖目录、notebook 本体。
 - 当前基线：
   - `BASELINE=33323`
-  - `CURRENT=12464`
-  - `DELTA=-20859`
-  - `PY_FILE_COUNT=93`
-  - `TESTS_LINES=11850`
-  - 距离 `5000` 目标还差 `7464` 行
+  - `CURRENT=10651`
+  - `DELTA=-22672`
+  - `PY_FILE_COUNT=79`
+  - `TESTS_LINES=9875`
+  - 距离 `5000` 目标还差 `5651` 行
 
 ### 一级目录现状
 
 | 目录 | 当前行数 | 当前文件数 | 终局预算 |
 | ---- | -------: | ---------: | -------: |
-| `configs/` | 438 | 2 | <= 240 |
-| `controllers/` | 2981 | 13 | <= 1300 |
+| `configs/` | 390 | 2 | <= 240 |
+| `controllers/` | 2739 | 13 | <= 1300 |
 | `data/` | 338 | 5 | <= 190 |
 | `envs/` | 1832 | 23 | <= 860 |
 | `models/` | 242 | 6 | <= 140 |
-| `predictors/` | 1797 | 11 | <= 900 |
-| `scripts/` | 4836 | 33 | <= 1370 |
+| `predictors/` | 1751 | 11 | <= 900 |
+| `scripts/` | 3359 | 19 | <= 1370 |
 
 - 以上终局预算合计正好是 `5000`。
 
@@ -46,36 +46,37 @@
 
 | 文件 | 当前行数 | 终局目标 |
 | ---- | -------: | -------: |
-| `controllers/mpc/global_socp_mpc.py` | 1398 | <= 650 |
-| `predictors/training.py` | 856 | <= 470 |
-| `scripts/utils/grid_notebook_workflow.py` | 528 | <= 240 |
-| `scripts/utils/admm_mpc_solver.py` | 489 | <= 200 |
-| `scripts/plots/grid_notebook_plotting.py` | 443 | <= 240 |
-| `scripts/utils/misocp_notebook_helpers.py` | 416 | <= 200 |
-| `predictors/lstm_forecaster.py` | 402 | <= 240 |
-| `controllers/mpc/gurobi_agent_mpc.py` | 390 | <= 240 |
+| `controllers/mpc/global_socp_mpc.py` | 1185 | <= 650 |
+| `predictors/training.py` | 842 | <= 470 |
+| `scripts/utils/grid_notebook_workflow.py` | 569 | <= 240 |
+| `scripts/utils/admm_mpc_solver.py` | 463 | <= 200 |
 | `envs/grid_env.py` | 385 | <= 260 |
-| `configs/experiment_config.py` | 320 | <= 180 |
+| `predictors/lstm_forecaster.py` | 384 | <= 240 |
+| `controllers/mpc/gurobi_agent_mpc.py` | 361 | <= 240 |
+| `scripts/train.py` | 345 | <= 180 |
+| `scripts/utils/misocp_notebook_helpers.py` | 323 | <= 200 |
 | `controllers/madrl/safety_projector.py` | 318 | <= 180 |
+| `scripts/plots/grid_notebook_plotting.py` | 308 | <= 240 |
+| `configs/experiment_config.py` | 272 | <= 180 |
 | `controllers/action_feasibility.py` | 198 | 并入 `controllers/madrl/safety_projector.py` |
 | `data/loaders/prosumer.py` | 272 | <= 150 |
-| `predictors/shared_data.py` | 269 | <= 130 |
-| `scripts/mainline_artifacts.py` | 250 | <= 80 |
+| `predictors/shared_data.py` | 264 | <= 130 |
+| `scripts/mainline_madrl.py` | 231 | <= 120 |
 
 ### 当前最碎的区域
 
 | 区域 | 当前文件数 | 当前行数 | 终局方向 |
 | ---- | ---------: | -------: | ---- |
-| `scripts/utils/` | 21 | 3151 | 压到 <= 7 个文件、<= 850 行 |
-| `scripts/plots/` | 3 | 628 | 压到 <= 2 个文件、<= 300 行 |
-| `scripts/` 顶层（`mainline_*.py` + `train.py` + `builder.py` + `checkpoints.py`） | 9 | 1057 | 合并到 <= 6 个文件、<= 220 行 |
-| `controllers/mpc/` | 3 | 1801 | 保留主解法，压到 <= 3 个文件、<= 920 行 |
+| `scripts/utils/` | 10 | 1895 | 压到 <= 7 个文件、<= 850 行 |
+| `scripts/plots/` | 3 | 493 | 压到 <= 2 个文件、<= 300 行 |
+| `scripts/` 顶层（`mainline_*.py` + `train.py` + `builder.py` + `checkpoints.py`） | 5 | 971 | 合并到 <= 5 个文件、<= 220 行 |
+| `controllers/mpc/` | 3 | 1559 | 保留主解法，压到 <= 3 个文件、<= 920 行 |
 | `controllers/madrl/` | 6 | 854 | 吸收 `action_feasibility.py` 后，压到 <= 4 个文件、<= 340 行 |
-| `controllers/` 顶层（`madrl_controller.py` + `base.py`） | 2 | 126 | 并入 madrl owner 或删除，终局 <= 40 行 |
+| `controllers/` 顶层（`base.py` + `madrl_controller.py` + `action_feasibility.py`） | 3 | 324 | 并入 madrl owner 或删除，终局 <= 40 行 |
 | `envs/grid/` | 8 | 414 | 压到 <= 3 个文件、<= 120 行 |
 | `envs/observation/` | 8 | 550 | 压到 <= 4 个文件、<= 200 行 |
-| `envs/vec_stack` | 3 | 391 | 合并到 <= 2 个文件、<= 240 行 |
-| `predictors/` | 11 | 1797 | 压到 <= 6 个文件、<= 900 行 |
+| `envs/vec_stack` | 2 | 345 | 合并到 <= 2 个文件、<= 240 行 |
+| `predictors/` | 11 | 1751 | 压到 <= 6 个文件、<= 900 行 |
 | `models/` | 6 | 242 | 压到 <= 3 个文件、<= 140 行 |
 
 ## 最终目标
@@ -349,7 +350,7 @@
 
 | 阶段 | 总行数目标 | 文件数目标 | 说明 |
 | ---- | ---------: | ---------: | ---- |
-| `N1` | 已完成 `12464` | `93` | 当前基准点 |
+| `N1` | 已完成 `11594` | `81` | 当前基准点 |
 | `N2` | `<= 10700` | `<= 86` | 回收 N1 碎片，只打入口 support 与 utils 第一层 |
 | `N3` | `<= 8400` | `<= 72` | 主战场：controller/mpc/env + workflow/plots |
 | `N4` | `<= 6400` | `<= 61` | predictor/models/data/notebook 配套收口 |

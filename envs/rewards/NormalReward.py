@@ -1,7 +1,19 @@
 from __future__ import annotations
+
+from dataclasses import dataclass
+
 import numpy as np
-from envs.rewards.base import ComponentMeta, RewardFn
-class NormalReward(RewardFn):
+
+
+@dataclass(frozen=True)
+class ComponentMeta:
+    key: str
+    label: str
+    color: str
+    sign: int
+
+
+class NormalReward:
 
     def __init__(self, cfg: object) -> None:
         if hasattr(cfg.reward, "w_action_pen") and not hasattr(cfg.reward, "w_soc_pen"):

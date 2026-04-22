@@ -1,12 +1,11 @@
 from __future__ import annotations
 import numpy as np
 import torch
-from controllers.action_feasibility import (
+from controllers.madrl.safety_projector import (
     action_info_to_numpy,
     compute_action_gap_metrics_torch,
     enforce_local_action_feasibility_torch,
 )
-from controllers.base import BaseController
 from scripts.utils.nested import add_batch_dim, to_torch_nested
 def _override_soc_penalty_metrics(
     action_info: dict[str, torch.Tensor] | None,
@@ -22,7 +21,7 @@ def _override_soc_penalty_metrics(
             merged[key] = penalty_source_info[key]
     return merged
 
-class MADRLController(BaseController):
+class MADRLController:
 
     def __init__(self, agent_n: list, noise_std: float = 0.0, projector=None) -> None:
         self.agent_n = list(agent_n)

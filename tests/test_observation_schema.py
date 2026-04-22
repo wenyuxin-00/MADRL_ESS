@@ -2,8 +2,7 @@ import numpy as np
 import torch
 
 from data.loaders.registry import build_dataset
-from envs.subproc_vec_env import SubprocVecEnv
-from envs.vec_env import DummyVecEnv
+from envs.subproc_vec_env import DummyVecEnv, SubprocVecEnv
 from scripts.builder import build_env
 from tests.support.helpers import make_case_dir, make_smoke_config
 
@@ -130,7 +129,6 @@ def test_env_step_respects_soc_bounds(tmp_path):
         assert np.allclose(info["soc_t"], 0.2)
         assert np.allclose(info["soc_next"], 0.2)
         assert np.allclose(info["e_min"], cfg.env.soc_min * info["battery_capacity_kwh"])
-        assert np.all(info["p_lower"] >= -cfg.env.max_charge_rate)
     finally:
         env.close()
 

@@ -108,22 +108,6 @@ class LSTMForecaster(Forecaster):
             runtime = self._build_runtime(signal_name=WHOLESALE_PRICE_SIGNAL, model_path=model_path, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout, pred_len=pred_len, seq_len=seq_len, scaler=scaler, input_size=input_size, time_feature_mode=time_feature_mode, model_mode=model_mode, physical_normalization_mode=physical_normalization_mode, physical_scale_by_column=physical_scale_by_column, postprocess_mode=postprocess_mode, baseline_mode=baseline_mode, blend_weight=blend_weight, optimized_metric=optimized_metric, device=self.device)
             signal_runtimes = {WHOLESALE_PRICE_SIGNAL: [runtime]}
         self.signal_runtimes = {str(signal_name): list(runtimes) for signal_name, runtimes in signal_runtimes.items()}
-        self._set_legacy_attributes()
-    def _set_legacy_attributes(self) -> None:
-        preferred_signal = WHOLESALE_PRICE_SIGNAL if WHOLESALE_PRICE_SIGNAL in self.signal_runtimes else next(iter(self.signal_runtimes))
-        runtime = self.signal_runtimes[preferred_signal][0]
-        self.seq_len = int(runtime.seq_len)
-        self.pred_len = int(runtime.pred_len)
-        self.scaler = runtime.scaler
-        self.model = runtime.model
-    def _sync_primary_runtime(self) -> None:
-        if WHOLESALE_PRICE_SIGNAL not in self.signal_runtimes or not self.signal_runtimes[WHOLESALE_PRICE_SIGNAL]:
-            return
-        runtime = self.signal_runtimes[WHOLESALE_PRICE_SIGNAL][0]
-        runtime.seq_len = int(getattr(self, 'seq_len', runtime.seq_len))
-        runtime.pred_len = int(getattr(self, 'pred_len', runtime.pred_len))
-        runtime.scaler = getattr(self, 'scaler', runtime.scaler)
-        runtime.model = getattr(self, 'model', runtime.model)
     @staticmethod
     def _build_runtime(*, signal_name: str, model_path: str | None, hidden_size: int, num_layers: int, dropout: float, pred_len: int, seq_len: int, scaler, device: torch.device, input_size: int=1, time_feature_mode: str=TIME_FEATURE_MODE_NONE, model_mode: str='shared', physical_normalization_mode: str=PHYSICAL_NORMALIZATION_NONE, physical_scale_by_column=None, agent_index: int | None=None, agent_profile: str | None=None, postprocess_mode: str=POSTPROCESS_MODE_NONE, baseline_mode: str=BASELINE_MODE_NONE, blend_weight: float | None=None, optimized_metric: str | None=None, component: str | None=None) -> _SignalForecasterRuntime:
         model = LSTMForecastModel(hidden_size=hidden_size, num_layers=num_layers, dropout=dropout, pred_len=pred_len, input_size=input_size).to(device)
@@ -161,7 +145,6 @@ class LSTMForecaster(Forecaster):
             self.signal_runtimes[str(signal_name)] = self.signal_runtimes.pop(WHOLESALE_PRICE_SIGNAL)
             for runtime in self.signal_runtimes[str(signal_name)]:
                 runtime.signal_name = str(signal_name)
-        self._set_legacy_attributes()
         return self
     def reset(self) -> None:
         for runtimes in self.signal_runtimes.values():
@@ -369,7 +352,6 @@ class LSTMForecaster(Forecaster):
                 signal_name = next(iter(self.signal_runtimes))
             else:
                 raise KeyError(f"LSTMForecaster has no runtime model for '{signal_name}'. Available: {sorted(self.signal_runtimes)}")
-        self._sync_primary_runtime()
         runtimes = self.signal_runtimes[signal_name]
         history = np.asarray(history, dtype=np.float32)
         if any((r.component is not None for r in runtimes)):

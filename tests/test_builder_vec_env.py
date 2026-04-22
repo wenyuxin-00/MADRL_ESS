@@ -1,7 +1,6 @@
 import pytest
 
 from envs.subproc_vec_env import SubprocVecEnv
-from envs.vec_env import DummyVecEnv
 from scripts.builder import _build_train_vec_env, build_env, build_train_runner
 from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
@@ -23,8 +22,8 @@ def _make_multiday_cfg(tmp_path, *, evaluation_days: int = 5):
     return cfg
 
 
-def test_build_train_vec_env_falls_back_to_dummy_when_subproc_is_unsupported(tmp_path, monkeypatch):
-    case_dir = make_case_dir(tmp_path, "vec_env_fallback")
+def test_build_train_vec_env_rejects_unsupported_subproc_sessions(tmp_path, monkeypatch):
+    case_dir = make_case_dir(tmp_path, "vec_env_subproc_rejected")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.train.vec_env_type = "subproc"
     cfg.train.num_envs = 2
@@ -34,14 +33,8 @@ def test_build_train_vec_env_falls_back_to_dummy_when_subproc_is_unsupported(tmp
         lambda: (False, "simulated interactive session"),
     )
 
-    with pytest.warns(RuntimeWarning, match="Falling back to DummyVecEnv"):
-        vec_env = _build_train_vec_env(cfg, seed=0)
-
-    try:
-        assert isinstance(vec_env, DummyVecEnv)
-        assert vec_env.num_envs == 2
-    finally:
-        vec_env.close()
+    with pytest.raises(RuntimeError, match="unsupported in this session"):
+        _build_train_vec_env(cfg, seed=0)
 
 
 def test_subproc_vec_env_surfaces_worker_init_errors(tmp_path):
@@ -68,7 +61,7 @@ def test_build_env_uses_shared_data_without_building_live_forecaster(tmp_path, m
     env = build_env(cfg, mode="test")
     try:
         assert env.forecaster is None
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
     finally:
         env.close()
 
@@ -81,7 +74,7 @@ def test_build_env_resets_runtime_split_state_without_shared_data(tmp_path):
 
     env = build_env(cfg, mode="test")
     try:
-        assert env.has_precomputed_observations() is False
+        assert getattr(env, "_precomputed_store", None) is None
         assert cfg.runtime.effective_split_controls["source"] == "cfg"
         assert cfg.runtime.effective_split_controls["split"] == "test"
         assert cfg.runtime.selected_episode_indices is None
@@ -100,7 +93,7 @@ def test_build_env_uses_shared_data_manifest_controls_and_episode_subset(tmp_pat
 
     env = build_env(cfg, mode="test")
     try:
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
         assert cfg.runtime.effective_split_controls["source"] == "shared_data_manifest"
         assert cfg.runtime.effective_split_controls["start_date"] is None
         assert cfg.runtime.effective_split_controls["end_date"] is None

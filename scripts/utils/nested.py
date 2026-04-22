@@ -13,11 +13,6 @@ def add_batch_dim(payload: NestedArray) -> NestedArray:
         return {key: add_batch_dim(value) for key, value in payload.items()}
     return np.expand_dims(np.asarray(payload, dtype=np.float32), axis=0)
 
-def index_nested(payload: NestedArray, index: int) -> NestedArray:
-    if isinstance(payload, dict):
-        return {key: index_nested(value, index) for key, value in payload.items()}
-    return np.asarray(payload, dtype=np.float32)[index].copy()
-
 def to_torch_nested(payload: NestedArray, device: torch.device | str) -> NestedArray:
     if isinstance(payload, dict):
         return {key: to_torch_nested(value, device) for key, value in payload.items()}

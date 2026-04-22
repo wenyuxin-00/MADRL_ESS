@@ -1,5 +1,4 @@
 import importlib.util
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,7 +9,6 @@ from controllers.mpc.global_socp_mpc import (
     FullHorizonProblemInput,
     GlobalMISOCPProblem,
     GlobalSOCPMPCController,
-    GurobiSolveConfig,
     MISOCPResult,
     ModelSize,
     NetworkModel,
@@ -47,7 +45,6 @@ def _make_global_mpc_cfg(tmp_path, label: str):
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.forecast.type = "perfect"
     cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
-    cfg.mpc.physics_refinement_mode = "none"
     return cfg
 
 
@@ -72,7 +69,6 @@ def _no_solution_result() -> MISOCPResult:
         physical_tiebreaker_eur=np.nan,
         physical_tiebreaker_weight=1e-6,
         model_size=ModelSize(0, 0, 0, 0),
-        debug_artifacts={},
         agent_net_grid_mw=None,
         agent_import_mw=None,
         agent_export_mw=None,
@@ -113,66 +109,6 @@ def _mock_window_input(problem: GlobalMISOCPProblem, horizon_steps: int) -> Full
         episode_offsets=np.asarray([0], dtype=np.int32),
         episode_lengths=np.asarray([horizon_steps], dtype=np.int32),
         episode_indices=np.asarray([0], dtype=np.int32),
-    )
-
-
-def _solution_result(problem: GlobalMISOCPProblem, horizon_steps: int, *, solve_mode: str) -> MISOCPResult:
-    n_lines = int(np.asarray(problem.network.line_branch_indices, dtype=np.int32).size)
-    energy = np.repeat((problem.capacity_mwh * 0.5).astype(np.float32)[:, None], horizon_steps + 1, axis=1)
-    return MISOCPResult(
-        status_code=2,
-        status_label="optimal",
-        has_solution=True,
-        time_limit_feasible=False,
-        solve_time_sec=1.0,
-        mip_gap=0.0,
-        best_bound=0.0,
-        objective_value=0.0,
-        agent_purchase_cost_eur=0.0,
-        agent_export_subsidy_eur=0.0,
-        agent_net_cost_eur=0.0,
-        feeder_purchase_cost_eur=0.0,
-        feeder_export_subsidy_eur=0.0,
-        feeder_net_cost_eur=0.0,
-        throughput_regularization_eur=0.0,
-        throughput_regularization_weight=1e-4,
-        physical_tiebreaker_eur=0.0,
-        physical_tiebreaker_weight=float(problem.branch_current_tiebreaker_eur_per_pu_step),
-        model_size=ModelSize(
-            num_vars=1,
-            num_binary_vars=horizon_steps,
-            num_linear_constraints=1,
-            num_quadratic_constraints=1,
-        ),
-        debug_artifacts={},
-        agent_net_grid_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        agent_import_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        agent_export_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        battery_charge_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        battery_discharge_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        pv_curtail_mw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        energy_mwh=energy,
-        branch_p_pu=np.zeros((problem.n_branches, horizon_steps), dtype=np.float32),
-        branch_q_pu=np.zeros((problem.n_branches, horizon_steps), dtype=np.float32),
-        branch_i2_pu=np.zeros((problem.n_branches, horizon_steps), dtype=np.float32),
-        bus_v_sq=np.ones((problem.n_buses, horizon_steps), dtype=np.float32),
-        root_import_mw=np.zeros((horizon_steps,), dtype=np.float32),
-        root_export_mw=np.zeros((horizon_steps,), dtype=np.float32),
-        root_p_kw=np.zeros((horizon_steps,), dtype=np.float32),
-        root_q_kvar=np.zeros((horizon_steps,), dtype=np.float32),
-        bus_vm_pu=np.ones((problem.n_buses, horizon_steps), dtype=np.float32),
-        line_loading_pct=np.zeros((n_lines, horizon_steps), dtype=np.float32),
-        trafo_loading_pct=np.zeros((1, horizon_steps), dtype=np.float32),
-        simultaneous_charge_discharge_kw=np.zeros((problem.n_agents, horizon_steps), dtype=np.float32),
-        simultaneous_agent_steps=0,
-        simultaneous_step_ratio=0.0,
-        max_simultaneous_kw=0.0,
-        sol_count=1,
-        node_count=0.0,
-        iter_count=0.0,
-        bar_iter_count=0.0,
-        horizon_steps=horizon_steps,
-        solve_mode=solve_mode,
     )
 
 
@@ -370,104 +306,6 @@ def test_global_misocp_full_horizon_solve_returns_long_plan(tmp_path):
         assert result.sol_count >= 1
     finally:
         env.close()
-
-
-def test_solve_adaptive_full_horizon_keeps_single_window_when_primary_has_incumbent(tmp_path, monkeypatch):
-    cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_adaptive_single")
-    env = build_env(cfg, mode="test")
-    try:
-        problem = GlobalMISOCPProblem.from_env(env, cfg)
-        full_input = _mock_window_input(problem, horizon_steps=8)
-        call_log: list[dict[str, object]] = []
-
-        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
-            call_log.append(
-                {
-                    "horizon_steps": int(np.asarray(import_price_seq).shape[0]),
-                    "solve_mode": str(solve_mode),
-                    "cuts": solve_config.cuts,
-                    "heuristics": solve_config.heuristics,
-                }
-            )
-            return _solution_result(problem, int(np.asarray(import_price_seq).shape[0]), solve_mode=str(solve_mode))
-
-        monkeypatch.setattr(problem, "_solve_sequences", _fake_solve_sequences)
-
-        result = problem.solve_adaptive_full_horizon(
-            full_input,
-            export_subsidy=float(cfg.reward.export_subsidy_eur_per_kwh),
-            primary_window_steps=384,
-            fallback_window_steps=2,
-            solve_config=GurobiSolveConfig(time_limit_sec=30.0, mip_gap=5e-3, cuts=2, heuristics=0.10, mip_focus=1),
-            retry_solve_config=GurobiSolveConfig(time_limit_sec=60.0, mip_gap=5e-3, cuts=1, heuristics=0.20, mip_focus=1),
-        )
-
-        assert result.solve_mode == "single_window"
-        assert result.has_solution
-        assert len(call_log) == 1
-        assert call_log[0]["solve_mode"] == "single_window"
-        assert call_log[0]["cuts"] == 2
-    finally:
-        env.close()
-
-
-def test_solve_adaptive_full_horizon_falls_back_to_chunked_window_and_uses_retry_profile(tmp_path, monkeypatch):
-    cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_adaptive_chunked")
-    env = build_env(cfg, mode="test")
-    try:
-        problem = GlobalMISOCPProblem.from_env(env, cfg)
-        full_input = _mock_window_input(problem, horizon_steps=5)
-        call_log: list[dict[str, object]] = []
-        scripted_outcomes = iter(
-            [
-                _no_solution_result(),
-                _no_solution_result(),
-                _no_solution_result(),
-                _solution_result(problem, 2, solve_mode="chunked_window"),
-                _solution_result(problem, 2, solve_mode="chunked_window"),
-                _solution_result(problem, 1, solve_mode="chunked_window"),
-            ]
-        )
-
-        def _fake_solve_sequences(*, import_price_seq, solve_config, solve_mode, **kwargs):
-            horizon_steps = int(np.asarray(import_price_seq).shape[0])
-            call_log.append(
-                {
-                    "horizon_steps": horizon_steps,
-                    "solve_mode": str(solve_mode),
-                    "cuts": solve_config.cuts,
-                    "heuristics": solve_config.heuristics,
-                }
-            )
-            result = next(scripted_outcomes)
-            result.horizon_steps = horizon_steps
-            result.solve_mode = str(solve_mode)
-            return result
-
-        monkeypatch.setattr(problem, "_solve_sequences", _fake_solve_sequences)
-
-        result = problem.solve_adaptive_full_horizon(
-            full_input,
-            export_subsidy=float(cfg.reward.export_subsidy_eur_per_kwh),
-            primary_window_steps=384,
-            fallback_window_steps=2,
-            solve_config=GurobiSolveConfig(time_limit_sec=30.0, mip_gap=5e-3, cuts=2, heuristics=0.10, mip_focus=1),
-            retry_solve_config=GurobiSolveConfig(time_limit_sec=60.0, mip_gap=5e-3, cuts=1, heuristics=0.20, mip_focus=1),
-        )
-
-        assert result.solve_mode == "chunked_window"
-        assert result.has_solution
-        assert result.chunk_summaries is not None
-        assert len(result.chunk_summaries) == 3
-        assert result.chunk_summaries[0]["attempt_used"] == "retry"
-        assert [entry["solve_mode"] for entry in call_log[:2]] == ["single_window", "single_window"]
-        assert call_log[0]["cuts"] == 2
-        assert call_log[1]["cuts"] == 1
-        assert call_log[2]["solve_mode"] == "chunked_window"
-    finally:
-        env.close()
-
-
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_global_misocp_controller_returns_bounded_actions_and_diagnostics(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_actions")
@@ -544,13 +382,13 @@ def test_global_misocp_enforces_terminal_soc_target(tmp_path):
 
 
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
-def test_global_misocp_exports_debug_artifacts_when_infeasible(tmp_path):
+def test_global_misocp_infeasible_case_returns_no_solution(tmp_path):
     cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_infeasible")
     cfg.env.soc_target = 0.95
     env = build_env(cfg, mode="test")
     try:
         env.agent_p_max = np.zeros_like(np.asarray(env.agent_p_max, dtype=np.float32))
-        problem = GlobalMISOCPProblem.from_env(env, cfg, debug_dir=Path(tmp_path) / "misocp_debug")
+        problem = GlobalMISOCPProblem.from_env(env, cfg)
         obs, _ = env.reset(episode_idx=0)
         raw_obs = env.obs_builder.build_raw(env) if hasattr(env.obs_builder, "build_raw") else obs
         result = problem.solve(
@@ -559,13 +397,9 @@ def test_global_misocp_exports_debug_artifacts_when_infeasible(tmp_path):
             pv_seq=raw_obs["pv_seq"],
             soc_init=np.asarray(env.soc, dtype=np.float32),
             export_subsidy=float(cfg.reward.export_subsidy_eur_per_kwh),
-            export_debug=True,
-            debug_tag="pytest_infeasible",
         )
 
         assert not result.has_solution
-        assert "lp" in result.debug_artifacts
-        assert Path(result.debug_artifacts["lp"]).exists()
         assert result.sol_count == 0
     finally:
         env.close()

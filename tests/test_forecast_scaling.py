@@ -11,8 +11,9 @@ import torch
 
 from data.loaders.registry import build_dataset
 from envs.grid_env import GridEnv
-from envs.observation.registry import build_obs_builder
-from envs.rewards import NormalReward
+from envs.observation.default_builder import DefaultObservationBuilder
+from envs.observation.normalization import build_observation_normalizer
+from envs.rewards.NormalReward import NormalReward
 from predictors.lstm_forecaster import (
     BASELINE_MODE_LAST_VALUE,
     LSTMForecaster,
@@ -689,7 +690,13 @@ def test_grid_env_reset_passes_episode_meta_to_forecaster(tmp_path) -> None:
         dataset=dataset,
         reward_fn=NormalReward(cfg),
         forecaster=spy_forecaster,
-        obs_builder=build_obs_builder(cfg),
+        obs_builder=DefaultObservationBuilder(
+            local_features=cfg.obs.local_features,
+            sequence_features=cfg.obs.sequence_features,
+            future_horizon=cfg.env.future_horizon,
+            adjacency_type=cfg.obs.adjacency_type,
+            normalizer=build_observation_normalizer(cfg),
+        ),
         grid_core=PassiveGridCore(cfg.env.num_agents),
     )
 

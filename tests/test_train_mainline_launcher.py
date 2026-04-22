@@ -13,7 +13,6 @@ from configs.profiles import compose_experiment_config, recommended_gpu_fast_num
 from scripts.mainline_madrl import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 from predictors.shared_data import ensure_madrl_shared_data
-from scripts.mainline_madrl import _monitor_process_progress
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
@@ -94,87 +93,6 @@ def test_apply_train_controls_sets_progress_episode_interval(tmp_path):
     _apply_train_controls(cfg, {"progress_episode_interval": 7})
 
     assert cfg.train.progress_episode_interval == 7
-
-
-def test_monitor_process_progress_reports_at_episode_intervals(monkeypatch, tmp_path):
-    progress_json_path = tmp_path / "progress.json"
-    progress_json_path.write_text("{}", encoding="utf-8")
-    payloads = iter(
-        [
-            {
-                "interaction_step": 10,
-                "target_interactions": 100,
-                "episodes_completed": 5,
-                "avg_reward": 1.0,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 20,
-                "target_interactions": 100,
-                "episodes_completed": 10,
-                "avg_reward": 1.5,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 30,
-                "target_interactions": 100,
-                "episodes_completed": 15,
-                "avg_reward": 1.7,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 30,
-                "target_interactions": 100,
-                "episodes_completed": 15,
-                "avg_reward": 1.7,
-                "steps_per_sec": 2.0,
-                "status": "completed",
-                "estimated_end_time": "2026-04-01T12:00:00+00:00",
-                "remaining_seconds": 0.0,
-            },
-        ]
-    )
-    printed: list[str] = []
-
-    class DummyProcess:
-        def __init__(self) -> None:
-            self._poll_results = iter([None, None, None, 0])
-
-        def poll(self):
-            return next(self._poll_results)
-
-    original_stat = Path.stat
-    stat_counter = {"value": 0}
-
-    def fake_load_progress(_path: Path):
-        return next(payloads)
-
-    def fake_stat(self: Path):
-        if self == progress_json_path:
-            stat_counter["value"] += 1
-            return SimpleNamespace(st_mtime_ns=stat_counter["value"])
-        return original_stat(self)
-
-    monkeypatch.setattr("scripts.mainline_madrl._load_progress_payload", fake_load_progress)
-    monkeypatch.setattr(Path, "stat", fake_stat)
-    monkeypatch.setattr("builtins.print", lambda message: printed.append(str(message)))
-    monkeypatch.setattr("scripts.mainline_madrl.time.sleep", lambda _seconds: None)
-
-    last_payload = _monitor_process_progress(
-        DummyProcess(),
-        progress_json_path=progress_json_path,
-        summary_interval_s=0.0,
-        progress_episode_interval=10,
-    )
-
-    assert len(printed) == 2
-    assert "episodes=10" in printed[0]
-    assert "[train:completed]" in printed[1]
-    assert "episodes=15" in printed[1]
-    assert last_payload["status"] == "completed"
 
 
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
@@ -323,8 +241,6 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     result = json.loads(result_path.read_text(encoding="utf-8"))
     reward_summary_path = Path(result["reward_summary_path"])
     reward_summary = json.loads(reward_summary_path.read_text(encoding="utf-8"))
-    progress_payload = json.loads((Path(result["meta_dir"]) / "progress.json").read_text(encoding="utf-8"))
-
     assert result["algorithm"] == "MATD3"
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
@@ -350,14 +266,11 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         reward_summary["components"]
     )
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
-    assert progress_payload["estimated_end_time"]
-    assert progress_payload["remaining_seconds"] == 0.0
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]
     assert "sample_time_s" in result["perf_summary"]
     assert "history_time_s" in result["perf_summary"]
-    assert "progress_io_time_s" in result["perf_summary"]
     assert "agent_update_time_s" in result["perf_summary"]
     assert result["perf_summary"]["shared_data_enabled"] is True
     assert result["perf_summary"]["shared_data_signature"] == str(shared_data.signature_hash)

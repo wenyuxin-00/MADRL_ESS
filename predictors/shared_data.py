@@ -75,12 +75,6 @@ def _artifact_fingerprint(forecast_ready: dict[str, object]) -> dict[str, object
         out[str(signal_name)] = [{'model_sha256': _file_sha256(model_path), 'meta_sha256': _file_sha256(meta_path), 'scaler_sha256': _file_sha256(scaler_path), 'meta': _artifact_meta(load_lstm_forecaster_artifacts(model_path, meta_path, scaler_path)[0])} for model_path, meta_path, scaler_path in _artifact_entries(bundle)]
     return out
 
-def validate_lstm_artifacts_for_shared_data(cfg) -> dict[str, object]:
-    if str(cfg.forecast.type).strip().lower() != 'lstm':
-        return {'forecast_ready': None, 'fingerprint': {'mode': 'non_lstm'}}
-    ready = ensure_lstm_artifacts(cfg, device=cfg.runtime.device)
-    return {'forecast_ready': ready, 'fingerprint': _artifact_fingerprint(ready)}
-
 def _test_window_in_signature(cfg) -> bool:
     return int(cfg.data.train_year) == int(cfg.data.test_year) and (not _same_year_has_explicit_train_range(cfg))
 
@@ -246,7 +240,8 @@ def select_shared_data_episode_indices(manifest: dict[str, object], *, start_dat
     return selected
 
 def ensure_madrl_shared_data(cfg, *, root: str | Path | None=None) -> SharedDataResult:
-    artifact_info = validate_lstm_artifacts_for_shared_data(cfg)
+    forecast_ready = None if str(cfg.forecast.type).strip().lower() != 'lstm' else ensure_lstm_artifacts(cfg, device=cfg.runtime.device)
+    artifact_info = {'forecast_ready': forecast_ready, 'fingerprint': {'mode': 'non_lstm'} if forecast_ready is None else _artifact_fingerprint(forecast_ready)}
     signature_payload = _shared_data_signature_payload(cfg, artifact_fingerprint=dict(artifact_info['fingerprint']))
     signature_hash = _signature_hash(signature_payload)
     root_dir, shared_dir = (_shared_data_root(root), (_shared_data_root(root) / signature_hash).resolve())

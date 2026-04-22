@@ -122,26 +122,6 @@ class RewardConfig:
 class MpcConfig:
 
     branch_current_tiebreaker_eur_per_pu_step: float = 0.0
-    physics_refinement_mode: str = "two_stage_min_branch_l"
-    physics_refinement_slack_ratio: float = 2e-2
-    physics_refinement_slack_abs_floor_eur: float = 2.0
-    physics_refinement_slack_ratio_schedule: list[float] = field(
-        default_factory=lambda: [2e-2, 5e-2]
-    )
-    physics_refinement_slack_abs_floor_schedule_eur: list[float] = field(
-        default_factory=lambda: [2.0, 5.0]
-    )
-    physics_refinement_enable_aggressive_third_tier: bool = False
-    physics_refinement_aggressive_third_tier_ratio: float = 1e-1
-    physics_refinement_aggressive_third_tier_abs_floor_eur: float = 10.0
-    physics_refinement_cap_utilization_trigger: float = 0.95
-    physics_refinement_branch_l_gap_ratio_trigger: float = 0.01
-    physics_refinement_time_limit_sec: float = 20.0
-    physics_refinement_total_time_limit_sec: float = 40.0
-    physics_refinement_target_mean_solver_gap_kw: float = 3.0
-    physics_refinement_target_max_solver_gap_kw: float = 15.0
-    physics_refinement_target_export_gap_ratio: float = 0.05
-    physics_refinement_use_full_start: bool = True
 
 @dataclass
 class ObsConfig:
@@ -195,9 +175,6 @@ class ForecastConfig:
     pv_postprocess_mode: str = "physical_clip"
     load_baseline_mode: str = "last_value"
     load_blend_candidates: tuple[float, ...] = field(default_factory=lambda: tuple(i / 10.0 for i in range(11)))
-    heatpump_jump_relief_enabled: bool = False
-    heatpump_jump_relief_threshold_kw: float = 0.8
-    heatpump_jump_relief_min_weight: float = 0.3
     lstm_hidden_size: int = 64
     lstm_num_layers: int = 1
     lstm_dropout: float = 0.0
@@ -213,18 +190,6 @@ class ForecastConfig:
     )
     load_component_split: bool = True
     load_scaler_type: str = "robust"
-    @property
-    def lstm_model_path(self) -> None:
-        return None
-
-    @lstm_model_path.setter
-    def lstm_model_path(self, value: str | Path | None) -> None:
-        if value is None:
-            return
-        raise ValueError(
-            "forecast.lstm_model_path has been removed. "
-            "Use managed LSTM artifacts under forecast.lstm_artifact_root instead."
-        )
 
 @dataclass
 class RuntimeConfig:
@@ -296,25 +261,3 @@ class ExperimentConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     grid: GridConfig = field(default_factory=GridConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
-
-MAINLINE_AGENT_PROFILES: tuple[str, ...] = ("SFH12", "SFH14", "SFH16", "SFH18", "SFH20")
-MAINLINE_AGENT_BUS_IDS: tuple[int, ...] = (10, 6, 12, 4, 2)
-MAINLINE_TEST_START_DATE = "2020-06-01"
-MAINLINE_TEST_END_DATE = "2020-06-07"
-MAINLINE_LOAD_SCALE: tuple[float, ...] = (10.0, 10.0, 10.0, 10.0, 10.0)
-MAINLINE_PV_SCALE: tuple[float, ...] = (5.0, 5.0, 5.0, 5.0, 5.0)
-MAINLINE_BATTERY_CAPACITY_KWH = 20.0
-MAINLINE_BATTERY_MAX_CHARGE_RATE = 10.0 / MAINLINE_BATTERY_CAPACITY_KWH
-MAINLINE_FORECAST = {
-    "future_horizon": 24,
-    "history_window": 96 * 3,
-    "target_signals": ("wholesale_price", "load", "pv"),
-    "load_model_mode": "per_agent",
-    "load_time_feature_mode": "hour_week_year",
-    "pv_time_feature_mode": "hour_week_year",
-    "load_hybrid_mode": "baseline_blend",
-    "load_baseline_mode": "last_value",
-    "pv_postprocess_mode": "physical_clip",
-    "load_component_split": True,
-    "load_scaler_type": "robust",
-}

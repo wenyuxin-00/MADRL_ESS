@@ -1,23 +1,19 @@
 from __future__ import annotations
+
 from copy import deepcopy
 from typing import Any
+
 import numpy as np
+
 EPSILON = 1e-06
 PV_CAPACITY_CLIP_MAX = 1.2
 
 def _fit_robust_stats(values: np.ndarray, *, low_quantile: float, high_quantile: float) -> dict[str, Any]:
     array = np.asarray(values, dtype=np.float32)
-    if array.ndim == 1:
-        axis = None
-    elif array.ndim == 2:
-        axis = 0
-    else:
+    if array.ndim not in {1, 2}:
         raise ValueError(f'Expected 1D or 2D values for robust stats, got shape {array.shape}')
-    q_low = np.quantile(array, float(low_quantile), axis=axis)
-    q_high = np.quantile(array, float(high_quantile), axis=axis)
-    median = np.quantile(array, 0.5, axis=axis)
-    q25 = np.quantile(array, 0.25, axis=axis)
-    q75 = np.quantile(array, 0.75, axis=axis)
+    axis = None if array.ndim == 1 else 0
+    q_low, q_high, median, q25, q75 = np.quantile(array, [float(low_quantile), float(high_quantile), 0.5, 0.25, 0.75], axis=axis)
     iqr = np.maximum(q75 - q25, np.float32(EPSILON))
     return {'q_low': np.asarray(q_low, dtype=np.float32), 'q_high': np.asarray(q_high, dtype=np.float32), 'median': np.asarray(median, dtype=np.float32), 'iqr': np.asarray(iqr, dtype=np.float32)}
 
@@ -29,10 +25,7 @@ def _reshape_per_agent_vector(values: np.ndarray, target: np.ndarray) -> np.ndar
 
 def _apply_robust_tanh(values: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
-    q_low = np.asarray(spec['q_low'], dtype=np.float32)
-    q_high = np.asarray(spec['q_high'], dtype=np.float32)
-    median = np.asarray(spec['median'], dtype=np.float32)
-    iqr = np.asarray(spec['iqr'], dtype=np.float32)
+    q_low, q_high, median, iqr = (np.asarray(spec[key], dtype=np.float32) for key in ('q_low', 'q_high', 'median', 'iqr'))
     if str(spec.get('scope', 'shared')) == 'per_agent':
         q_low = _reshape_per_agent_vector(q_low, array)
         q_high = _reshape_per_agent_vector(q_high, array)
@@ -71,8 +64,7 @@ def _extract_pv_denominator(dataset) -> np.ndarray:
     meta = dict(first_episode.get('meta', {}))
     pv_peak_kw = np.asarray(meta.get('pv_peak_kw', []), dtype=np.float32).reshape(-1)
     if pv_peak_kw.size == 0 or np.any(pv_peak_kw <= 0.0):
-        pv_values = _extract_signal_values(dataset, 'pv')
-        pv_peak_kw = np.max(pv_values, axis=0).astype(np.float32)
+        pv_peak_kw = np.max(_extract_signal_values(dataset, 'pv'), axis=0).astype(np.float32)
     return np.maximum(pv_peak_kw, np.float32(EPSILON)).astype(np.float32)
 
 def _normalization_signature(cfg) -> dict[str, object]:
@@ -88,24 +80,11 @@ def fit_observation_normalization_state(cfg, dataset) -> dict[str, object]:
     return {'signature': _normalization_signature(cfg), 'wholesale_price': {'method': str(cfg.obs.wholesale_price_normalization), 'scope': 'shared', 'tanh_scale': float(cfg.obs.wholesale_price_tanh_scale), **_fit_robust_stats(wholesale_price_values, low_quantile=low_quantile, high_quantile=high_quantile)}, 'load': {'method': str(cfg.obs.load_normalization), 'scope': 'per_agent', 'tanh_scale': float(cfg.obs.load_tanh_scale), **_fit_robust_stats(load_values, low_quantile=low_quantile, high_quantile=high_quantile)}, 'pv': {'method': str(cfg.obs.pv_normalization), 'scope': 'per_agent', 'tanh_scale': float(cfg.obs.pv_tanh_scale), 'denominator': pv_denominator.astype(np.float32), 'clip_max': PV_CAPACITY_CLIP_MAX, **_fit_robust_stats(pv_values, low_quantile=low_quantile, high_quantile=high_quantile)}, 'soc': {'method': str(cfg.obs.soc_normalization), 'scope': 'per_agent', 'lower': float(cfg.env.soc_min), 'upper': float(cfg.env.soc_max)}}
 
 class ObservationNormalizer:
-
     def __init__(self, state: dict[str, object]):
         self.state = deepcopy(state)
 
-    def transform_local(self, feature_name: str, values: np.ndarray) -> np.ndarray:
-        return self._transform(feature_name, values)
-
-    def transform_sequence(self, feature_name: str, values: np.ndarray) -> np.ndarray:
-        return self._transform(feature_name, values)
-
-    def describe(self, feature_name: str) -> dict[str, object] | None:
-        spec = self.state.get(str(feature_name))
-        if spec is None:
-            return None
-        return {key: value for key, value in dict(spec).items() if key in {'method', 'scope', 'tanh_scale', 'clip_max', 'lower', 'upper'}}
-
     def _transform(self, feature_name: str, values: np.ndarray) -> np.ndarray:
-        spec = self.state.get(str(feature_name))
+        spec = self.state.get(str(feature_name), {})
         if spec is None:
             return np.asarray(values, dtype=np.float32)
         method = str(spec.get('method', 'none')).strip().lower()
@@ -118,16 +97,19 @@ class ObservationNormalizer:
         if method == 'linear_pm1':
             return _apply_linear_pm1(values, spec)
         raise ValueError(f"Unsupported observation normalization method '{method}' for feature '{feature_name}'.")
+    transform_local = _transform
+    transform_sequence = _transform
 
-def build_observation_normalizer(cfg) -> ObservationNormalizer | None:
+def build_observation_normalizer(cfg, dataset=None) -> ObservationNormalizer | None:
     if not bool(getattr(cfg.obs, 'normalization_enabled', False)):
         return None
     signature = _normalization_signature(cfg)
     cached_state = getattr(cfg.runtime, 'observation_normalization_state', None)
     if isinstance(cached_state, dict) and cached_state.get('signature') == signature:
         return ObservationNormalizer(cached_state)
-    from data.loaders.registry import build_dataset
-    train_dataset = build_dataset(cfg, mode='train')
-    state = fit_observation_normalization_state(cfg, train_dataset)
+    if dataset is None:
+        from data.loaders.registry import build_dataset
+        dataset = build_dataset(cfg, mode='train')
+    state = fit_observation_normalization_state(cfg, dataset)
     cfg.runtime.observation_normalization_state = deepcopy(state)
     return ObservationNormalizer(state)

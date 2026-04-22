@@ -1,2 +1,1 @@
-from controllers.base import BaseController
 from controllers.madrl_controller import MADRLController

@@ -6,6 +6,9 @@ def project_root() -> Path:
 def _resolve_root(root: str | Path | None = None) -> Path:
     return Path(root) if root is not None else project_root()
 
+def _artifact_subdir(*parts: str, root: str | Path | None = None) -> Path:
+    return _resolve_root(root).joinpath("artifacts", *parts)
+
 def get_data_root(root: str | Path | None = None) -> Path:
     return _resolve_root(root) / "data"
 
@@ -16,22 +19,22 @@ def get_forecast_lstm_notebook_path(root: str | Path | None = None) -> Path:
     return get_notebook_root(root) / "forecast" / "forecast_lstm.ipynb"
 
 def get_artifact_root(root: str | Path | None = None) -> Path:
-    return _resolve_root(root) / "artifacts"
+    return _artifact_subdir(root=root)
 
 def get_forecast_artifact_root(root: str | Path | None = None) -> Path:
-    return get_artifact_root(root) / "forecast"
+    return _artifact_subdir("forecast", root=root)
 
 def get_training_artifact_root(root: str | Path | None = None) -> Path:
-    return get_artifact_root(root) / "training"
+    return _artifact_subdir("training", root=root)
 
 def get_shared_data_root(root: str | Path | None = None) -> Path:
-    return get_training_artifact_root(root) / "shared_data"
+    return _artifact_subdir("training", "shared_data", root=root)
 
 def get_checkpoint_root(root: str | Path | None = None) -> Path:
-    return get_training_artifact_root(root) / "checkpoints"
+    return _artifact_subdir("training", "checkpoints", root=root)
 
 def get_tensorboard_root(root: str | Path | None = None) -> Path:
-    return get_training_artifact_root(root) / "tensorboard"
+    return _artifact_subdir("training", "tensorboard", root=root)
 
 def get_tensorboard_run_dir(
     algorithm: str,

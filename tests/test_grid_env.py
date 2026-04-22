@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from controllers.action_feasibility import _local_bounds_numpy, build_safety_local_numpy
-from envs.rewards import NormalReward
+from controllers.madrl.safety_projector import _local_bounds_numpy, build_safety_local_numpy
+from envs.rewards.NormalReward import NormalReward
 from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
@@ -32,50 +32,30 @@ class FakeGridCore:
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
-        from envs.grid.core.grid_types import GridStepResult
+        from envs.grid.core.grid_core import GridStepResult
 
         n = len(p_batt_kw)
         line_loading_pct = np.zeros(self.n_lines, dtype=np.float32)
         trafo_loading_pct = np.zeros(self.n_trafos, dtype=np.float32)
         if self._return_violations:
             v_violation = np.array([0.02, 0.00, 0.01], dtype=np.float32)
-            bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
-            bus_v_excess[3] = 0.03
-            bus_v_excess[7] = 0.02
-            line_excess = np.zeros(self.n_lines, dtype=np.float32)
-            line_excess[5] = 0.05
-            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
-            trafo_excess[0] = 0.04
+            psi_v_raw = float(0.03 ** 2 + 0.02 ** 2)
+            psi_line_raw = float(0.05 ** 2)
+            psi_trafo_raw = float(0.04 ** 2)
             line_loading_pct[5] = 105.0
             trafo_loading_pct[0] = 104.0
         else:
             v_violation = np.zeros(n, dtype=np.float32)
-            bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
-            line_excess = np.zeros(self.n_lines, dtype=np.float32)
-            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
-
-        psi_v_raw = float(np.sum(bus_v_excess ** 2))
-        psi_line_raw = float(np.sum(line_excess ** 2))
-        psi_trafo_raw = float(np.sum(trafo_excess ** 2))
+            psi_v_raw = 0.0
+            psi_line_raw = 0.0
+            psi_trafo_raw = 0.0
 
         return GridStepResult(
             converged=True,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
-            va_degree=np.zeros(self.n_buses, dtype=np.float32),
             line_loading_pct=line_loading_pct,
             trafo_loading_pct=trafo_loading_pct,
-            p_mw_from=np.zeros(self.n_lines, dtype=np.float32),
-            agent_vm_pu=1.0 - v_violation,
             v_violation=v_violation,
-            line_violation=0.10,
-            trafo_violation=0.05,
-            l_violation=0.10,
-            n_buses=self.n_buses,
-            n_lines=self.n_lines,
-            n_trafos=self.n_trafos,
-            bus_v_excess=bus_v_excess,
-            line_excess=line_excess,
-            trafo_excess=trafo_excess,
             psi_v_raw=psi_v_raw,
             psi_line_raw=psi_line_raw,
             psi_trafo_raw=psi_trafo_raw,
@@ -167,16 +147,17 @@ def _zero_actions() -> list[np.ndarray]:
 def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
-    from envs.observation.precomputed_builder import PrecomputedObservationBuilder
+    from envs.observation.default_builder import DefaultObservationBuilder
 
     cfg = _make_cfg()
     shared_data = ensure_madrl_shared_data(cfg, root=tmp_path / "shared_data")
     dataset = build_dataset(cfg, mode="test")
-    obs_builder = PrecomputedObservationBuilder(
+    obs_builder = DefaultObservationBuilder(
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
         adjacency_type=cfg.obs.adjacency_type,
+        precomputed=True,
     )
     env = GridEnv(
         cfg,
@@ -192,7 +173,7 @@ def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
     try:
         obs, _ = env.reset(episode_idx=0)
         assert env.forecaster is None
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
         for key, shape in env.observation_schema.items():
             assert obs[key].shape == shape
     finally:
@@ -299,28 +280,21 @@ def test_info_contains_required_fields(grid_env) -> None:
         "import_price",
         "e_bat_req",
         "e_bat",
-        "pv_raw",
         "pv_effective",
         "pv_curtail",
         "pv_utilization",
-        "base_net_load_effective",
         "grid_import_kw",
         "grid_export_kw",
         "soc_next",
         "pf_converged",
         "pf_error",
         "vm_pu",
-        "agent_vm_pu",
         "line_loading_pct",
         "trafo_loading_pct",
         "trafo_p_signed_kw",
         "v_violation",
-        "line_violation",
-        "trafo_violation",
         "n_v_violations",
-        "n_l_violations",
         "n_line_violations",
-        "n_t_violations",
         "n_trafo_violations",
         "psi_v_raw",
         "psi_line_raw",
@@ -331,7 +305,10 @@ def test_info_contains_required_fields(grid_env) -> None:
     assert info["import_price"] == pytest.approx(
         info["wholesale_price"] + grid_env.import_price_markup_eur_per_kwh
     )
-    assert np.allclose(np.asarray(info["trafo_p_signed_kw"], dtype=np.float32), np.asarray([12.5, -1.5], dtype=np.float32))
+    assert np.allclose(
+        np.asarray(info["trafo_p_signed_kw"], dtype=np.float32),
+        np.asarray([12.5, -1.5], dtype=np.float32),
+    )
 
 
 def test_price_signal_remains_wholesale_but_cost_price_is_adjusted(grid_env) -> None:
@@ -340,7 +317,7 @@ def test_price_signal_remains_wholesale_but_cost_price_is_adjusted(grid_env) -> 
 
     _, _, _, _, info = grid_env.step(_zero_actions())
 
-    assert grid_env.ep_wholesale_price[0] == pytest.approx(raw_price)
+    assert float(grid_env.get_signal("wholesale_price")[0]) == pytest.approx(raw_price)
     assert info["wholesale_price"] == pytest.approx(raw_price)
     assert info["import_price"] == pytest.approx(raw_price + grid_env.import_price_markup_eur_per_kwh)
 
@@ -403,7 +380,6 @@ def test_grid_fields_shapes(grid_env) -> None:
     actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
 
-    assert info["agent_vm_pu"].shape == (N_AGENTS,)
     assert info["v_violation"].shape == (N_AGENTS,)
     assert info["pv_effective"].shape == (N_AGENTS,)
     assert info["pv_curtail"].shape == (N_AGENTS,)
@@ -411,10 +387,8 @@ def test_grid_fields_shapes(grid_env) -> None:
     assert info["grid_export_kw"].shape == (N_AGENTS,)
     assert info["line_loading_pct"].shape == (30,)
     assert info["trafo_loading_pct"].shape == (2,)
-    assert isinstance(info["line_violation"], float)
-    assert isinstance(info["trafo_violation"], float)
     assert isinstance(info["n_v_violations"], int)
-    assert isinstance(info["n_l_violations"], int)
+    assert isinstance(info["n_line_violations"], int)
     assert isinstance(info["psi_v_raw"], float)
     assert isinstance(info["psi_line_raw"], float)
     assert isinstance(info["psi_trafo_raw"], float)
@@ -447,7 +421,7 @@ def test_second_action_dimension_controls_pv_curtailment(grid_env) -> None:
     _, _, _, _, info = grid_env.step(actions)
 
     np.testing.assert_allclose(info["pv_effective"], 0.0, atol=1e-6)
-    np.testing.assert_allclose(info["pv_curtail"], info["pv_raw"], atol=1e-6)
+    np.testing.assert_allclose(info["pv_curtail"], info["pv"], atol=1e-6)
     np.testing.assert_allclose(info["pv_utilization"], 0.0, atol=1e-6)
 
 

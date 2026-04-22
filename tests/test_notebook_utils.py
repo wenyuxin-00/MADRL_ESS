@@ -1,4 +1,4 @@
-from scripts.utils.experiment_notebook_utils import resolve_madrl_model_root
+from scripts.mainline_madrl import resolve_madrl_model_root
 
 
 def test_resolve_madrl_model_root_supports_auto_discovery_and_algo_dir(tmp_path):

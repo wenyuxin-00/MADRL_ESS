@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
 import sys
-import warnings
 from pathlib import Path
 from typing import Any
 from data.loaders.registry import _resolve_split_dates, build_dataset
@@ -10,10 +9,8 @@ from envs.grid.deployments import build_agent_deployments
 from envs.grid_env import GridEnv
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.normalization import build_observation_normalizer
-from envs.observation.precomputed_builder import PrecomputedObservationBuilder
-from envs.rewards import NormalReward
-from envs.subproc_vec_env import SubprocVecEnv
-from envs.vec_env import DummyVecEnv
+from envs.rewards.NormalReward import NormalReward
+from envs.subproc_vec_env import DummyVecEnv, SubprocVecEnv
 from models.assembly import validate_and_finalize_model_config
 from predictors.registry import build_forecaster
 from scripts.train import TrainRunner
@@ -101,18 +98,22 @@ def build_env(cfg: Any, mode: str, dataset: Any | None=None, reward_fn: Any | No
     if forecaster is None and split_precomputed_dir is None:
         forecaster = build_forecaster(cfg)
     if obs_builder is None:
-        normalizer = build_observation_normalizer(cfg)
-        builder_cls = PrecomputedObservationBuilder if split_precomputed_dir is not None else DefaultObservationBuilder
-        obs_builder = builder_cls(local_features=cfg.obs.local_features, sequence_features=cfg.obs.sequence_features, future_horizon=cfg.env.future_horizon, adjacency_type=cfg.obs.adjacency_type, normalizer=normalizer)
+        normalizer = build_observation_normalizer(cfg, dataset=dataset if split_name == 'train' else None)
+        obs_builder = DefaultObservationBuilder(
+            local_features=cfg.obs.local_features,
+            sequence_features=cfg.obs.sequence_features,
+            future_horizon=cfg.env.future_horizon,
+            adjacency_type=cfg.obs.adjacency_type,
+            normalizer=normalizer,
+            precomputed=split_precomputed_dir is not None,
+        )
     grid_core = GridCore(build_agent_deployments(cfg), cfg.grid)
     env = GridEnv(cfg, mode=mode, dataset=dataset, reward_fn=reward_fn, forecaster=forecaster, obs_builder=obs_builder, grid_core=grid_core, precomputed_data_dir=split_precomputed_dir)
     return env
 
 def _build_dummy_train_vec_env(cfg: Any, *, seed: int | None=None) -> Any:
-    train_dataset = build_dataset(cfg, mode='train')
-
     def make_train_env():
-        return build_env(cfg, mode='train', dataset=train_dataset)
+        return build_env(cfg, mode='train')
     return DummyVecEnv(cfg.train.num_envs, make_train_env, seed=seed, parallel_episode_sampling=str(getattr(cfg.train, 'parallel_episode_sampling', 'unique_active')))
 
 def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
@@ -121,8 +122,7 @@ def _build_train_vec_env(cfg: Any, *, seed: int) -> Any:
     if cfg.train.vec_env_type == 'subproc':
         supported, reason = _subproc_vec_env_is_supported_in_current_process()
         if not supported:
-            warnings.warn(f"Falling back to DummyVecEnv because `train.vec_env_type='subproc'` is unsupported in this session: {reason}", RuntimeWarning, stacklevel=2)
-            return _build_dummy_train_vec_env(cfg, seed=seed)
+            raise RuntimeError(f"`train.vec_env_type='subproc'` is unsupported in this session: {reason}")
         return SubprocVecEnv(cfg.train.num_envs, cfg, mode='train', seed=seed)
     raise ValueError(f"Unknown train.vec_env_type '{cfg.train.vec_env_type}', expected 'dummy' or 'subproc'.")
 

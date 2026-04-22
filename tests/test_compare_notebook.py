@@ -22,36 +22,36 @@ def test_compare_notebook_code_cells_compile():
     assert len(code_cells) >= 6
     assert "from scripts.mainline_compare import (" in joined_source
     assert "from scripts.utils.admm_mpc_notebook_helpers import (" in joined_source
-    assert "from scripts.utils.local_mpc_rollout_packages import (" in joined_source
-    assert "from scripts.utils.misocp_notebook_helpers import (" in joined_source
-    assert "replay_local_mpc_rollout_package" in joined_source
-    assert "resolve_exact_local_mpc_rollout_package_dir as resolve_mainline_local_mpc_rollout_dir" in joined_source
-    assert "USE_CACHED_LOCAL_MPC_ROLLOUT = True" in joined_source
-    assert "LOCAL_MPC_PERFECT_INPUT_DIR = None" in joined_source
-    assert "LOCAL_MPC_LSTM_INPUT_DIR = None" in joined_source
-    assert "local_rollout_prefix = PROJECT_ROOT / \"artifacts\" / \"local_mpc_cached_rollout\"" in joined_source
-    assert "_resolve_local_mpc_cached_rollout_dir(" in joined_source
-    assert "local_mpc_perfect_bundle = replay_local_mpc_rollout_package(" in joined_source
-    assert "local_mpc_lstm_bundle = replay_local_mpc_rollout_package(" in joined_source
-    assert "notebooks/madrl/local_MPC.ipynb" in joined_source
-    assert "collect_local_mpc_rollout(" not in joined_source
-    assert "replay_admm_mpc_rollout_package" in joined_source
-    assert "resolve_exact_admm_mpc_rollout_package_dir as resolve_mainline_admm_mpc_rollout_dir" in joined_source
-    assert "USE_CACHED_ADMM_ROLLOUT = True" in joined_source
-    assert "ADMM_ROLLOUT_INPUT_DIR = None" in joined_source
+    assert "from scripts.mainline_madrl import resolve_madrl_model_root" in joined_source
+    assert "from scripts.utils.grid_notebook_workflow import (" in joined_source
+    assert "collect_global_full_horizon_rollout" in joined_source
+    assert "global_oracle = collect_global_full_horizon_rollout(cfg, label='Global MISOCP (single_window)')" in joined_source
+    assert "replay_misocp_plan_package" not in joined_source
+    assert "resolve_exact_misocp_plan_package_dir as resolve_mainline_misocp_plan_dir" not in joined_source
+    assert "USE_CACHED_MISOCP_PLAN" not in joined_source
+    assert "MISOCP_PLAN_INPUT_DIR" not in joined_source
+    assert "collect_local_mpc_rollout" in joined_source
+    assert "replay_local_mpc_rollout_package" not in joined_source
+    assert "resolve_exact_local_mpc_rollout_package_dir as resolve_mainline_local_mpc_rollout_dir" not in joined_source
+    assert "USE_CACHED_LOCAL_MPC_ROLLOUT" not in joined_source
+    assert "LOCAL_MPC_PERFECT_INPUT_DIR" not in joined_source
+    assert "LOCAL_MPC_LSTM_INPUT_DIR" not in joined_source
+    assert "local_mpc_perfect = collect_local_mpc_rollout(cfg, prediction_mode='perfect', label=LOCAL_MPC_PERFECT_LABEL)" in joined_source
+    assert "local_mpc_lstm = collect_local_mpc_rollout(cfg, prediction_mode='normal', label=LOCAL_MPC_LSTM_LABEL)" in joined_source
+    assert "replay_admm_mpc_rollout_package" not in joined_source
+    assert "resolve_exact_admm_mpc_rollout_package_dir as resolve_mainline_admm_mpc_rollout_dir" not in joined_source
+    assert "USE_CACHED_ADMM_ROLLOUT" not in joined_source
+    assert "ADMM_ROLLOUT_INPUT_DIR" not in joined_source
     assert "admm_cfg.runtime.shared_data_dir = None" in joined_source
     assert "admm_cfg.runtime.shared_data_signature = None" in joined_source
     assert "admm_cfg.runtime.forecast_ready = None" in joined_source
     assert "effective_steps =" in joined_source
     assert "admm_cfg.data.test_end_date" in joined_source
-    assert "admm_rollout_prefix = PROJECT_ROOT / \"artifacts\" / \"admm_mpc_cached_rollout\"" in joined_source
-    assert "resolve_mainline_admm_mpc_rollout_dir(" in joined_source
-    assert "admm_mpc_lstm_bundle = replay_admm_mpc_rollout_package(" in joined_source
-    assert "resolve_exact_misocp_plan_package_dir as resolve_mainline_misocp_plan_dir" in joined_source
-    assert "loaded_from_cached_rollout" in joined_source
-    assert "rollout_package_dir" in joined_source
-    assert "notebooks/madrl/ADMM_mpc.ipynb" in joined_source
-    assert "collect_admm_mpc_rollout(" not in joined_source
+    assert "admm_mpc_lstm = collect_admm_mpc_rollout(admm_cfg, label=ADMM_MPC_LSTM_LABEL, prediction_mode='normal'" in joined_source
+    assert "loaded_from_cached_rollout" not in joined_source
+    assert "loaded_from_cached_plan" not in joined_source
+    assert "rollout_package_dir" not in joined_source
+    assert "collect_admm_mpc_rollout(" in joined_source
     assert """rollouts = [
     global_oracle,
     local_mpc_perfect,

@@ -31,6 +31,15 @@ HAS_WORKING_GUROBI_LICENSE = _has_working_gurobi_license()
 
 from configs.profiles import summarize_experiment
 from configs.experiment_config import ExperimentConfig
+from scripts.mainline_compare import (
+    _get_local_mpc_solver,
+    build_compare_economic_table,
+    build_compare_safety_table,
+    collect_global_full_horizon_rollout,
+    collect_local_mpc_rollout,
+    compare_rollout_metrics,
+    validate_compare_model_bundles,
+)
 from scripts.utils.grid_notebook_workflow import (
     FORECAST_EVAL_MODE,
     NORMAL_PREDICTION_MODE,
@@ -38,32 +47,19 @@ from scripts.utils.grid_notebook_workflow import (
     PERFECT_PREDICTION_MODE,
     RolloutResult,
     apply_notebook_experiment_settings,
-    build_compare_economic_table,
-    build_compare_safety_table,
-    build_compare_warning_banner,
-    compare_rollout_metrics,
-    collect_local_mpc_rollout,
     collect_controller_rollout,
-    collect_global_full_horizon_rollout,
-    _get_local_mpc_solver,
-    load_training_run_bundle,
     normalize_date_input,
     plot_battery_power_and_soc_comparison,
     plot_price_prediction_comparison,
     plot_net_load_comparison,
     plot_global_misocp_validation,
-    plot_power_balance_bars,
     plot_power_balance_comparison,
-    plot_rollout_comparison_dashboard,
-    plot_shared_forecast_vs_actual,
     plot_voltage_profile_comparison,
     resolve_evaluation_mode,
     resolve_forecast_backend,
-    validate_compare_model_bundles,
 )
 from predictors.mainline_forecast import (
-    get_managed_lstm_forecast_controls,
-    merge_managed_forecast_controls,
+    get_mainline_forecast_controls,
 )
 from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
@@ -183,7 +179,7 @@ def test_apply_notebook_experiment_settings_supports_fixed_battery_vectors(tmp_p
 def test_apply_notebook_experiment_settings_applies_forecast_controls(tmp_path):
     case_dir = make_case_dir(tmp_path, "grid_notebook_workflow_forecast_controls")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
-    forecast_controls = get_managed_lstm_forecast_controls(
+    forecast_controls = get_mainline_forecast_controls(
         artifact_root=case_dir / "artifacts" / "forecast" / "lstm",
         auto_train_missing=False,
     )
@@ -218,41 +214,16 @@ def test_apply_notebook_experiment_settings_applies_forecast_controls(tmp_path):
     assert summary["forecast"]["auto_train_missing"] is False
 
 
-def test_get_managed_lstm_forecast_controls_matches_canonical_config_defaults():
+def test_get_mainline_forecast_controls_matches_canonical_config_defaults():
     cfg = ExperimentConfig()
 
-    controls = get_managed_lstm_forecast_controls(auto_train_missing=False)
+    controls = get_mainline_forecast_controls(auto_train_missing=False)
 
     assert controls["future_horizon"] == cfg.env.future_horizon
     assert controls["history_window"] == cfg.forecast.history_window
     assert controls["load_component_split"] is cfg.forecast.load_component_split
     assert controls["load_scaler_type"] == cfg.forecast.load_scaler_type
     assert controls["signal_training_overrides"] == cfg.forecast.signal_training_overrides
-
-
-def test_merge_managed_forecast_controls_backfills_missing_fields_and_deep_merges_signals():
-    canonical = get_managed_lstm_forecast_controls(auto_train_missing=False)
-
-    merged = merge_managed_forecast_controls(
-        canonical,
-        {
-            "auto_train_missing": True,
-            "signal_training_overrides": {
-                    "wholesale_price": {
-                    "epochs": 99,
-                }
-            },
-        },
-    )
-
-    assert merged["auto_train_missing"] is True
-    assert merged["load_component_split"] == canonical["load_component_split"]
-    assert merged["signal_training_overrides"]["wholesale_price"]["epochs"] == 99
-    assert (
-        merged["signal_training_overrides"]["wholesale_price"]["hidden_size"]
-        == canonical["signal_training_overrides"]["wholesale_price"]["hidden_size"]
-    )
-    assert merged["signal_training_overrides"]["load"] == canonical["signal_training_overrides"]["load"]
 
 
 def test_apply_notebook_experiment_settings_backfills_partial_forecast_controls_from_canonical_defaults(tmp_path):
@@ -476,31 +447,22 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         "pv_curtail_total",
         "grid_import_total",
         "grid_export_total",
-        "battery_request_gap_kw_total",
-        "pv_curtail_request_gap_kw_total",
-        "projector_adjustment_kw_total",
-        "psi_trafo_raw",
         "trafo_loading_pct_max",
         "n_trafo_violations",
     }.issubset(rollout.step_df.columns)
     assert {
-        "base_net_load",
-        "base_net_load_effective",
-        "net_load",
-        "pv_raw",
-        "pv_effective",
-        "pv_curtail",
-        "pv_utilization",
-        "grid_import_kw",
-        "grid_export_kw",
-        "battery_action_req",
-        "battery_action_exec",
-        "pv_action_req",
-        "pv_action_exec",
-        "pv_curtail_req",
-        "battery_request_gap_kw",
-        "pv_curtail_request_gap_kw",
-        "controller_action_gap",
+        "agent_id",
+        "agent_profile",
+        "load",
+        "load_pred",
+        "pv",
+        "pv_pred",
+        "e_bat",
+        "e_bat_req",
+        "soc",
+        "purchase_cost",
+        "export_subsidy",
+        "objective_total",
     }.issubset(rollout.agent_df.columns)
     assert rollout.meta["agent_bus_ids"] == cfg.grid.agent_bus_ids
     assert rollout.meta["v_min_pu"] == cfg.grid.v_min_pu
@@ -510,8 +472,12 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         cfg.reward.import_price_markup_eur_per_kwh
     )
 
+    agent_power = rollout.agent_df.assign(
+        base_net_load=rollout.agent_df["load"].astype(float) - rollout.agent_df["pv"].astype(float),
+        net_load=rollout.agent_df["load"].astype(float) - rollout.agent_df["pv"].astype(float) + rollout.agent_df["e_bat"].astype(float),
+    )
     aggregated = (
-        rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["base_net_load", "net_load"]]
+        agent_power.groupby(["episode_idx", "step"], as_index=False)[["base_net_load", "net_load"]]
         .sum()
         .rename(
             columns={
@@ -534,22 +500,10 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         merged["net_load_total_from_agents"],
     )
 
-    pv_merged = (
-        rollout.agent_df.groupby(["episode_idx", "step"], as_index=False)[["pv_raw", "pv_effective", "pv_curtail"]]
-        .sum()
-        .rename(
-            columns={
-                "pv_raw": "pv_raw_total_from_agents",
-                "pv_effective": "pv_effective_total_from_agents",
-                "pv_curtail": "pv_curtail_total_from_agents",
-            }
-        )
+    assert np.allclose(
+        rollout.step_df["pv_raw_total"].astype(float),
+        rollout.step_df["pv_effective_total"].astype(float) + rollout.step_df["pv_curtail_total"].astype(float),
     )
-    merged = rollout.step_df.merge(pv_merged, on=["episode_idx", "step"], how="inner")
-    assert not merged.empty
-    assert np.allclose(merged["pv_raw_total"], merged["pv_raw_total_from_agents"])
-    assert np.allclose(merged["pv_effective_total"], merged["pv_effective_total_from_agents"])
-    assert np.allclose(merged["pv_curtail_total"], merged["pv_curtail_total_from_agents"])
 
 
 def test_collect_controller_rollout_skips_forecast_preflight_in_shared_data_mode(tmp_path, monkeypatch):
@@ -692,7 +646,6 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
                     "pv_curtail_kw": np.array([0.25, 0.0], dtype=np.float32),
                     "feasible": True,
                     "solve_time_sec": 0.01,
-                    "used_guarded_fallback": False,
                 },
             )()
 
@@ -715,10 +668,9 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         return _FakeSolver(int(agent_idx)), {
             "solve_count": 0.0,
             "solve_time_sec_total": 0.0,
-            "guarded_fallback_count": 0.0,
         }
 
-    monkeypatch.setattr("scripts.utils.grid_notebook_workflow._get_local_mpc_solver", _fake_get_solver)
+    monkeypatch.setattr("scripts.mainline_compare._get_local_mpc_solver", _fake_get_solver)
 
     perfect_rollout = collect_local_mpc_rollout(cfg, prediction_mode="perfect", label="Local MPC (oracle_eval)")
     normal_rollout = collect_local_mpc_rollout(cfg, prediction_mode="normal", label="Local MPC (forecast_eval)")
@@ -813,7 +765,7 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
         return solver
 
     monkeypatch.setattr(
-        "scripts.utils.grid_notebook_workflow.local_mpc_module._ReusableLocalMPCSolver",
+        "controllers.mpc.gurobi_agent_mpc._ReusableLocalMPCSolver",
         _fake_solver_factory,
     )
 
@@ -1035,13 +987,12 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "feeder_netload_ramp_mean_abs_kw",
         "feeder_netload_ramp_max_kw",
         "returned_primary_objective_eur",
-        "high_budget_refinement_warn",
     }.issubset(metrics_df.columns)
     assert metrics_df.loc[metrics_df["controller"] == "Local MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
     assert metrics_df.loc[metrics_df["controller"] == "Local MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
 
 
-def test_build_compare_tables_and_warning_banner_uses_final_dispatch_costs():
+def test_build_compare_tables_use_final_dispatch_costs():
     metrics_df = pd.DataFrame(
         {
             "controller": ["Global MISOCP", "MADRL"],
@@ -1094,267 +1045,6 @@ def test_build_compare_tables_and_warning_banner_uses_final_dispatch_costs():
             "formulation_tightening_required": False,
         },
     )
-    banner = build_compare_warning_banner(rollout)
-    assert "returned/final dispatch" in banner.data
-
-
-def test_plot_shared_forecast_vs_actual_renders_shared_reference_predictions():
-    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
-
-    def _rollout(
-        label: str,
-        *,
-        price_pred: list[float],
-        load_pred_shift: float,
-        import_price_pred: list[float] | None = None,
-        price_markup: float = 0.2,
-    ) -> RolloutResult:
-        wholesale_price = np.asarray([0.10, 0.20], dtype=np.float32)
-        import_price = wholesale_price + np.float32(price_markup)
-        step_df = pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "wholesale_price": wholesale_price,
-                "import_price": import_price,
-                "wholesale_price_pred": price_pred,
-            }
-        )
-        if import_price_pred is not None:
-            step_df["import_price_pred"] = import_price_pred
-        return RolloutResult(
-            step_df=step_df,
-            agent_df=pd.DataFrame(
-                {
-                    "timestamp": list(timestamps.repeat(2)),
-                    "agent_profile": ["A", "B", "A", "B"],
-                    "load": [2.0, 3.0, 2.2, 3.1],
-                    "load_pred": [2.1 + load_pred_shift, 3.1 + load_pred_shift, 2.3 + load_pred_shift, 3.0 + load_pred_shift],
-                    "pv": [0.8, 0.9, 0.7, 1.0],
-                    "pv_pred": [0.7 + load_pred_shift, 0.95 + load_pred_shift, 0.75 + load_pred_shift, 0.98 + load_pred_shift],
-                }
-            ),
-            grid_df=pd.DataFrame(),
-            summary=pd.DataFrame(),
-            meta={
-                "controller": label,
-                "prediction_mode": "normal",
-                "import_price_markup_eur_per_kwh": price_markup,
-            },
-        )
-
-    reference_rollout = _rollout("Local MPC", price_pred=[0.31, 0.39], load_pred_shift=0.0)
-    other_rollout = _rollout("ADMM MPC", price_pred=[0.35, 0.45], load_pred_shift=0.2)
-
-    figure = plot_shared_forecast_vs_actual(reference_rollout, other_rollout)
-
-    assert len(figure.axes) == 3
-    assert all(axis.title.get_fontsize() == pytest.approx(20) for axis in figure.axes)
-    assert figure.axes[0].yaxis.label.get_size() == pytest.approx(18)
-    assert any(label.get_fontsize() == pytest.approx(16) for label in figure.axes[-1].get_xticklabels())
-    assert figure.axes[0].lines[1].get_label() == "Predicted import price (Local MPC)"
-    assert np.allclose(figure.axes[0].lines[1].get_ydata(), np.asarray([0.51, 0.59], dtype=np.float64))
-
-
-def test_plot_shared_forecast_vs_actual_prefers_import_price_pred_when_present():
-    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
-
-    rollout_a = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "wholesale_price": [0.10, 0.20],
-                "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.10, 0.20],
-                "import_price_pred": [0.30, 0.40],
-            }
-        ),
-        agent_df=pd.DataFrame(
-            {
-                "timestamp": list(timestamps.repeat(2)),
-                "agent_profile": ["A", "B", "A", "B"],
-                "load": [2.0, 3.0, 2.2, 3.1],
-                "load_pred": [2.1, 3.1, 2.3, 3.0],
-                "pv": [0.8, 0.9, 0.7, 1.0],
-                "pv_pred": [0.7, 0.95, 0.75, 0.98],
-            }
-        ),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={
-            "controller": "ADMM MPC",
-            "prediction_mode": "normal",
-            "import_price_markup_eur_per_kwh": 0.2,
-        },
-    )
-    rollout_b = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "wholesale_price": [0.10, 0.20],
-                "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.11, 0.21],
-            }
-        ),
-        agent_df=rollout_a.agent_df.copy(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={
-            "controller": "Local MPC",
-            "prediction_mode": "normal",
-            "import_price_markup_eur_per_kwh": 0.2,
-        },
-    )
-
-    figure = plot_shared_forecast_vs_actual(rollout_a, rollout_b)
-
-    predicted_line = figure.axes[0].lines[1]
-    assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
-
-
-def test_plot_shared_forecast_vs_actual_aligns_to_common_time_window():
-    reference_timestamps = pd.date_range("2020-01-01 00:00:00", periods=3, freq="15min")
-    candidate_timestamps = pd.date_range("2020-01-01 00:15:00", periods=2, freq="15min")
-
-    reference_rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": reference_timestamps,
-                "wholesale_price": [0.20, 0.30, 0.40],
-                "import_price": [0.20, 0.30, 0.40],
-                "wholesale_price_pred": [0.21, 0.31, 0.41],
-            }
-        ),
-        agent_df=pd.DataFrame(
-            {
-                "timestamp": list(reference_timestamps.repeat(2)),
-                "agent_profile": ["A", "B", "A", "B", "A", "B"],
-                "load": [1.0, 1.5, 1.1, 1.6, 1.2, 1.7],
-                "load_pred": [1.05, 1.55, 1.15, 1.65, 1.25, 1.75],
-                "pv": [0.2, 0.3, 0.25, 0.35, 0.3, 0.4],
-                "pv_pred": [0.22, 0.32, 0.27, 0.37, 0.33, 0.43],
-            }
-        ),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "ADMM MPC", "prediction_mode": "normal", "import_price_markup_eur_per_kwh": 0.0},
-    )
-    candidate_rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": candidate_timestamps,
-                "wholesale_price": [0.30, 0.40],
-                "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.35, 0.45],
-            }
-        ),
-        agent_df=pd.DataFrame(
-            {
-                "timestamp": list(candidate_timestamps.repeat(2)),
-                "agent_profile": ["A", "B", "A", "B"],
-                "load": [1.1, 1.6, 1.2, 1.7],
-                "load_pred": [1.2, 1.7, 1.3, 1.8],
-                "pv": [0.25, 0.35, 0.3, 0.4],
-                "pv_pred": [0.28, 0.38, 0.33, 0.43],
-            }
-        ),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "MADRL + No Safety", "prediction_mode": "normal", "import_price_markup_eur_per_kwh": 0.0},
-    )
-
-    figure = plot_shared_forecast_vs_actual(reference_rollout, candidate_rollout)
-
-    actual_line = figure.axes[0].lines[0]
-    predicted_line = figure.axes[0].lines[1]
-    assert len(actual_line.get_xdata()) == 2
-    assert len(predicted_line.get_xdata()) == 2
-    assert np.allclose(actual_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
-
-
-def test_plot_shared_forecast_vs_actual_rejects_mismatched_actual_series():
-    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
-    reference_rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "wholesale_price": [0.10, 0.20],
-                "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.31, 0.39],
-            }
-        ),
-        agent_df=pd.DataFrame(
-            {
-                "timestamp": list(timestamps.repeat(2)),
-                "agent_profile": ["A", "B", "A", "B"],
-                "load": [2.0, 3.0, 2.2, 3.1],
-                "load_pred": [2.1, 3.1, 2.3, 3.0],
-                "pv": [0.8, 0.9, 0.7, 1.0],
-                "pv_pred": [0.7, 0.95, 0.75, 0.98],
-            }
-        ),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "Local MPC", "prediction_mode": "normal"},
-    )
-    mismatched_rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "wholesale_price": [0.11, 0.20],
-                "import_price": [0.31, 0.40],
-                "wholesale_price_pred": [0.31, 0.39],
-            }
-        ),
-        agent_df=reference_rollout.agent_df.copy(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "ADMM MPC", "prediction_mode": "normal"},
-    )
-
-    with pytest.raises(ValueError, match="different actual import_price values"):
-        plot_shared_forecast_vs_actual(reference_rollout, mismatched_rollout)
-
-
-def test_plot_rollout_comparison_dashboard_accepts_three_rollouts():
-    metrics_df = pd.DataFrame(
-        {
-            "controller": ["Local MPC (oracle_eval)", "Local MPC (forecast_eval)", "DRL (forecast_eval)"],
-            "purchase_cost_total": [1.0, 1.2, 0.9],
-            "export_subsidy_total": [0.1, 0.1, 0.2],
-            "objective_total": [0.9, 1.3, 0.7],
-            "voltage_violation_count": [0, 3, 1],
-            "trafo_penalty_total": [0.0, 0.4, 0.1],
-            "line_penalty_total": [0.0, 0.2, 0.0],
-        }
-    )
-
-    figure = plot_rollout_comparison_dashboard(metrics_df)
-    assert len(figure.axes) == 6
-
-
-def test_plot_power_balance_bars_accepts_rollout_with_balance_columns():
-    timestamps = pd.date_range("2020-01-01", periods=3, freq="15min")
-    rollout = RolloutResult(
-        step_df=pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "load_total": [2.4, 2.5, 2.6],
-                "battery_charge_total": [0.3, 0.1, 0.0],
-                "pv_effective_total": [1.2, 1.0, 0.8],
-                "pv_curtail_total": [0.2, 0.1, 0.0],
-                "grid_import_total": [0.9, 1.2, 1.4],
-                "grid_export_total": [0.0, 0.0, 0.0],
-                "battery_discharge_total": [0.0, 0.2, 0.4],
-            }
-        ),
-        agent_df=pd.DataFrame(),
-        grid_df=pd.DataFrame(),
-        summary=pd.DataFrame(),
-        meta={"controller": "DRL (forecast_eval)"},
-    )
-
-    figure = plot_power_balance_bars(rollout)
-    assert len(figure.axes) == 1
 
 
 def test_multi_rollout_compare_helpers_render_expected_row_counts():
@@ -1382,6 +1072,7 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
                     "feeder_post_action_net_load_kw": [2.1 + offset, 2.2 + offset],
                     "root_net_exchange_kw": [2.0 + offset, 2.15 + offset],
                     "load_total": [2.4 + offset, 2.5 + offset],
+                    "pv_raw_total": [1.2, 1.1],
                     "battery_charge_total": [0.3, 0.1],
                     "pv_effective_total": [1.1, 1.0],
                     "pv_curtail_total": [0.1, 0.1],
@@ -1430,7 +1121,7 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
     battery_fig = plot_battery_power_and_soc_comparison(*rollouts)
 
     assert len(price_fig.axes) == 1
-    assert len(price_fig.axes[0].lines) == 2
+    assert len(price_fig.axes[0].lines) == 4
     assert price_fig.axes[0].title.get_fontsize() == pytest.approx(20)
     assert price_fig.axes[0].xaxis.label.get_size() == pytest.approx(18)
     assert price_fig.axes[0].yaxis.label.get_size() == pytest.approx(18)
@@ -1459,17 +1150,15 @@ def test_multi_rollout_compare_helpers_render_expected_row_counts():
     assert all(axis.get_ylim() == (0.0, 1.0) for axis in soc_axes)
 
 
-def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_components():
+def test_plot_net_load_comparison_requires_canonical_feeder_columns():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
     rollout = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "agent_raw_net_load_kw": [2.0, 2.2],
-                "agent_effective_net_load_kw": [1.8, 2.0],
-                "agent_post_action_net_load_kw": [1.5, 1.7],
-                "fixed_load_kw": [0.5, 0.5],
-                "fixed_generation_kw": [0.1, 0.1],
+                "feeder_raw_net_load_kw": [2.4, 2.6],
+                "feeder_effective_net_load_kw": [2.2, 2.4],
+                "feeder_post_action_net_load_kw": [1.9, 2.1],
                 "root_net_exchange_kw": [1.9, 2.0],
             }
         ),
@@ -1485,7 +1174,7 @@ def test_plot_net_load_comparison_derives_feeder_columns_from_agent_and_fixed_co
     assert len(figure.axes[0].lines) >= 3
 
 
-def test_plot_net_load_comparison_raises_when_feeder_columns_cannot_be_derived():
+def test_plot_net_load_comparison_raises_when_feeder_columns_are_missing():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
     rollout = RolloutResult(
         step_df=pd.DataFrame(
@@ -1501,11 +1190,11 @@ def test_plot_net_load_comparison_raises_when_feeder_columns_cannot_be_derived()
         meta={"controller": "Broken rollout"},
     )
 
-    with pytest.raises(ValueError, match="feeder-total net-load columns required for compare plotting"):
+    with pytest.raises(ValueError, match="feeder net-load columns required for compare plotting"):
         plot_net_load_comparison(rollout)
 
 
-def test_plot_price_prediction_comparison_applies_import_price_markup_and_keeps_shared_line():
+def test_plot_price_prediction_comparison_requires_canonical_import_price_predictions():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
 
     def _rollout(label: str) -> RolloutResult:
@@ -1513,29 +1202,25 @@ def test_plot_price_prediction_comparison_applies_import_price_markup_and_keeps_
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
-                    "wholesale_price": [0.10, 0.20],
                     "import_price": [0.30, 0.40],
-                    "wholesale_price_pred": [0.10, 0.20],
+                    "import_price_pred": [0.30, 0.40],
                 }
             ),
             agent_df=pd.DataFrame(),
             grid_df=pd.DataFrame(),
             summary=pd.DataFrame(),
-            meta={
-                "controller": label,
-                "import_price_markup_eur_per_kwh": 0.2,
-            },
+            meta={"controller": label},
         )
 
     figure = plot_price_prediction_comparison(_rollout("A"), _rollout("B"))
 
     assert len(figure.axes) == 1
-    assert len(figure.axes[0].lines) == 2
+    assert len(figure.axes[0].lines) == 3
     predicted_line = figure.axes[0].lines[1]
     assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
 
 
-def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_rollouts_disagree():
+def test_plot_price_prediction_comparison_overlays_one_line_per_rollout():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
 
     def _rollout(label: str, predicted: list[float]) -> RolloutResult:
@@ -1543,19 +1228,14 @@ def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_r
             step_df=pd.DataFrame(
                 {
                     "timestamp": timestamps,
-                    "wholesale_price": [0.10, 0.20],
                     "import_price": [0.30, 0.40],
-                    "wholesale_price_pred": predicted,
+                    "import_price_pred": predicted,
                 }
             ),
             agent_df=pd.DataFrame(),
             grid_df=pd.DataFrame(),
             summary=pd.DataFrame(),
-            meta={
-                "controller": label,
-                "prediction_mode": "normal",
-                "import_price_markup_eur_per_kwh": 0.2,
-            },
+            meta={"controller": label, "prediction_mode": "normal"},
         )
 
     figure = plot_price_prediction_comparison(
@@ -1571,16 +1251,14 @@ def test_plot_price_prediction_comparison_overlays_unique_forecast_series_when_r
     assert "Predicted import price (B)" in labels
 
 
-def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present():
+def test_plot_price_prediction_comparison_reads_each_rollout_import_price_pred():
     timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
 
     rollout_a = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "wholesale_price": [0.10, 0.20],
                 "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.30, 0.40],
                 "import_price_pred": [0.30, 0.40],
             }
         ),
@@ -1590,16 +1268,14 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         meta={
             "controller": "ADMM MPC",
             "prediction_mode": "normal",
-            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
     rollout_b = RolloutResult(
         step_df=pd.DataFrame(
             {
                 "timestamp": timestamps,
-                "wholesale_price": [0.10, 0.20],
                 "import_price": [0.30, 0.40],
-                "wholesale_price_pred": [0.10, 0.20],
+                "import_price_pred": [0.35, 0.45],
             }
         ),
         agent_df=pd.DataFrame(),
@@ -1608,14 +1284,13 @@ def test_plot_price_prediction_comparison_prefers_import_price_pred_when_present
         meta={
             "controller": "Local MPC",
             "prediction_mode": "normal",
-            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
 
     figure = plot_price_prediction_comparison(rollout_a, rollout_b)
 
-    predicted_line = figure.axes[0].lines[1]
-    assert np.allclose(predicted_line.get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
+    assert np.allclose(figure.axes[0].lines[1].get_ydata(), np.asarray([0.30, 0.40], dtype=np.float64))
+    assert np.allclose(figure.axes[0].lines[2].get_ydata(), np.asarray([0.35, 0.45], dtype=np.float64))
 
 
 def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp_path):
@@ -1681,7 +1356,6 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
     _write_bundle(safe_dir)
     _write_bundle(proj_dir, subsidy=0.081)
 
-    assert load_training_run_bundle(base_dir)["model_root"] == str(base_dir.resolve())
     with pytest.raises(ValueError, match="metadata mismatch"):
         validate_compare_model_bundles(
             {

@@ -3,9 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from envs.parallel_episode_sampling import ParallelEpisodeSampler, validate_wave_done_flags
-from envs.subproc_vec_env import SubprocVecEnv
-from envs.vec_env import DummyVecEnv
+from envs.subproc_vec_env import (
+    DummyVecEnv,
+    ParallelEpisodeSampler,
+    SubprocVecEnv,
+    validate_wave_done_flags,
+)
 from scripts.builder import _build_train_vec_env
 from scripts.mainline_madrl import _apply_train_controls
 from tests.support.helpers import make_case_dir, make_smoke_config
@@ -97,23 +100,14 @@ def test_dummy_vec_env_unique_active_reset_assigns_distinct_episode_indices(tmp_
         vec_env.close()
 
 
-def test_dummy_vec_env_per_env_rng_sequences_are_not_fully_synchronized(tmp_path):
+def test_dummy_vec_env_rejects_removed_per_env_rng_mode(tmp_path):
     case_dir = make_case_dir(tmp_path, "dummy_per_env_rng")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.train.num_envs = 4
     cfg.train.parallel_episode_sampling = "per_env_rng"
 
-    vec_env = _build_train_vec_env(cfg, seed=13)
-    try:
-        sequences = [[] for _ in range(vec_env.num_envs)]
-        for _ in range(4):
-            _, reset_infos = vec_env.reset()
-            for env_idx, info in enumerate(reset_infos):
-                sequences[env_idx].append(int(info["episode_idx"]))
-
-        assert len({tuple(sequence) for sequence in sequences}) > 1
-    finally:
-        vec_env.close()
+    with pytest.raises(ValueError, match="only supports 'unique_active'"):
+        _build_train_vec_env(cfg, seed=13)
 
 
 def test_dummy_vec_env_unique_active_rejects_partial_done():
@@ -154,21 +148,12 @@ def test_subproc_vec_env_unique_active_reset_assigns_distinct_episode_indices(tm
         vec_env.close()
 
 
-def test_subproc_vec_env_per_env_rng_sequences_are_not_fully_synchronized(tmp_path):
+def test_subproc_vec_env_rejects_removed_per_env_rng_mode(tmp_path):
     case_dir = make_case_dir(tmp_path, "subproc_per_env_rng")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.train.num_envs = 2
     cfg.train.vec_env_type = "subproc"
     cfg.train.parallel_episode_sampling = "per_env_rng"
 
-    vec_env = SubprocVecEnv(2, cfg, mode="train", seed=19)
-    try:
-        sequences = [[] for _ in range(vec_env.num_envs)]
-        for _ in range(4):
-            _, reset_infos = vec_env.reset()
-            for env_idx, info in enumerate(reset_infos):
-                sequences[env_idx].append(int(info["episode_idx"]))
-
-        assert len({tuple(sequence) for sequence in sequences}) > 1
-    finally:
-        vec_env.close()
+    with pytest.raises(ValueError, match="only supports 'unique_active'"):
+        SubprocVecEnv(2, cfg, mode="train", seed=19)
