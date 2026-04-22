@@ -266,9 +266,16 @@ def test_forecast_lstm_notebook_uses_shared_forecast_preset():
     joined_source = "\n".join(_load_code_cells(notebook_path))
 
     assert "get_mainline_forecast_controls" in joined_source
+    assert "auto_train_missing=False" in joined_source
+    assert "ensure_madrl_shared_data" in joined_source
+    assert "compute_evaluations=False" in joined_source
+    assert "test_window_2020-06-01_2020-06-07" in joined_source
     assert "hidden_size = 128" not in joined_source
     assert "batch_size = 1024" not in joined_source
     assert "epochs = 20" not in joined_source
+    assert "reuse_saved_artifacts" not in joined_source
+    assert "legacy_aliases" not in joined_source
+    assert "delete_stale_load_artifacts" not in joined_source
 
 
 def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):

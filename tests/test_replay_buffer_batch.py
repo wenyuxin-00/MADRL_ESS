@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from scripts.builder import build_env
-from scripts.utils.nested import stack_nested
+from scripts.utils.torch_runtime import stack_nested
 from scripts.utils.replay_buffer import ReplayBuffer, to_torch_batch
 from tests.support.helpers import make_case_dir, make_smoke_config
 

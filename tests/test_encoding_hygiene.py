@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 
@@ -52,17 +53,35 @@ def test_notebook_defaults_stay_portable():
     madrl_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "train_base.ipynb")
     grid_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb")
 
-    assert 'while project_root != project_root.parent and not (project_root / "configs").exists()' in forecast_text
-    assert 'device_request = None' in forecast_text
-    assert 'require_cuda = False' in forecast_text
-    assert 'cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]' in forecast_text
-    assert 'cfg.env.num_agents = len(cfg.data.agent_profiles)' in forecast_text
-    assert 'signals_to_train = [signal_name for signal_name in signal_order if signal_name not in results]' in forecast_text
-    assert 'retraining missing or incompatible signals' in forecast_text
-    assert 'full_test_view_signals = ["wholesale_price"]' in forecast_text
-    assert 'legacy_aliases = {"price": "wholesale_price"}' in forecast_text
-    assert 'set `full_test_view_signals = ["wholesale_price"]`' in forecast_text
-    assert 'confirm only `wholesale_price` is plotted for that date window' in forecast_text
+    required_forecast_tokens = [
+        'while project_root != project_root.parent and not (project_root / "configs").exists()',
+        'device_request = None',
+        'require_cuda = False',
+        'cfg.data.agent_profiles = ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]',
+        'cfg.env.num_agents = len(cfg.data.agent_profiles)',
+        'auto_train_missing=False',
+        'weekly_validation_signals = ["wholesale_price", "load", "pv"]',
+        'weekly_validation_start_date = "2020-06-01"',
+        'weekly_validation_end_date = "2020-06-07"',
+        'test_window_2020-06-01_2020-06-07',
+        'ensure_madrl_shared_data',
+    ]
+    forbidden_forecast_tokens = [
+        'retraining missing or incompatible signals',
+        'full_test_view_signals = ["wholesale_price"]',
+        'legacy_aliases = {"price": "wholesale_price"}',
+        'reuse_saved_artifacts',
+        'require_complete_saved_artifacts',
+        'loaded_from_artifacts',
+        'Safe Legacy Artifact Cleanup',
+        'delete_stale_load_artifacts',
+    ]
+
+    for token in required_forecast_tokens:
+        assert token in forecast_text
+    for token in forbidden_forecast_tokens:
+        assert token not in forecast_text
+    assert re.search(r'(?<!wholesale_)price\\.parquet', forecast_text) is None
 
     assert 'experiment_controls = {' in madrl_text
     assert 'data_controls = {' in madrl_text
@@ -87,8 +106,9 @@ def test_forecast_lstm_section3_signal_defaults_match_price_protocol():
     repo_root = Path(__file__).resolve().parents[1]
     forecast_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb")
 
-    assert 'full_test_view_signals = ["wholesale_price"]' in forecast_text
-    assert 'legacy_aliases = {"price": "wholesale_price"}' in forecast_text
-    assert 'set `full_test_view_signals = ["wholesale_price"]`' in forecast_text
-    assert 'confirm only `wholesale_price` is plotted for that date window' in forecast_text
+    assert 'weekly_validation_signals = ["wholesale_price", "load", "pv"]' in forecast_text
+    assert 'weekly_validation_start_date = "2020-06-01"' in forecast_text
+    assert 'weekly_validation_end_date = "2020-06-07"' in forecast_text
+    assert 'wholesale_price.parquet' in forecast_text
+    assert re.search(r'(?<!wholesale_)price\\.parquet', forecast_text) is None
 

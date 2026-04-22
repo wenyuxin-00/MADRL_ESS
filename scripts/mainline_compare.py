@@ -1,593 +1,158 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
-import numpy as np
-import pandas as pd
-from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN, IMPORT_PRICE_MARKUP_KEY, IMPORT_PRICE_PRED_COLUMN, WHOLESALE_PRICE_SEQ_FIELD, derive_import_price
-if TYPE_CHECKING:
-    from scripts.utils.grid_notebook_workflow import RolloutResult
-COMPARE_METRIC_COLUMNS = ['controller', 'soc_mode', 'purchase_cost_total', 'purchase_cost_total_eur', 'export_subsidy_total', 'export_subsidy_total_eur', 'total_cost_eur', 'objective_total', 'soc_penalty_total', 'voltage_penalty_total', 'trafo_penalty_total', 'line_penalty_total', 'voltage_violation_count', 'price_mae', 'load_mae', 'pv_mae', 'voltage_violation_steps', 'voltage_violation_bus_points', 'min_vm_pu', 'max_vm_pu', 'v_min_pu', 'v_max_pu', 'voltage_step_delta_p95_pu', 'voltage_step_delta_max_pu', 'voltage_spread_mean_pu', 'voltage_spread_max_pu', 'trafo_overload_steps', 'trafo_loading_max_pct', 'feeder_netload_ramp_mean_abs_kw', 'feeder_netload_ramp_max_kw', 'battery_net_power_kw_mean_abs', 'returned_primary_objective_eur']
-ECONOMIC_TABLE_COLUMNS = ['controller', 'purchase_cost_total_eur', 'export_subsidy_total_eur', 'total_cost_eur']
-SAFETY_TABLE_COLUMNS = ['controller', 'voltage_violation_steps', 'voltage_violation_bus_points', 'voltage_step_delta_p95_pu', 'voltage_step_delta_max_pu', 'voltage_spread_mean_pu', 'voltage_spread_max_pu', 'trafo_overload_steps', 'trafo_loading_max_pct', 'feeder_netload_ramp_mean_abs_kw', 'feeder_netload_ramp_max_kw']
-LOCAL_MPC_LSTM_LABEL = 'Local MPC + LSTM Forecast'
-LOCAL_MPC_PERFECT_LABEL = 'Local MPC + Perfect Forecast'
-_SOC_SLACK_TIGHT_P95_THRESHOLD = 1e-04
-
-def _step_group_columns(frame: pd.DataFrame) -> list[str]:
-    columns = [column for column in ['episode_idx', 'step'] if column in frame.columns]
-    if columns:
-        return columns
-    if 'timestamp' in frame.columns:
-        return ['timestamp']
-    return []
-
-def _sort_columns(frame: pd.DataFrame, *preferred: str) -> list[str]:
-    return [column for column in preferred if column in frame.columns]
-
-def _summarize_voltage_step_delta(grid_df: pd.DataFrame) -> tuple[float, float]:
-    if grid_df.empty or 'vm_pu' not in grid_df.columns or 'bus_id' not in grid_df.columns:
-        return (float('nan'), float('nan'))
-    sort_columns = _sort_columns(grid_df, 'episode_idx', 'bus_id', 'step', 'timestamp')
-    group_columns = [column for column in ['episode_idx', 'bus_id'] if column in grid_df.columns]
-    if 'bus_id' not in group_columns:
-        group_columns.append('bus_id')
-    ordered = grid_df.sort_values(sort_columns) if sort_columns else grid_df.copy()
-    step_delta = ordered.groupby(group_columns, sort=False)['vm_pu'].diff().abs()
-    finite = step_delta.to_numpy(dtype=np.float64)
-    finite = finite[np.isfinite(finite)]
-    if finite.size == 0:
-        return (float('nan'), float('nan'))
-    return (float(np.percentile(finite, 95.0)), float(np.max(finite)))
-
-def _summarize_voltage_spread(grid_df: pd.DataFrame) -> tuple[float, float]:
-    if grid_df.empty or 'vm_pu' not in grid_df.columns:
-        return (float('nan'), float('nan'))
-    group_columns = _step_group_columns(grid_df)
-    if not group_columns:
-        return (float('nan'), float('nan'))
-    spread = grid_df.groupby(group_columns, sort=False)['vm_pu'].agg(lambda values: float(np.max(values) - np.min(values)))
-    values = spread.to_numpy(dtype=np.float64)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return (float('nan'), float('nan'))
-    return (float(np.mean(values)), float(np.max(values)))
-
-def _summarize_grouped_ramp(step_df: pd.DataFrame, column: str) -> tuple[float, float]:
-    if step_df.empty or column not in step_df.columns:
-        return (float('nan'), float('nan'))
-    sort_columns = _sort_columns(step_df, 'episode_idx', 'step', 'timestamp')
-    ordered = step_df.sort_values(sort_columns) if sort_columns else step_df.copy()
-    group_columns = [column_name for column_name in ['episode_idx'] if column_name in ordered.columns]
-    if group_columns:
-        ramp = ordered.groupby(group_columns, sort=False)[column].diff().abs()
-    else:
-        ramp = ordered[column].diff().abs()
-    values = ramp.to_numpy(dtype=np.float64)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return (float('nan'), float('nan'))
-    return (float(np.mean(values)), float(np.max(values)))
-
-def summarize_rollout_metrics(rollout: RolloutResult) -> dict[str, object]:
-    step_df = rollout.step_df.copy()
-    agent_df = rollout.agent_df.copy()
-    grid_df = rollout.grid_df.copy()
-    summary_df = rollout.summary.copy()
-    purchase_cost_total = float(step_df['purchase_cost_total'].sum()) if 'purchase_cost_total' in step_df.columns else float(rollout.meta.get('agent_purchase_cost_eur', float('nan')))
-    export_subsidy_total = float(step_df['export_subsidy_total'].sum()) if 'export_subsidy_total' in step_df.columns else float(rollout.meta.get('agent_export_subsidy_eur', float('nan')))
-    total_cost_eur = float(purchase_cost_total - export_subsidy_total) if np.isfinite(purchase_cost_total) and np.isfinite(export_subsidy_total) else float('nan')
-    objective_total = float(step_df['objective_total'].sum()) if 'objective_total' in step_df.columns else 0.0
-    soc_penalty_total = float(step_df['soc_penalty_total'].sum()) if 'soc_penalty_total' in step_df.columns else 0.0
-    voltage_penalty_total = float(step_df['voltage_penalty_total'].sum()) if 'voltage_penalty_total' in step_df.columns else 0.0
-    line_penalty_total = float(step_df['line_penalty_total'].sum()) if 'line_penalty_total' in step_df.columns else 0.0
-    trafo_penalty_total = float(step_df['trafo_penalty_total'].sum()) if 'trafo_penalty_total' in step_df.columns else 0.0
-    price_mae = float(np.abs(step_df[IMPORT_PRICE_COLUMN] - step_df[IMPORT_PRICE_PRED_COLUMN]).mean()) if not step_df.empty and {IMPORT_PRICE_COLUMN, IMPORT_PRICE_PRED_COLUMN}.issubset(step_df.columns) else float('nan')
-    load_mae = float(np.abs(agent_df['load'] - agent_df['load_pred']).mean()) if not agent_df.empty else float('nan')
-    pv_mae = float(np.abs(agent_df['pv'] - agent_df['pv_pred']).mean()) if not agent_df.empty else float('nan')
-    v_min = float(rollout.meta.get('v_min_pu', np.nan))
-    v_max = float(rollout.meta.get('v_max_pu', np.nan))
-    if grid_df.empty or not np.isfinite(v_min) or (not np.isfinite(v_max)):
-        voltage_violation_bus_points = float('nan')
-        voltage_violation_steps = float('nan')
-        min_vm_pu = float('nan')
-        max_vm_pu = float('nan')
-    else:
-        violation_mask = (grid_df['vm_pu'] < v_min) | (grid_df['vm_pu'] > v_max)
-        voltage_violation_bus_points = int(violation_mask.sum())
-        voltage_violation_steps = int(grid_df.loc[violation_mask, ['episode_idx', 'step']].drop_duplicates().shape[0])
-        min_vm_pu = float(grid_df['vm_pu'].min())
-        max_vm_pu = float(grid_df['vm_pu'].max())
-    voltage_step_delta_p95_pu, voltage_step_delta_max_pu = _summarize_voltage_step_delta(grid_df)
-    voltage_spread_mean_pu, voltage_spread_max_pu = _summarize_voltage_spread(grid_df)
-    feeder_netload_ramp_mean_abs_kw, feeder_netload_ramp_max_kw = _summarize_grouped_ramp(step_df, 'feeder_post_action_net_load_kw')
-    trafo_loading_limit_pct = float(rollout.meta.get('trafo_loading_limit_pct', rollout.meta.get('loading_limit_pct', np.nan)))
-    trafo_loading_max_pct = float(step_df['trafo_loading_pct_max'].max()) if 'trafo_loading_pct_max' in step_df.columns else float('nan')
-    if 'n_trafo_violations' in step_df.columns:
-        trafo_overload_steps = int((step_df['n_trafo_violations'].astype(float) > 0.0).sum())
-    elif np.isfinite(trafo_loading_max_pct) and np.isfinite(trafo_loading_limit_pct) and ('trafo_loading_pct_max' in step_df.columns):
-        trafo_overload_steps = int((step_df['trafo_loading_pct_max'].astype(float) > trafo_loading_limit_pct).sum())
-    else:
-        trafo_overload_steps = float('nan')
-    battery_net_power_kw_mean_abs = float(np.mean(np.abs(step_df['battery_discharge_total'].astype(float) - step_df['battery_charge_total'].astype(float)))) if {'battery_charge_total', 'battery_discharge_total'}.issubset(step_df.columns) else float('nan')
-    metrics = {'controller': str(rollout.meta.get('controller', 'unknown')), 'soc_mode': str(rollout.meta.get('soc_mode', 'reset')), 'purchase_cost_total': purchase_cost_total, 'purchase_cost_total_eur': purchase_cost_total, 'export_subsidy_total': export_subsidy_total, 'export_subsidy_total_eur': export_subsidy_total, 'total_cost_eur': total_cost_eur, 'objective_total': objective_total, 'soc_penalty_total': soc_penalty_total, 'voltage_penalty_total': voltage_penalty_total, 'trafo_penalty_total': trafo_penalty_total, 'line_penalty_total': line_penalty_total, 'voltage_violation_count': voltage_violation_bus_points, 'price_mae': price_mae, 'load_mae': load_mae, 'pv_mae': pv_mae, 'voltage_violation_steps': voltage_violation_steps, 'voltage_violation_bus_points': voltage_violation_bus_points, 'min_vm_pu': min_vm_pu, 'max_vm_pu': max_vm_pu, 'v_min_pu': v_min, 'v_max_pu': v_max, 'voltage_step_delta_p95_pu': voltage_step_delta_p95_pu, 'voltage_step_delta_max_pu': voltage_step_delta_max_pu, 'voltage_spread_mean_pu': voltage_spread_mean_pu, 'voltage_spread_max_pu': voltage_spread_max_pu, 'trafo_overload_steps': trafo_overload_steps, 'trafo_loading_max_pct': trafo_loading_max_pct, 'feeder_netload_ramp_mean_abs_kw': feeder_netload_ramp_mean_abs_kw, 'feeder_netload_ramp_max_kw': feeder_netload_ramp_max_kw, 'battery_net_power_kw_mean_abs': battery_net_power_kw_mean_abs, 'returned_primary_objective_eur': float(rollout.meta.get('returned_primary_objective_eur', np.nan))}
-    if not summary_df.empty:
-        for row in summary_df.itertuples(index=False):
-            profile = str(getattr(row, 'agent_profile', 'unknown')).strip().lower()
-            safe_profile = ''.join((ch if ch.isalnum() else '_' for ch in profile)).strip('_') or 'unknown'
-            metrics[f'purchase_cost_{safe_profile}'] = float(getattr(row, 'purchase_cost'))
-    return metrics
-
-def compare_rollout_metrics(*rollouts: RolloutResult) -> pd.DataFrame:
-    rows = [summarize_rollout_metrics(rollout) for rollout in rollouts]
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=COMPARE_METRIC_COLUMNS)
-
-def build_compare_economic_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    if metrics_df.empty:
-        return pd.DataFrame(columns=ECONOMIC_TABLE_COLUMNS)
-    required_columns = ECONOMIC_TABLE_COLUMNS[1:]
-    if metrics_df.loc[:, required_columns].isna().any().any():
-        incomplete = metrics_df.loc[metrics_df.loc[:, required_columns].isna().any(axis=1), 'controller'].astype(str).tolist()
-        raise ValueError(f'Compare economic table requires final-dispatch purchase/export/total cost fields. Missing values detected for: {incomplete}')
-    return metrics_df.loc[:, ECONOMIC_TABLE_COLUMNS].copy()
-
-def build_compare_safety_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    if metrics_df.empty:
-        return pd.DataFrame(columns=SAFETY_TABLE_COLUMNS)
-    return metrics_df.loc[:, SAFETY_TABLE_COLUMNS].copy()
-
-
-def _canonicalize_compare_value(value: Any):
-    if isinstance(value, Mapping):
-        return {str(key): _canonicalize_compare_value(sub) for key, sub in sorted(dict(value).items(), key=lambda item: str(item[0]))}
-    if isinstance(value, list):
-        return [_canonicalize_compare_value(item) for item in value]
-    return round(float(value), 10) if isinstance(value, float) else value
-
-
-def validate_compare_model_bundles(model_roots: Mapping[str, str | Path], *, expected_count: int=3) -> dict[str, dict[str, object]]:
-    if len(model_roots) != int(expected_count):
-        raise ValueError(f'Compare requires exactly {expected_count} DRL model roots, got {len(model_roots)}.')
-    required_files = ('train_result.json', 'experiment_controls.json', 'data_controls.json', 'battery_controls.json', 'train_controls.json', 'checkpoint_controls.json')
-    signatures: dict[str, dict[str, object]] = {}
-    bundles: dict[str, dict[str, object]] = {}
-    for label, model_root in dict(model_roots).items():
-        resolved_model_root = Path(model_root).resolve()
-        meta_dir = resolved_model_root / '_meta'
-        missing = [filename for filename in required_files if not (meta_dir / filename).exists()]
-        if missing:
-            raise FileNotFoundError(f"Training metadata is incomplete for '{resolved_model_root}'. Missing: {missing}")
-        bundle = {'model_root': str(resolved_model_root), 'meta_dir': str(meta_dir), **{filename.removesuffix('.json'): json.loads((meta_dir / filename).read_text(encoding='utf-8')) for filename in required_files}}
-        reward_controls = dict(dict(bundle['experiment_controls']).get('reward_controls', {}))
-        removed_reward_keys = sorted(set(reward_controls).intersection({'w_action_pen', 'lambda_throughput'}))
-        if removed_reward_keys:
-            raise ValueError(f'Stored reward_controls use removed legacy key(s): {removed_reward_keys}. Regenerate the checkpoint bundle with the current mainline schema.')
-        train_controls = dict(bundle['train_controls'])
-        data_controls = dict(bundle['data_controls'])
-        signatures[str(label)] = {'prediction_mode': str(data_controls.get('prediction_mode', 'perfect')), 'seed': int(dict(bundle['experiment_controls']).get('seed', 0)), 'export_subsidy_eur_per_kwh': float(reward_controls.get('export_subsidy_eur_per_kwh', 0.079)), 'w_soc_pen': float(reward_controls.get('w_soc_pen', 0.0)), 'agent_profiles': list(data_controls.get('agent_profiles', [])), 'agent_bus_ids': list(data_controls.get('agent_bus_ids', [])), 'load_scale': list(data_controls.get('load_scale', [])), 'pv_scale': list(data_controls.get('pv_scale', [])), 'future_horizon': int(data_controls.get('future_horizon', 0)), 'train_year': data_controls.get('train_year'), 'test_year': data_controls.get('test_year'), 'test_start_date': data_controls.get('test_start_date'), 'test_end_date': data_controls.get('test_end_date'), 'shared_data_signature': bundle.get('train_result', {}).get('shared_data_signature'), 'battery_controls': dict(bundle['battery_controls']), 'forecast_controls': dict(dict(bundle['experiment_controls']).get('forecast_controls', {})), 'model_controls': dict(dict(bundle['experiment_controls']).get('model_controls', {})), 'train_controls': {key: train_controls.get(key) for key in ('profile', 'model_family', 'train_episodes', 'max_train_steps', 'num_envs', 'vec_env_type', 'parallel_episode_sampling', 'batch_size', 'buffer_size', 'update_interval', 'updates_per_step', 'policy_update_freq', 'actor_lr', 'critic_lr', 'noise_std_init', 'noise_std_min', 'noise_decay_steps', 'use_noise_decay')}}
-        bundles[str(label)] = bundle
-    labels = list(signatures)
-    reference_label = labels[0]
-    mismatch_lines = [f'{field_name}: {reference_label}={reference_value!r} vs {label}={current_signature[field_name]!r}' for label, current_signature in list(signatures.items())[1:] for field_name, reference_value in signatures[reference_label].items() if _canonicalize_compare_value(current_signature[field_name]) != _canonicalize_compare_value(reference_value)]
-    if mismatch_lines:
-        raise ValueError('Compare model metadata mismatch detected. All DRL runs must share the same subsidy, hyperparameters, forecast controls, battery controls, dates, and seed.\n' + '\n'.join(mismatch_lines))
-    return bundles
-
-
-def _get_local_mpc_solver(env, *, agent_idx: int, import_price_seq: np.ndarray, battery_capacity_kwh: float, p_max_kw: float, dt_hours: float, efficiency: float, soc_min: float, soc_max: float, export_subsidy_eur_per_kwh: float):
-    from controllers.mpc import gurobi_agent_mpc as local_mpc_module
-    cache = getattr(env, '_local_mpc_solver_cache', None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(env, '_local_mpc_solver_cache', cache)
-    stats = getattr(env, '_local_mpc_stats', None)
-    if not isinstance(stats, dict):
-        stats = {}
-        setattr(env, '_local_mpc_stats', stats)
-    for key in ('solver_build_count', 'solver_reuse_count', 'solve_count', 'solve_time_sec_total'):
-        stats.setdefault(key, 0.0)
-    horizon = int(np.asarray(import_price_seq, dtype=np.float32).reshape(-1).size)
-    cache_key = (int(agent_idx), int(horizon), float(battery_capacity_kwh), float(p_max_kw), float(dt_hours), float(efficiency), float(soc_min), float(soc_max), float(export_subsidy_eur_per_kwh))
-    solver = cache.get(cache_key)
-    if solver is None:
-        solver = local_mpc_module._ReusableLocalMPCSolver(horizon=horizon, battery_capacity_kwh=float(battery_capacity_kwh), p_max_kw=float(p_max_kw), dt_hours=float(dt_hours), efficiency=float(efficiency), soc_min=float(soc_min), soc_max=float(soc_max), export_subsidy_eur_per_kwh=float(export_subsidy_eur_per_kwh))
-        cache[cache_key] = solver
-        stats['solver_build_count'] = float(stats['solver_build_count']) + 1.0
-    else:
-        stats['solver_reuse_count'] = float(stats['solver_reuse_count']) + 1.0
-    return solver, stats
-
-
-def _clip_global_oracle_battery_power_kw(env, battery_power_kw: np.ndarray) -> np.ndarray:
-    battery_power_kw = np.asarray(battery_power_kw, dtype=np.float32)
-    e_t = np.asarray(env.soc, dtype=np.float32) * np.asarray(env.agent_c_bat, dtype=np.float32)
-    e_min = float(env.soc_min) * np.asarray(env.agent_c_bat, dtype=np.float32)
-    e_max = float(env.soc_max) * np.asarray(env.agent_c_bat, dtype=np.float32)
-    p_max = np.asarray(env.agent_p_max, dtype=np.float32)
-    eff = max(float(env.eff), 1e-06)
-    p_max_charge = np.minimum(p_max, np.maximum(0.0, (e_max - e_t) / (eff * float(env.dt))))
-    p_max_discharge = np.minimum(p_max, np.maximum(0.0, (e_t - e_min) * eff / float(env.dt)))
-    return np.clip(battery_power_kw, -p_max_discharge, p_max_charge).astype(np.float32)
-
-
-def _assemble_global_oracle_actions(env, battery_power_kw: np.ndarray, pv_curtail_kw: np.ndarray) -> tuple[list[np.ndarray], np.ndarray]:
-    clipped_battery_kw = _clip_global_oracle_battery_power_kw(env, battery_power_kw)
-    pv_raw_kw = np.maximum(np.asarray(env.get_signal_step('pv'), dtype=np.float32), 0.0)
-    clipped_curtail_kw = np.minimum(np.maximum(np.asarray(pv_curtail_kw, dtype=np.float32), 0.0), pv_raw_kw)
-    p_max_kw = np.maximum(np.asarray(env.agent_p_max, dtype=np.float32), 1e-06)
-    battery_action = np.clip(clipped_battery_kw / p_max_kw, -1.0, 1.0).astype(np.float32)
-    pv_utilization = np.ones_like(pv_raw_kw, dtype=np.float32)
-    valid_mask = pv_raw_kw > 1e-06
-    pv_utilization[valid_mask] = 1.0 - clipped_curtail_kw[valid_mask] / pv_raw_kw[valid_mask]
-    pv_action = np.clip(2.0 * pv_utilization - 1.0, -1.0, 1.0).astype(np.float32)
-    action_array = np.stack([battery_action, pv_action], axis=-1).astype(np.float32)
-    return [action_array[agent_idx].copy() for agent_idx in range(env.n)], action_array
-
-
-def _mpc_policy(env, obs: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray]]:
-    from controllers.madrl.safety_projector import build_safety_local_numpy, compute_action_gap_metrics_numpy
-    from scripts.utils.price_protocol import derive_import_price_seq, get_import_price_markup
-    requested_battery_kw = np.zeros((env.n,), dtype=np.float32)
-    requested_pv_curtail_kw = np.zeros((env.n,), dtype=np.float32)
-    wholesale_price_seq = np.asarray(obs[WHOLESALE_PRICE_SEQ_FIELD], dtype=np.float32)
-    import_price_seq = derive_import_price_seq(wholesale_price_seq, markup_eur_per_kwh=float(getattr(env, 'import_price_markup_eur_per_kwh', get_import_price_markup(env))))
-    load_seq = np.asarray(obs['load_seq'], dtype=np.float32)
-    pv_seq = np.asarray(obs['pv_seq'], dtype=np.float32)
-    export_subsidy_eur_per_kwh = float(getattr(env.reward_fn, 'export_subsidy_eur_per_kwh', 0.079))
-    for agent_idx in range(env.n):
-        solver, solver_stats = _get_local_mpc_solver(env, agent_idx=agent_idx, import_price_seq=import_price_seq, battery_capacity_kwh=float(env.agent_c_bat[agent_idx]), p_max_kw=float(env.agent_p_max[agent_idx]), dt_hours=float(env.dt), efficiency=float(env.eff), soc_min=float(env.soc_min), soc_max=float(env.soc_max), export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh)
-        solve_result = solver.solve_full_horizon(import_price_seq=import_price_seq, load_seq=load_seq[agent_idx], pv_seq=pv_seq[agent_idx], soc=float(env.soc[agent_idx]), pv_curtail_upper_kw=np.maximum(pv_seq[agent_idx], 0.0).astype(np.float32, copy=False))
-        if not bool(solve_result.feasible):
-            raise RuntimeError(f'Local MPC returned an infeasible or unbounded full-horizon solution for agent {agent_idx}. This usually means the relaxed continuous local MPC formulation is not properly bounded on the current price window.')
-        solver_stats['solve_count'] = float(solver_stats['solve_count']) + 1.0
-        solver_stats['solve_time_sec_total'] = float(solver_stats['solve_time_sec_total']) + float(solve_result.solve_time_sec)
-        requested_battery_kw[agent_idx] = np.float32(solve_result.signed_battery_kw[0]) if solve_result.signed_battery_kw.size else np.float32(0.0)
-        requested_pv_curtail_kw[agent_idx] = np.float32(solve_result.pv_curtail_kw[0]) if solve_result.pv_curtail_kw.size else np.float32(0.0)
-    actions, action_array = _assemble_global_oracle_actions(env, battery_power_kw=requested_battery_kw, pv_curtail_kw=requested_pv_curtail_kw)
-    safety_local = build_safety_local_numpy(soc=np.asarray(env.soc, dtype=np.float32), load_raw=np.asarray(env.get_signal_step('load'), dtype=np.float32), pv_raw=np.asarray(env.get_signal_step('pv'), dtype=np.float32), battery_capacity_kwh=np.asarray(env.agent_c_bat, dtype=np.float32), p_max_kw=np.asarray(env.agent_p_max, dtype=np.float32))
-    return actions, compute_action_gap_metrics_numpy(safety_local, action_array, action_array)
-
-
-def collect_madrl_rollout(cfg, *, model_root=None, algorithm: str | None=None, episode_tag: int | None=None, experiment_name: str='grid_mainline', checkpoint_root=None, label: str | None=None, episode_indices: list[int] | None=None):
-    from scripts.mainline_madrl import load_madrl_controller
-    from scripts.utils.grid_notebook_workflow import collect_controller_rollout, resolve_evaluation_mode, resolve_prediction_mode_from_forecast_backend
-    prediction_mode = resolve_prediction_mode_from_forecast_backend(cfg.forecast.type)
-    loaded = load_madrl_controller(cfg, model_root, algorithm=algorithm, episode_tag=episode_tag, device=cfg.runtime.device, prediction_mode=prediction_mode, experiment_name=experiment_name, checkpoint_root=checkpoint_root)
-    return collect_controller_rollout(loaded['cfg'], label=label or f'DRL ({resolve_evaluation_mode(prediction_mode)})', controller=loaded['controller'], episode_indices=episode_indices)
-
-
-def collect_local_mpc_rollout(cfg, *, prediction_mode: str, label: str | None=None):
-    from scripts.utils.grid_notebook_workflow import PERFECT_PREDICTION_MODE, build_comparison_cfg, collect_controller_rollout, normalize_prediction_mode
-    comparison_cfg = build_comparison_cfg(cfg, prediction_mode=prediction_mode)
-    resolved_mode = normalize_prediction_mode(prediction_mode)
-    rollout_label = label or (LOCAL_MPC_PERFECT_LABEL if resolved_mode == PERFECT_PREDICTION_MODE else LOCAL_MPC_LSTM_LABEL)
-    rollout = collect_controller_rollout(comparison_cfg, label=rollout_label, action_fn=_mpc_policy)
-    if not rollout.step_df.empty and {'purchase_cost_total', 'export_subsidy_total'}.issubset(rollout.step_df.columns):
-        rollout.step_df['objective_total'] = rollout.step_df['purchase_cost_total'].astype(float) - rollout.step_df['export_subsidy_total'].astype(float)
-    if not rollout.agent_df.empty and {'purchase_cost', 'export_subsidy'}.issubset(rollout.agent_df.columns):
-        rollout.agent_df['objective_total'] = rollout.agent_df['purchase_cost'].astype(float) - rollout.agent_df['export_subsidy'].astype(float)
-    if not rollout.summary.empty and {'purchase_cost', 'export_subsidy'}.issubset(rollout.summary.columns):
-        rollout.summary['objective_total'] = rollout.summary['purchase_cost'].astype(float) - rollout.summary['export_subsidy'].astype(float)
-    rollout.meta['local_mpc_price_mode'] = 'import_adjusted'
-    rollout.meta['local_mpc_objective_mode'] = 'economic_only'
-    return rollout
-
-
-def expand_episode_indices(full_input: Any) -> np.ndarray:
-    lengths = np.asarray(full_input.episode_lengths, dtype=np.int32).reshape(-1)
-    indices = np.asarray(full_input.episode_indices, dtype=np.int32).reshape(-1)
-    if lengths.size != indices.size:
-        raise ValueError('episode_lengths and episode_indices must have the same length.')
-    pieces = [np.full((int(length),), int(episode_idx), dtype=np.int32) for length, episode_idx in zip(lengths.tolist(), indices.tolist(), strict=False) if int(length) > 0]
-    return np.concatenate(pieces, axis=0) if pieces else np.zeros((0,), dtype=np.int32)
-
-
-def _require_solution_matrix(value: Any, name: str) -> np.ndarray:
-    if value is None:
-        raise ValueError(f"Result is missing required solution field '{name}'.")
-    return np.asarray(value, dtype=np.float32)
-
-
-def validate_misocp_result_schema(result: Any) -> None:
-    required_fields = ('agent_import_mw', 'agent_export_mw', 'agent_net_grid_mw', 'agent_purchase_cost_eur', 'agent_export_subsidy_eur', 'agent_net_cost_eur')
-    missing_fields = [field for field in required_fields if not hasattr(result, field)]
-    if missing_fields:
-        missing_display = ', '.join(missing_fields)
-        raise ValueError(f"solve_result uses an outdated MISOCPResult schema; missing fields: {missing_display}. This usually means the notebook kernel still holds an older 'controllers.mpc.global_socp_mpc' module. Re-run the first import cell and the solve cell, or restart the kernel before rebuilding notebook diagnostics.")
-
-
-def _timestamps_from_full_input(full_input: Any) -> pd.Index:
-    raw = pd.Index([str(value) for value in tuple(full_input.timestamps)], name='timestamp')
-    parsed = pd.to_datetime(raw, errors='coerce')
-    return parsed if parsed.notna().all() else raw
-
-
-def _line_loading_max(line_loading_pct: np.ndarray, horizon_steps: int) -> np.ndarray:
-    if line_loading_pct.size == 0:
-        return np.zeros((horizon_steps,), dtype=np.float32)
-    return np.max(line_loading_pct, axis=0).astype(np.float32)
-
-
-def _fixed_feeder_components_from_problem(problem: Any) -> tuple[float, float]:
-    fixed_active_kw = np.asarray(problem.network.p_base_mw, dtype=np.float32).reshape(-1) * 1000.0
-    fixed_load_kw = float(np.clip(fixed_active_kw, 0.0, None).sum())
-    fixed_generation_kw = float(np.clip(-fixed_active_kw, 0.0, None).sum())
-    return (fixed_load_kw, fixed_generation_kw)
-
-
-def format_solver_summary(result: Any, *, total_steps: int | None=None, episode_count: int | None=None) -> pd.Series:
-    horizon_steps = int(total_steps if total_steps is not None else getattr(result, 'horizon_steps', 0))
-    summary_note = ''
-    if bool(getattr(result, 'time_limit_feasible', False)):
-        summary_note = 'Reached time limit with an incumbent; objective is feasible but not proven optimal.'
-    elif not bool(getattr(result, 'has_solution', False)):
-        summary_note = 'Solver returned no incumbent; inspect the raw log for the failure mode.'
-    total_runtime_sec = float(getattr(result, 'solve_time_sec', float('nan')))
-    chunk_summaries = list(getattr(result, 'chunk_summaries', []) or [])
-    finite_chunk_runtimes = [float(item.get('solve_time_sec', float('nan'))) for item in chunk_summaries if np.isfinite(float(item.get('solve_time_sec', float('nan'))))]
-    model_size = getattr(result, 'model_size', None)
-    return pd.Series({'status_code': int(result.status_code), 'status_label': str(result.status_label), 'has_solution': bool(result.has_solution), 'time_limit_feasible': bool(result.time_limit_feasible), 'solve_mode': str(result.solve_mode), 'horizon_steps': int(horizon_steps), 'episode_count': np.nan if episode_count is None else int(episode_count), 'solve_time_sec': float(result.solve_time_sec), 'total_runtime_sec': total_runtime_sec, 'max_chunk_runtime_sec': float(max(finite_chunk_runtimes)) if finite_chunk_runtimes else float('nan'), 'mip_gap': float(result.mip_gap), 'best_bound': float(result.best_bound), 'objective_value': float(result.objective_value), 'sol_count': int(getattr(result, 'sol_count', 0)), 'node_count': float(getattr(result, 'node_count', float('nan'))), 'iter_count': float(getattr(result, 'iter_count', float('nan'))), 'bar_iter_count': float(getattr(result, 'bar_iter_count', float('nan'))), 'is_near_optimal': bool(str(getattr(result, 'solve_mode', '')) == 'chunked_window'), 'economics_scope': 'agent_only', 'physical_tiebreaker_eur': float(getattr(result, 'physical_tiebreaker_eur', float('nan'))), 'physical_tiebreaker_weight': float(getattr(result, 'physical_tiebreaker_weight', float('nan'))), 'stage1_primary_objective_eur': float(getattr(result, 'stage1_primary_objective_eur', float('nan'))), 'num_vars': int(getattr(model_size, 'num_vars', 0)), 'num_binary_vars': int(getattr(model_size, 'num_binary_vars', 0)), 'num_linear_constraints': int(getattr(model_size, 'num_linear_constraints', 0)), 'num_quadratic_constraints': int(getattr(model_size, 'num_quadratic_constraints', 0)), 'solver_note': summary_note}, name='solver_summary')
-
-
-def build_full_horizon_step_df(problem: Any, full_input: Any, result: Any) -> pd.DataFrame:
-    validate_misocp_result_schema(result)
-    load_seq = np.asarray(full_input.load_seq, dtype=np.float32)
-    pv_seq = np.asarray(full_input.pv_seq, dtype=np.float32)
-    wholesale_price_seq = np.asarray(full_input.wholesale_price_seq, dtype=np.float32).reshape(-1)
-    import_price_seq = np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(-1)
-    episode_idx = expand_episode_indices(full_input)
-    timestamps = _timestamps_from_full_input(full_input)
-    horizon_steps = int(import_price_seq.shape[0])
-    if episode_idx.shape[0] != horizon_steps:
-        raise ValueError('Expanded episode index series does not match the full-horizon length.')
-    if load_seq.shape[1] != horizon_steps or pv_seq.shape[1] != horizon_steps:
-        raise ValueError('load_seq and pv_seq must match the full-horizon length.')
-    if wholesale_price_seq.shape[0] != horizon_steps:
-        raise ValueError('wholesale_price_seq must match the full-horizon length.')
-    battery_charge_mw = _require_solution_matrix(result.battery_charge_mw, 'battery_charge_mw')
-    battery_discharge_mw = _require_solution_matrix(result.battery_discharge_mw, 'battery_discharge_mw')
-    pv_curtail_mw = _require_solution_matrix(result.pv_curtail_mw, 'pv_curtail_mw')
-    bus_vm_pu = _require_solution_matrix(result.bus_vm_pu, 'bus_vm_pu')
-    energy_mwh = _require_solution_matrix(result.energy_mwh, 'energy_mwh')
-    line_loading_pct = _require_solution_matrix(result.line_loading_pct, 'line_loading_pct')
-    trafo_loading_pct = _require_solution_matrix(result.trafo_loading_pct, 'trafo_loading_pct')
-    root_import_mw = _require_solution_matrix(result.root_import_mw, 'root_import_mw').reshape(-1)
-    root_export_mw = _require_solution_matrix(result.root_export_mw, 'root_export_mw').reshape(-1)
-    agent_import_mw = _require_solution_matrix(result.agent_import_mw, 'agent_import_mw')
-    agent_export_mw = _require_solution_matrix(result.agent_export_mw, 'agent_export_mw')
-    agent_net_grid_mw = _require_solution_matrix(result.agent_net_grid_mw, 'agent_net_grid_mw')
-    fixed_load_kw, fixed_generation_kw = _fixed_feeder_components_from_problem(problem)
-    agent_load_kw = load_seq.sum(axis=0).astype(np.float32)
-    pv_raw_kw = pv_seq.sum(axis=0).astype(np.float32)
-    pv_curtail_kw = (pv_curtail_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    pv_effective_kw = np.maximum(pv_raw_kw - pv_curtail_kw, 0.0).astype(np.float32)
-    battery_charge_kw = (battery_charge_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    battery_discharge_kw = (battery_discharge_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    simultaneous_kw = (np.minimum(battery_charge_mw, battery_discharge_mw) * 1000.0).astype(np.float32)
-    grid_import_kw = (root_import_mw * 1000.0).astype(np.float32)
-    grid_export_kw = (root_export_mw * 1000.0).astype(np.float32)
-    root_net_exchange_kw = (grid_import_kw - grid_export_kw).astype(np.float32)
-    agent_import_kw_total = (agent_import_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    agent_export_kw_total = (agent_export_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    agent_net_exchange_kw_total = (agent_net_grid_mw.sum(axis=0) * 1000.0).astype(np.float32)
-    agent_raw_net_load_kw = (agent_load_kw - pv_raw_kw).astype(np.float32)
-    agent_effective_net_load_kw = (agent_load_kw - pv_effective_kw).astype(np.float32)
-    agent_post_action_net_load_kw = (agent_effective_net_load_kw + battery_charge_kw - battery_discharge_kw).astype(np.float32)
-    feeder_raw_net_load_kw = (agent_raw_net_load_kw + fixed_load_kw - fixed_generation_kw).astype(np.float32)
-    feeder_effective_net_load_kw = (agent_effective_net_load_kw + fixed_load_kw - fixed_generation_kw).astype(np.float32)
-    feeder_post_action_net_load_kw = (agent_post_action_net_load_kw + fixed_load_kw - fixed_generation_kw).astype(np.float32)
-    balance_supply_kw = (pv_effective_kw + fixed_generation_kw + battery_discharge_kw + grid_import_kw).astype(np.float32)
-    balance_demand_kw = (agent_load_kw + fixed_load_kw + battery_charge_kw + grid_export_kw).astype(np.float32)
-    balance_residual_kw = (balance_supply_kw - balance_demand_kw).astype(np.float32)
-    agent_export_rate = float(result.agent_export_subsidy_eur) / max(float(np.sum(agent_export_kw_total * np.float32(problem.dt_hours))), 1e-06) if float(np.sum(agent_export_kw_total)) > 0.0 else 0.0
-    feeder_export_rate = float(result.feeder_export_subsidy_eur) / max(float(np.sum(grid_export_kw * np.float32(problem.dt_hours))), 1e-06) if float(np.sum(grid_export_kw)) > 0.0 else 0.0
-    agent_purchase_cost_eur_step = (agent_import_kw_total * np.float32(problem.dt_hours) * import_price_seq.astype(np.float32)).astype(np.float32)
-    agent_export_subsidy_eur_step = (agent_export_kw_total * np.float32(problem.dt_hours) * np.float32(agent_export_rate)).astype(np.float32)
-    agent_net_cost_eur_step = (agent_purchase_cost_eur_step - agent_export_subsidy_eur_step).astype(np.float32)
-    feeder_purchase_cost_eur_step = (grid_import_kw * np.float32(problem.dt_hours) * import_price_seq.astype(np.float32)).astype(np.float32)
-    feeder_export_subsidy_eur_step = (grid_export_kw * np.float32(problem.dt_hours) * np.float32(feeder_export_rate)).astype(np.float32)
-    feeder_net_cost_eur_step = (feeder_purchase_cost_eur_step - feeder_export_subsidy_eur_step).astype(np.float32)
-    agent_root_gap_kw = (root_net_exchange_kw - agent_post_action_net_load_kw).astype(np.float32)
-    return pd.DataFrame({'timestamp': timestamps, 'episode_idx': episode_idx, 'global_step': np.arange(horizon_steps, dtype=np.int32), 'wholesale_price': wholesale_price_seq.astype(np.float32), IMPORT_PRICE_COLUMN: import_price_seq.astype(np.float32), 'fixed_load_kw': np.full((horizon_steps,), fixed_load_kw, dtype=np.float32), 'fixed_generation_kw': np.full((horizon_steps,), fixed_generation_kw, dtype=np.float32), 'agent_load_kw': agent_load_kw, 'pv_raw_kw': pv_raw_kw, 'pv_curtail_kw': pv_curtail_kw, 'pv_effective_kw': pv_effective_kw, 'battery_charge_kw': battery_charge_kw, 'battery_discharge_kw': battery_discharge_kw, 'agent_import_kw_total': agent_import_kw_total, 'agent_export_kw_total': agent_export_kw_total, 'agent_net_exchange_kw_total': agent_net_exchange_kw_total, 'grid_import_kw': grid_import_kw, 'grid_export_kw': grid_export_kw, 'agent_purchase_cost_eur_step': agent_purchase_cost_eur_step, 'agent_export_subsidy_eur_step': agent_export_subsidy_eur_step, 'agent_net_cost_eur_step': agent_net_cost_eur_step, 'feeder_purchase_cost_eur_step': feeder_purchase_cost_eur_step, 'feeder_export_subsidy_eur_step': feeder_export_subsidy_eur_step, 'feeder_net_cost_eur_step': feeder_net_cost_eur_step, 'agent_raw_net_load_kw': agent_raw_net_load_kw, 'agent_effective_net_load_kw': agent_effective_net_load_kw, 'agent_post_action_net_load_kw': agent_post_action_net_load_kw, 'feeder_raw_net_load_kw': feeder_raw_net_load_kw, 'feeder_effective_net_load_kw': feeder_effective_net_load_kw, 'feeder_post_action_net_load_kw': feeder_post_action_net_load_kw, 'raw_net_load_kw': feeder_raw_net_load_kw, 'effective_net_load_kw': feeder_effective_net_load_kw, 'post_action_net_load_kw': feeder_post_action_net_load_kw, 'root_net_exchange_kw': root_net_exchange_kw, 'agent_root_gap_kw': agent_root_gap_kw, 'balance_supply_kw': balance_supply_kw, 'balance_demand_kw': balance_demand_kw, 'balance_residual_kw': balance_residual_kw, 'network_loss_kw_estimate': balance_residual_kw, 'aggregate_stored_energy_kwh': np.sum(energy_mwh[:, 1:], axis=0).astype(np.float32) * 1000.0, 'trafo_limit_reference_kw': np.full((horizon_steps,), float(problem.trafo_limit_mva) * 1000.0, dtype=np.float32), 'min_vm_pu': np.min(bus_vm_pu, axis=0).astype(np.float32), 'mean_vm_pu': np.mean(bus_vm_pu, axis=0).astype(np.float32), 'max_vm_pu': np.max(bus_vm_pu, axis=0).astype(np.float32), 'max_line_loading_pct': _line_loading_max(line_loading_pct, horizon_steps), 'trafo_loading_pct': np.asarray(trafo_loading_pct, dtype=np.float32).reshape(-1)[:horizon_steps], 'simultaneous_kw_total': np.sum(simultaneous_kw, axis=0).astype(np.float32)})
-
-
-def build_chunk_boundary_soc_df(problem: Any, full_input: Any, result: Any) -> pd.DataFrame:
-    columns = ['boundary_step', 'boundary_timestamp', 'chunk_left', 'chunk_right', 'max_abs_soc_kink', 'mean_abs_soc_kink']
-    chunk_summaries = list(getattr(result, 'chunk_summaries', []) or [])
-    if len(chunk_summaries) < 2:
-        return pd.DataFrame(columns=columns)
-    energy_mwh = _require_solution_matrix(result.energy_mwh, 'energy_mwh')
-    soc = energy_mwh / np.maximum(np.asarray(problem.capacity_mwh, dtype=np.float32).reshape(-1, 1), 1e-06)
-    timestamps = _timestamps_from_full_input(full_input)
-    horizon_steps = int(np.asarray(full_input.import_price_seq, dtype=np.float32).reshape(-1).size)
-    rows = [{'boundary_step': boundary_step, 'boundary_timestamp': timestamps[boundary_step], 'chunk_left': int(left_summary['chunk_idx']), 'chunk_right': int(right_summary['chunk_idx']), 'max_abs_soc_kink': float(np.max(kink)) if kink.size else 0.0, 'mean_abs_soc_kink': float(np.mean(kink)) if kink.size else 0.0} for left_summary, right_summary in zip(chunk_summaries[:-1], chunk_summaries[1:], strict=False) for boundary_step in [int(left_summary['end_step'])] if 0 < boundary_step < horizon_steps - 1 for kink in [np.abs((soc[:, boundary_step + 1] - soc[:, boundary_step]) - (soc[:, boundary_step] - soc[:, boundary_step - 1])).astype(np.float32)]]
-    return pd.DataFrame(rows, columns=columns)
-
-
-def _linear_fit_summary(x_values: Any, y_values: Any) -> dict[str, float]:
-    x_array = np.asarray(x_values, dtype=np.float64).reshape(-1)
-    y_array = np.asarray(y_values, dtype=np.float64).reshape(-1)
-    finite_mask = np.isfinite(x_array) & np.isfinite(y_array)
-    if int(np.sum(finite_mask)) < 2 or np.allclose(x_array[finite_mask], x_array[finite_mask][0], atol=1e-12, rtol=0.0):
-        return {'k': float('nan'), 'b': float('nan'), 'r2': float('nan')}
-    slope, intercept = np.polyfit(x_array[finite_mask], y_array[finite_mask], deg=1)
-    y_pred = slope * x_array[finite_mask] + intercept
-    ss_res = float(np.sum((y_array[finite_mask] - y_pred) ** 2))
-    ss_tot = float(np.sum((y_array[finite_mask] - float(np.mean(y_array[finite_mask]))) ** 2))
-    return {'k': float(slope), 'b': float(intercept), 'r2': 1.0 if ss_tot <= 1e-12 and ss_res <= 1e-12 else float('nan') if ss_tot <= 1e-12 else float(1.0 - ss_res / ss_tot)}
-
-
-def build_soc_relaxation_diagnostics(problem: Any, full_input: Any, result: Any, *, top_k: int=10) -> dict[str, Any]:
-    branch_p_pu = _require_solution_matrix(result.branch_p_pu, 'branch_p_pu')
-    branch_q_pu = _require_solution_matrix(result.branch_q_pu, 'branch_q_pu')
-    branch_i2_pu = _require_solution_matrix(result.branch_i2_pu, 'branch_i2_pu')
-    bus_v_sq = _require_solution_matrix(result.bus_v_sq, 'bus_v_sq')
-    parent_pos = np.asarray(problem.network.branch_parent_pos, dtype=np.int32).reshape(-1)
-    child_pos = np.asarray(problem.network.branch_child_pos, dtype=np.int32).reshape(-1)
-    bus_ids = np.asarray(problem.network.bus_ids, dtype=np.int32).reshape(-1)
-    timestamps = _timestamps_from_full_input(full_input)
-    episode_idx = expand_episode_indices(full_input)
-    v_parent_sq = np.asarray(bus_v_sq[parent_pos, :], dtype=np.float32)
-    soc_slack = np.asarray(branch_i2_pu - (branch_p_pu ** 2 + branch_q_pu ** 2) / np.maximum(v_parent_sq, 1e-06), dtype=np.float32)
-    finite_slack = soc_slack[np.isfinite(soc_slack)]
-    p95_soc_slack = float(np.percentile(finite_slack, 95.0)) if finite_slack.size else float('nan')
-    step_df = pd.DataFrame({'global_step': np.arange(branch_p_pu.shape[1], dtype=np.int32), 'timestamp': timestamps, 'episode_idx': episode_idx.astype(np.int32), 'soc_slack_max': np.max(soc_slack, axis=0).astype(np.float32), 'soc_slack_mean': np.mean(soc_slack, axis=0).astype(np.float32), 'soc_slack_p95_global': np.full((branch_p_pu.shape[1],), p95_soc_slack, dtype=np.float32)})
-    worst_rows = [{'branch_idx': int(branch_idx), 'global_step': int(step_idx), 'timestamp': timestamps[int(step_idx)], 'episode_idx': int(episode_idx[int(step_idx)]), 'parent_bus_id': int(bus_ids[int(parent_pos[int(branch_idx)])]), 'child_bus_id': int(bus_ids[int(child_pos[int(branch_idx)])]), 'v_parent_sq_pu': float(v_parent_sq[int(branch_idx), int(step_idx)]), 'branch_p_pu': float(branch_p_pu[int(branch_idx), int(step_idx)]), 'branch_q_pu': float(branch_q_pu[int(branch_idx), int(step_idx)]), 'branch_i2_pu': float(branch_i2_pu[int(branch_idx), int(step_idx)]), 'soc_slack': float(soc_slack[int(branch_idx), int(step_idx)])} for flat_idx in np.argsort(soc_slack.reshape(-1))[::-1][:max(int(top_k), 0)] for branch_idx, step_idx in [np.unravel_index(int(flat_idx), soc_slack.shape)]]
-    return {'step_df': step_df, 'worst_df': pd.DataFrame(worst_rows), 'summary': pd.Series({'max_soc_slack': float(np.max(finite_slack)) if finite_slack.size else float('nan'), 'mean_soc_slack': float(np.mean(finite_slack)) if finite_slack.size else float('nan'), 'p95_soc_slack': p95_soc_slack, 'soc_relaxation_is_tight': bool(np.isfinite(p95_soc_slack) and p95_soc_slack < _SOC_SLACK_TIGHT_P95_THRESHOLD)}, name='soc_relaxation_summary'), 'soc_slack': soc_slack}
-
-
-def build_root_q_diagnostic_df(problem: Any, full_input: Any, result: Any) -> pd.DataFrame:
-    branch_i2_pu = _require_solution_matrix(result.branch_i2_pu, 'branch_i2_pu')
-    root_q_kvar = _require_solution_matrix(result.root_q_kvar, 'root_q_kvar').reshape(-1)
-    branch_x_pu = np.asarray(problem.network.branch_x_pu, dtype=np.float32).reshape(-1)
-    timestamps = _timestamps_from_full_input(full_input)
-    episode_idx = expand_episode_indices(full_input)
-    background_q_base_total_kvar = float(np.sum(np.asarray(problem.network.q_base_mvar, dtype=np.float32)) * 1000.0)
-    network_q_loss_proxy_kvar = (np.sum(branch_x_pu[:, None] * branch_i2_pu, axis=0) * np.float32(float(problem.network.s_base_mva) * 1000.0)).astype(np.float32)
-    return pd.DataFrame({'global_step': np.arange(root_q_kvar.shape[0], dtype=np.int32), 'timestamp': timestamps, 'episode_idx': episode_idx.astype(np.int32), 'background_q_base_total_kvar': np.full((root_q_kvar.shape[0],), background_q_base_total_kvar, dtype=np.float32), 'network_q_loss_proxy_kvar': network_q_loss_proxy_kvar, 'root_q_kvar': root_q_kvar.astype(np.float32), 'root_q_residual_kvar': (root_q_kvar.astype(np.float32) - background_q_base_total_kvar - network_q_loss_proxy_kvar).astype(np.float32)})
-
-
-def build_misocp_validation_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    records = []
-    for row in rows:
-        record = dict(row)
-        available = bool(record.get('pp_root_p_available', np.isfinite(float(record.get('pp_root_p_kw', float('nan'))))))
-        record['pp_root_p_available'] = available
-        record['max_vm_abs_err_pu'] = float(np.max(np.abs(np.asarray(record.get('misocp_vm_pu', []), dtype=np.float32) - np.asarray(record.get('pp_vm_pu', []), dtype=np.float32)))) if np.asarray(record.get('misocp_vm_pu', []), dtype=np.float32).size and np.asarray(record.get('misocp_vm_pu', []), dtype=np.float32).shape == np.asarray(record.get('pp_vm_pu', []), dtype=np.float32).shape else float('nan')
-        record['max_line_loading_abs_err_pct'] = float(np.max(np.abs(np.asarray(record.get('misocp_line_loading_pct', []), dtype=np.float32) - np.asarray(record.get('pp_line_loading_pct', []), dtype=np.float32)))) if np.asarray(record.get('misocp_line_loading_pct', []), dtype=np.float32).size and np.asarray(record.get('misocp_line_loading_pct', []), dtype=np.float32).shape == np.asarray(record.get('pp_line_loading_pct', []), dtype=np.float32).shape else float('nan')
-        record['trafo_loading_abs_err_pct'] = float(np.max(np.abs(np.asarray(record.get('misocp_trafo_loading_pct', []), dtype=np.float32) - np.asarray(record.get('pp_trafo_loading_pct', []), dtype=np.float32)))) if np.asarray(record.get('misocp_trafo_loading_pct', []), dtype=np.float32).size and np.asarray(record.get('misocp_trafo_loading_pct', []), dtype=np.float32).shape == np.asarray(record.get('pp_trafo_loading_pct', []), dtype=np.float32).shape else float('nan')
-        record['root_p_abs_err_kw'] = float(abs(float(record.get('root_p_kw', float('nan'))) - float(record.get('pp_root_p_kw', float('nan'))))) if available and np.isfinite(float(record.get('pp_root_p_kw', float('nan')))) else float('nan')
-        record['root_s_abs_err_kva'] = float(abs(float(record.get('misocp_root_s_kva', float('nan'))) - float(record.get('pp_root_s_kva', float('nan'))))) if np.isfinite(float(record.get('misocp_root_s_kva', float('nan')))) and np.isfinite(float(record.get('pp_root_s_kva', float('nan')))) else float('nan')
-        record['root_power_validation_unavailable'] = bool(not available)
-        limits = [record['max_vm_abs_err_pu'] <= 0.01 if np.isfinite(record['max_vm_abs_err_pu']) else False, record['max_line_loading_abs_err_pct'] <= 1.0 if np.isfinite(record['max_line_loading_abs_err_pct']) else False, record['trafo_loading_abs_err_pct'] <= 1.0 if np.isfinite(record['trafo_loading_abs_err_pct']) else False, (record['root_p_abs_err_kw'] <= 1.0) if np.isfinite(record['root_p_abs_err_kw']) else True]
-        record['within_tolerance'] = bool(all(limits))
-        records.append(record)
-    return pd.DataFrame(records)
-
-
-def summarize_misocp_validation(validation_df: pd.DataFrame) -> pd.Series:
-    if validation_df.empty:
-        return pd.Series({'steps_outside_tolerance': 0, 'pp_root_p_available_ratio': float('nan'), 'root_power_validation_unavailable': False, 'root_p_fit_k': float('nan'), 'root_p_fit_b': float('nan'), 'root_p_fit_r2': float('nan'), 'root_s_fit_k': float('nan'), 'root_s_fit_b': float('nan'), 'root_s_fit_r2': float('nan'), 'max_solver_feeder_gap_kw': float('nan'), 'mean_abs_solver_feeder_gap_kw': float('nan'), 'max_replay_feeder_gap_kw': float('nan'), 'mean_abs_replay_feeder_gap_kw': float('nan'), 'p95_soc_slack': float('nan'), 'root_p_fit_interpretation': 'insufficient_data'}, name='misocp_validation_summary')
-    root_p_fit = _linear_fit_summary(validation_df.get('root_p_kw', pd.Series(dtype=float)), validation_df.get('pp_root_p_kw', pd.Series(dtype=float)))
-    root_s_fit = _linear_fit_summary(validation_df.get('misocp_root_s_kva', pd.Series(dtype=float)), validation_df.get('pp_root_s_kva', pd.Series(dtype=float)))
-    interpretation = 'insufficient_data' if not all((np.isfinite(root_p_fit[key]) for key in ('k', 'b', 'r2'))) else 'consistent' if abs(root_p_fit['k'] - 1.0) <= 0.05 and abs(root_p_fit['b']) <= 1.0 and root_p_fit['r2'] > 0.99 else 'nonlinear_or_noise_dominated' if root_p_fit['r2'] < 0.9 else 'systematic_linear_bias'
-    return pd.Series({'steps_outside_tolerance': int((~validation_df.get('within_tolerance', pd.Series(False, index=validation_df.index)).astype(bool)).sum()), 'pp_root_p_available_ratio': float(validation_df.get('pp_root_p_available', pd.Series(False, index=validation_df.index)).astype(bool).mean()), 'root_power_validation_unavailable': bool((~validation_df.get('pp_root_p_available', pd.Series(True, index=validation_df.index)).astype(bool)).any()), 'root_p_fit_k': root_p_fit['k'], 'root_p_fit_b': root_p_fit['b'], 'root_p_fit_r2': root_p_fit['r2'], 'root_s_fit_k': root_s_fit['k'], 'root_s_fit_b': root_s_fit['b'], 'root_s_fit_r2': root_s_fit['r2'], 'max_solver_feeder_gap_kw': float(np.nanmax(np.abs(validation_df.get('solver_feeder_gap_kw', pd.Series(dtype=float)).to_numpy(dtype=np.float64)))) if 'solver_feeder_gap_kw' in validation_df.columns else float('nan'), 'mean_abs_solver_feeder_gap_kw': float(np.nanmean(np.abs(validation_df.get('solver_feeder_gap_kw', pd.Series(dtype=float)).to_numpy(dtype=np.float64)))) if 'solver_feeder_gap_kw' in validation_df.columns else float('nan'), 'max_replay_feeder_gap_kw': float(np.nanmax(np.abs(validation_df.get('replay_feeder_gap_kw', pd.Series(dtype=float)).to_numpy(dtype=np.float64)))) if 'replay_feeder_gap_kw' in validation_df.columns else float('nan'), 'mean_abs_replay_feeder_gap_kw': float(np.nanmean(np.abs(validation_df.get('replay_feeder_gap_kw', pd.Series(dtype=float)).to_numpy(dtype=np.float64)))) if 'replay_feeder_gap_kw' in validation_df.columns else float('nan'), 'p95_soc_slack': float(np.nanmax(validation_df.get('soc_slack_p95_global', pd.Series(dtype=float)).to_numpy(dtype=np.float64))) if 'soc_slack_p95_global' in validation_df.columns else float('nan'), 'root_p_fit_interpretation': interpretation}, name='misocp_validation_summary')
-
-
-def build_misocp_validation_artifacts(env: Any, problem: Any, full_input: Any, result: Any, *, controller_label: str, export_subsidy: float, agent_profiles: list[str] | tuple[str, ...] | None=None, agent_bus_ids: list[int] | tuple[int, ...] | None=None, v_min_pu: float | None=None, v_max_pu: float | None=None) -> dict[str, Any]:
-    from controllers.madrl.safety_projector import build_safety_local_numpy, compute_action_gap_metrics_numpy, merge_action_info_into_step_info
-    from controllers.mpc.global_socp_mpc import _SIMULTANEOUS_THRESHOLD_RATIO
-    from scripts.utils.grid_notebook_workflow import RolloutResult, _aligned_prediction, _build_rollout_records, _step_timestamp
-    resolved_profiles = list(agent_profiles or [f'agent_{idx}' for idx in range(int(env.n))])
-    resolved_agent_bus_ids = list(agent_bus_ids or getattr(getattr(env, '_grid_core', None), 'agent_bus_ids', []))
-    bus_ids = [int(bus_id) for bus_id in env._grid_core.net.bus.index.tolist()]
-    agent_bus_set = set(resolved_agent_bus_ids)
-    fixed_load_kw, fixed_generation_kw = _fixed_feeder_components_from_problem(problem)
-    trafo_limit_reference_kw = float(problem.trafo_limit_mva) * 1000.0
-    threshold_kw = (_SIMULTANEOUS_THRESHOLD_RATIO * np.asarray(env.agent_p_max, dtype=np.float32)).astype(np.float32)
-    step_rows: list[dict[str, object]] = []
-    agent_rows: list[dict[str, object]] = []
-    grid_rows: list[dict[str, object]] = []
-    diagnostic_rows: list[dict[str, object]] = []
-    carried_soc = np.asarray(full_input.soc_init, dtype=np.float32).copy()
-    timestamps = _timestamps_from_full_input(full_input)
-    soc_relaxation_artifacts = build_soc_relaxation_diagnostics(problem, full_input, result, top_k=20)
-    soc_relaxation_step_df = soc_relaxation_artifacts['step_df']
-    soc_relaxation_worst_df = soc_relaxation_artifacts['worst_df']
-    soc_relaxation_summary = soc_relaxation_artifacts['summary']
-    root_q_diagnostic_df = build_root_q_diagnostic_df(problem, full_input, result)
-    soc_relaxation_lookup = soc_relaxation_step_df.set_index('global_step', drop=False) if not soc_relaxation_step_df.empty else pd.DataFrame()
-    root_q_lookup = root_q_diagnostic_df.set_index('global_step', drop=False) if not root_q_diagnostic_df.empty else pd.DataFrame()
-    reward_cfg = getattr(env, '_reward_cfg', None)
-    soc_pen_weight = float(getattr(reward_cfg, 'w_soc_pen', 0.0))
-    import_price_markup = float(getattr(reward_cfg, IMPORT_PRICE_MARKUP_KEY, 0.0))
-    for episode_list_idx, episode_idx in enumerate(np.asarray(full_input.episode_indices, dtype=np.int32).tolist()):
-        obs, reset_info = env.reset(episode_idx=int(episode_idx))
-        if episode_list_idx > 0:
-            env.soc = carried_soc.copy()
-            obs = env.obs_builder.build(env)
-        raw_obs = env.obs_builder.build_raw(env)
-        previous_raw_obs = None
-        episode_offset = int(np.asarray(full_input.episode_offsets, dtype=np.int32)[episode_list_idx])
-        episode_length = int(np.asarray(full_input.episode_lengths, dtype=np.int32)[episode_list_idx])
-        for step_in_episode in range(episode_length):
-            global_step = episode_offset + step_in_episode
-            timestamp = timestamps[global_step] if global_step < len(timestamps) else _step_timestamp(reset_info, step_in_episode)
-            wholesale_price_pred = _aligned_prediction(previous_raw_obs, raw_obs, WHOLESALE_PRICE_SEQ_FIELD)
-            import_price_pred = float(derive_import_price(wholesale_price_pred, markup_eur_per_kwh=import_price_markup))
-            load_pred = _aligned_prediction(previous_raw_obs, raw_obs, 'load_seq')
-            pv_pred = _aligned_prediction(previous_raw_obs, raw_obs, 'pv_seq')
-            battery_power_kw = ((np.asarray(result.battery_charge_mw[:, global_step], dtype=np.float32) - np.asarray(result.battery_discharge_mw[:, global_step], dtype=np.float32)) * 1000.0).astype(np.float32)
-            pv_curtail_kw = (np.asarray(result.pv_curtail_mw[:, global_step], dtype=np.float32) * 1000.0).astype(np.float32)
-            actions, action_array = _assemble_global_oracle_actions(env, battery_power_kw, pv_curtail_kw)
-            action_info = compute_action_gap_metrics_numpy(build_safety_local_numpy(soc=np.asarray(env.soc, dtype=np.float32), load_raw=np.asarray(env.get_signal_step('load'), dtype=np.float32), pv_raw=np.asarray(env.get_signal_step('pv'), dtype=np.float32), battery_capacity_kwh=np.asarray(env.agent_c_bat, dtype=np.float32), p_max_kw=np.asarray(env.agent_p_max, dtype=np.float32)), action_array, action_array)
-            simultaneous_kw = (np.minimum(np.asarray(result.battery_charge_mw[:, global_step], dtype=np.float32), np.asarray(result.battery_discharge_mw[:, global_step], dtype=np.float32)) * 1000.0).astype(np.float32)
-            simultaneous_mask = simultaneous_kw > threshold_kw
-            action_info.update({'misocp_fallback': np.asarray(0.0, dtype=np.float32), 'misocp_time_limit_feasible': np.asarray(float(result.time_limit_feasible), dtype=np.float32), 'solve_time_sec': np.asarray(float(result.solve_time_sec), dtype=np.float32), 'root_import_kw': np.asarray(float(result.root_import_mw[global_step] * 1000.0), dtype=np.float32), 'root_export_kw': np.asarray(float(result.root_export_mw[global_step] * 1000.0), dtype=np.float32), 'simultaneous_charge_discharge_kw_total': np.asarray(float(np.sum(simultaneous_kw)), dtype=np.float32), 'simultaneous_agent_count': np.asarray(float(np.sum(simultaneous_mask)), dtype=np.float32), 'simultaneous_step_flag': np.asarray(float(np.any(simultaneous_mask)), dtype=np.float32)})
-            next_obs, reward, terminated, truncated, info = env.step(actions)
-            reward_array = np.asarray(reward, dtype=np.float32).reshape(-1)
-            info, action_penalty = merge_action_info_into_step_info(info, action_info, soc_pen_weight=soc_pen_weight, apply_action_penalty=False)
-            reward_array = reward_array - np.asarray(action_penalty, dtype=np.float32)
-            info['reward'] = reward_array.astype(np.float32)
-            del terminated, truncated
-            raw_next_obs = env.obs_builder.build_raw(env) if not bool(info.get('episode_done', False)) else next_obs
-            soc_row = soc_relaxation_lookup.loc[int(global_step)] if not soc_relaxation_lookup.empty else None
-            root_q_row = root_q_lookup.loc[int(global_step)] if not root_q_lookup.empty else None
-            rollout_records = _build_rollout_records(controller_label=controller_label, episode_idx=int(episode_idx), step_in_episode=step_in_episode, timestamp=timestamp, info=info, load_pred=load_pred, pv_pred=pv_pred, wholesale_price_pred=float(wholesale_price_pred), import_price_pred=float(import_price_pred), agent_profiles=resolved_profiles, bus_ids=bus_ids, agent_bus_set=agent_bus_set, dt_hours=float(env.dt), export_subsidy=float(export_subsidy), fixed_load_kw=fixed_load_kw, fixed_generation_kw=fixed_generation_kw, global_step=int(global_step))
-            step_row = rollout_records['step_row']
-            pp_root_p_kw = float(rollout_records['pp_root_p_kw'])
-            pp_root_p_available = bool(step_row['pp_root_p_available'])
-            agent_post_action_net_load_kw = float(step_row['agent_post_action_net_load_kw'])
-            feeder_post_action_net_load_kw = float(step_row['feeder_post_action_net_load_kw'])
-            pp_trafo_loading_pct = rollout_records['pp_trafo_loading_pct']
-            step_row.update({'root_net_exchange_kw': float(result.root_p_kw[global_step]), 'agent_root_gap_kw': float(result.root_p_kw[global_step] - agent_post_action_net_load_kw), 'solver_feeder_gap_kw': float(result.root_p_kw[global_step] - feeder_post_action_net_load_kw), 'replay_feeder_gap_kw': float(pp_root_p_kw - feeder_post_action_net_load_kw) if pp_root_p_available else float('nan'), 'misocp_root_s_kva': float(np.hypot(float(result.root_p_kw[global_step]), float(result.root_q_kvar[global_step]))), 'pp_root_s_kva': float(np.max(pp_trafo_loading_pct) / 100.0 * float(problem.network.s_base_mva) * 1000.0) if pp_trafo_loading_pct.size else float('nan'), 'soc_slack_max': float(soc_row['soc_slack_max']) if soc_row is not None else float('nan'), 'soc_slack_mean': float(soc_row['soc_slack_mean']) if soc_row is not None else float('nan'), 'soc_slack_p95_global': float(soc_relaxation_summary.get('p95_soc_slack', float('nan'))) if not soc_relaxation_summary.empty else float('nan'), 'background_q_base_total_kvar': float(root_q_row['background_q_base_total_kvar']) if root_q_row is not None else float('nan'), 'network_q_loss_proxy_kvar': float(root_q_row['network_q_loss_proxy_kvar']) if root_q_row is not None else float('nan'), 'root_q_residual_kvar': float(root_q_row['root_q_residual_kvar']) if root_q_row is not None else float('nan')})
-            step_rows.append(step_row)
-            diagnostic_rows.append({'controller': controller_label, 'episode_idx': int(episode_idx), 'step': int(step_in_episode), 'timestamp': timestamp, 'solve_time_sec': float(result.solve_time_sec), 'misocp_vm_pu': np.asarray(result.bus_vm_pu[:, global_step], dtype=np.float32).copy(), 'pp_vm_pu': rollout_records['pp_vm_pu'], 'misocp_line_loading_pct': np.asarray(result.line_loading_pct[:, global_step], dtype=np.float32).copy(), 'pp_line_loading_pct': rollout_records['pp_line_loading_pct'], 'misocp_trafo_loading_pct': np.asarray(result.trafo_loading_pct[:, global_step], dtype=np.float32).copy(), 'pp_trafo_loading_pct': pp_trafo_loading_pct, 'root_p_kw': float(result.root_p_kw[global_step]), 'pp_root_p_kw': pp_root_p_kw, 'pp_root_p_available': pp_root_p_available, 'misocp_root_s_kva': float(step_row['misocp_root_s_kva']), 'pp_root_s_kva': float(step_row['pp_root_s_kva']), 'root_q_kvar': float(result.root_q_kvar[global_step]), 'soc_slack_max': float(step_row['soc_slack_max']), 'soc_slack_mean': float(step_row['soc_slack_mean']), 'soc_slack_p95_global': float(step_row['soc_slack_p95_global']), 'background_q_base_total_kvar': float(step_row['background_q_base_total_kvar']), 'network_q_loss_proxy_kvar': float(step_row['network_q_loss_proxy_kvar']), 'root_q_residual_kvar': float(step_row['root_q_residual_kvar']), 'solver_feeder_gap_kw': float(step_row['solver_feeder_gap_kw']), 'replay_feeder_gap_kw': float(step_row['replay_feeder_gap_kw'])})
-            agent_rows.extend(rollout_records['agent_rows'])
-            grid_rows.extend(rollout_records['grid_rows'])
-            previous_raw_obs = raw_obs
-            obs = next_obs
-            raw_obs = raw_next_obs
-        carried_soc = np.asarray(env.soc, dtype=np.float32).copy()
-    step_df = pd.DataFrame(step_rows).sort_values(['episode_idx', 'step']).reset_index(drop=True)
-    agent_df = pd.DataFrame(agent_rows).sort_values(['episode_idx', 'step', 'agent_id']).reset_index(drop=True)
-    grid_df = pd.DataFrame(grid_rows).sort_values(['episode_idx', 'step', 'bus_id']).reset_index(drop=True)
-    summary = agent_df.groupby(['controller', 'agent_profile'], as_index=False)[['purchase_cost', 'export_subsidy', 'objective_total']].sum() if {'purchase_cost', 'export_subsidy', 'objective_total'}.issubset(agent_df.columns) else pd.DataFrame()
-    validation_df = build_misocp_validation_df(diagnostic_rows)
-    validation_summary = summarize_misocp_validation(validation_df)
-    health_warning = 'MISOCP-vs-pandapower validation exceeded at least one tolerance.' if not validation_df.empty and bool((~validation_df['within_tolerance']).any()) else ''
-    if bool(validation_summary.get('root_power_validation_unavailable', False)):
-        health_warning = (health_warning + ' ' if health_warning else '') + 'Root-power validation is unavailable for at least one step because GridEnv did not expose trafo_p_signed_kw.'
-    rollout = RolloutResult(step_df=step_df, agent_df=agent_df, grid_df=grid_df, summary=summary, meta={'controller': controller_label, 'agent_profiles': resolved_profiles, 'agent_bus_ids': resolved_agent_bus_ids, 'bus_ids': bus_ids, 'v_min_pu': np.nan if v_min_pu is None else float(v_min_pu), 'v_max_pu': np.nan if v_max_pu is None else float(v_max_pu), 'trafo_limit_kw': trafo_limit_reference_kw, 'misocp_validation_df': validation_df, 'misocp_validation_summary': validation_summary, 'misocp_health_warning': health_warning, 'soc_relaxation_summary': soc_relaxation_summary, 'economics_scope': 'agent_only'})
-    return {'rollout': rollout, 'step_df': step_df, 'agent_df': agent_df, 'grid_df': grid_df, 'diagnostic_rows': diagnostic_rows, 'validation_df': validation_df, 'validation_summary': validation_summary, 'soc_relaxation_step_df': soc_relaxation_step_df, 'soc_relaxation_worst_df': soc_relaxation_worst_df, 'soc_relaxation_summary': soc_relaxation_summary, 'root_q_diagnostic_df': root_q_diagnostic_df}
-
-
-def collect_global_full_horizon_rollout(cfg, *, label: str | None=None, time_limit_sec: float=600.0):
-    from controllers.mpc.global_socp_mpc import GurobiSolveConfig, GlobalMISOCPProblem, _FULL_HORIZON_TIME_LIMIT_SEC, default_primary_solve_config
-    from scripts.builder import build_env
-    from scripts.utils.grid_notebook_workflow import PERFECT_PREDICTION_MODE, build_comparison_cfg, ensure_forecast_ready, resolve_evaluation_mode
-    comparison_cfg = build_comparison_cfg(cfg, prediction_mode=PERFECT_PREDICTION_MODE)
-    rollout_label = str(label) if label is not None else ''
-    resolved_time_limit = float(time_limit_sec if time_limit_sec is not None else _FULL_HORIZON_TIME_LIMIT_SEC)
-    comparison_cfg.runtime.forecast_ready = None if getattr(getattr(comparison_cfg, 'runtime', None), 'shared_data_dir', None) not in (None, '') else ensure_forecast_ready(comparison_cfg)
-    env = build_env(comparison_cfg, mode='test')
-    try:
-        problem = GlobalMISOCPProblem.from_env(env, comparison_cfg)
-        selected_episode_indices = list(getattr(comparison_cfg.runtime, 'selected_episode_indices', []) or [])
-        full_input = problem.build_full_horizon_input(env, episode_indices=None if not selected_episode_indices else selected_episode_indices)
-        export_subsidy = float(getattr(comparison_cfg.reward, 'export_subsidy_eur_per_kwh', problem.export_subsidy_default))
-        primary_config = default_primary_solve_config()
-        primary_config = GurobiSolveConfig(time_limit_sec=resolved_time_limit, mip_gap=float(primary_config.mip_gap), threads=primary_config.threads, presolve=primary_config.presolve, cuts=primary_config.cuts, heuristics=primary_config.heuristics, mip_focus=primary_config.mip_focus)
-        result = problem.solve_chunked_windows(full_input, export_subsidy=export_subsidy, chunk_steps=min(96, int(full_input.horizon_steps)), verbose=False, solve_config=primary_config)
-        solve_mode = str(result.solve_mode)
-        if not result.has_solution:
-            raise RuntimeError(f'Global MISOCP failed to produce a feasible incumbent in solve_mode={solve_mode!r}. Final status={result.status_label!r}.')
-        if not rollout_label:
-            rollout_label = 'Global MISOCP (chunked_window)'
-        validation_artifacts = build_misocp_validation_artifacts(env, problem, full_input, result, controller_label=rollout_label, export_subsidy=export_subsidy, agent_profiles=list(comparison_cfg.data.agent_profiles), agent_bus_ids=list(comparison_cfg.grid.agent_bus_ids), v_min_pu=float(comparison_cfg.grid.v_min_pu), v_max_pu=float(comparison_cfg.grid.v_max_pu))
-        rollout = validation_artifacts['rollout']
-        simultaneous_step_ratio = float(rollout.step_df['simultaneous_step_flag'].mean()) if not rollout.step_df.empty and 'simultaneous_step_flag' in rollout.step_df.columns else 0.0
-        rollout.meta.update({'controller': rollout_label, 'n_agents': int(env.n), 'agent_profiles': list(comparison_cfg.data.agent_profiles), 'agent_bus_ids': list(comparison_cfg.grid.agent_bus_ids), 'future_horizon': int(comparison_cfg.env.future_horizon), 'prediction_mode': PERFECT_PREDICTION_MODE, 'evaluation_mode': resolve_evaluation_mode(PERFECT_PREDICTION_MODE), 'dt_hours': float(comparison_cfg.env.dt), 'loading_limit_pct': float(comparison_cfg.grid.line_max_loading_pct), 'trafo_loading_limit_pct': float(comparison_cfg.grid.line_max_loading_pct), 'export_subsidy_eur_per_kwh': export_subsidy, IMPORT_PRICE_MARKUP_KEY: float(getattr(getattr(comparison_cfg, 'reward', None), IMPORT_PRICE_MARKUP_KEY, 0.0)), 'soc_mode': 'continuous', 'solve_mode': solve_mode, 'global_oracle_time_limit_sec': resolved_time_limit, 'global_oracle_runtime_sec': float(result.solve_time_sec), 'global_oracle_gap': float(result.mip_gap), 'global_oracle_status_label': str(result.status_label), 'agent_purchase_cost_eur': float(result.agent_purchase_cost_eur), 'agent_export_subsidy_eur': float(result.agent_export_subsidy_eur), 'agent_net_cost_eur': float(result.agent_net_cost_eur), 'feeder_purchase_cost_eur': float(result.feeder_purchase_cost_eur), 'feeder_export_subsidy_eur': float(result.feeder_export_subsidy_eur), 'feeder_net_cost_eur': float(result.feeder_net_cost_eur), 'episode_offsets': np.asarray(full_input.episode_offsets, dtype=np.int32).copy(), 'episode_lengths': np.asarray(full_input.episode_lengths, dtype=np.int32).copy(), 'misocp_simultaneous_step_ratio': simultaneous_step_ratio, 'is_near_optimal': bool(solve_mode == 'chunked_window'), 'misocp_validation_df': validation_artifacts['validation_df'], 'misocp_validation_summary': validation_artifacts['validation_summary']})
-        return rollout
-    finally:
-        env.close()
+from typing import TYPE_CHECKING,Any,Mapping
+import numpy as np,pandas as pd
+from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN,IMPORT_PRICE_MARKUP_KEY,IMPORT_PRICE_PRED_COLUMN,WHOLESALE_PRICE_SEQ_FIELD,derive_import_price
+if TYPE_CHECKING:from scripts.utils.grid_notebook_workflow import RolloutResult
+COMPARE_METRIC_COLUMNS=['controller','soc_mode','purchase_cost_total','purchase_cost_total_eur','export_subsidy_total','export_subsidy_total_eur','total_cost_eur','objective_total','soc_penalty_total','voltage_penalty_total','trafo_penalty_total','line_penalty_total','voltage_violation_count','price_mae','load_mae','pv_mae','voltage_violation_steps','voltage_violation_bus_points','min_vm_pu','max_vm_pu','v_min_pu','v_max_pu','voltage_step_delta_p95_pu','voltage_step_delta_max_pu','voltage_spread_mean_pu','voltage_spread_max_pu','trafo_overload_steps','trafo_loading_max_pct','feeder_netload_ramp_mean_abs_kw','feeder_netload_ramp_max_kw','battery_net_power_kw_mean_abs','returned_primary_objective_eur']
+ECONOMIC_TABLE_COLUMNS=['controller','purchase_cost_total_eur','export_subsidy_total_eur','total_cost_eur']
+SAFETY_TABLE_COLUMNS=['controller','voltage_violation_steps','voltage_violation_bus_points','voltage_step_delta_p95_pu','voltage_step_delta_max_pu','voltage_spread_mean_pu','voltage_spread_max_pu','trafo_overload_steps','trafo_loading_max_pct','feeder_netload_ramp_mean_abs_kw','feeder_netload_ramp_max_kw']
+LOCAL_MPC_LSTM_LABEL,LOCAL_MPC_PERFECT_LABEL='Local MPC + LSTM Forecast','Local MPC + Perfect Forecast'
+_SOC_SLACK_TIGHT_P95_THRESHOLD=.0001
+def _step_group_columns(frame:pd.DataFrame)->list[str]:columns=[column for column in['episode_idx','step']if column in frame.columns];return columns or(['timestamp']if'timestamp'in frame.columns else[])
+def _sort_columns(frame:pd.DataFrame,*preferred:str)->list[str]:return[column for column in preferred if column in frame.columns]
+def _summarize_voltage_step_delta(grid_df:pd.DataFrame)->tuple[float,float]:
+	if grid_df.empty or'vm_pu'not in grid_df.columns or'bus_id'not in grid_df.columns:return float('nan'),float('nan')
+	sort_columns=_sort_columns(grid_df,'episode_idx','bus_id','step','timestamp');group_columns=[column for column in['episode_idx','bus_id']if column in grid_df.columns]
+	if'bus_id'not in group_columns:group_columns.append('bus_id')
+	ordered=grid_df.sort_values(sort_columns)if sort_columns else grid_df.copy();finite=ordered.groupby(group_columns,sort=False)['vm_pu'].diff().abs().to_numpy(dtype=np.float64);finite=finite[np.isfinite(finite)]
+	if finite.size==0:return float('nan'),float('nan')
+	return float(np.percentile(finite,95.)),float(np.max(finite))
+def _summarize_voltage_spread(grid_df:pd.DataFrame)->tuple[float,float]:
+	if grid_df.empty or'vm_pu'not in grid_df.columns:return float('nan'),float('nan')
+	group_columns=_step_group_columns(grid_df)
+	if not group_columns:return float('nan'),float('nan')
+	values=grid_df.groupby(group_columns,sort=False)['vm_pu'].agg(lambda values:float(np.max(values)-np.min(values))).to_numpy(dtype=np.float64);values=values[np.isfinite(values)]
+	if values.size==0:return float('nan'),float('nan')
+	return float(np.mean(values)),float(np.max(values))
+def _summarize_grouped_ramp(step_df:pd.DataFrame,column:str)->tuple[float,float]:
+	if step_df.empty or column not in step_df.columns:return float('nan'),float('nan')
+	sort_columns=_sort_columns(step_df,'episode_idx','step','timestamp');ordered=step_df.sort_values(sort_columns)if sort_columns else step_df.copy();group_columns=[column_name for column_name in['episode_idx']if column_name in ordered.columns];ramp=ordered.groupby(group_columns,sort=False)[column].diff().abs()if group_columns else ordered[column].diff().abs();values=ramp.to_numpy(dtype=np.float64);values=values[np.isfinite(values)]
+	if values.size==0:return float('nan'),float('nan')
+	return float(np.mean(values)),float(np.max(values))
+def summarize_rollout_metrics(rollout:RolloutResult)->dict[str,object]:
+	step_df,agent_df,grid_df,summary_df=rollout.step_df.copy(),rollout.agent_df.copy(),rollout.grid_df.copy(),rollout.summary.copy();purchase_cost_total=float(step_df['purchase_cost_total'].sum())if'purchase_cost_total'in step_df.columns else float(rollout.meta.get('agent_purchase_cost_eur',float('nan')));export_subsidy_total=float(step_df['export_subsidy_total'].sum())if'export_subsidy_total'in step_df.columns else float(rollout.meta.get('agent_export_subsidy_eur',float('nan')));total_cost_eur=float(purchase_cost_total-export_subsidy_total)if np.isfinite(purchase_cost_total)and np.isfinite(export_subsidy_total)else float('nan');objective_total,soc_penalty_total,voltage_penalty_total,line_penalty_total,trafo_penalty_total=[float(step_df[column].sum())if column in step_df.columns else .0 for column in('objective_total','soc_penalty_total','voltage_penalty_total','line_penalty_total','trafo_penalty_total')];price_mae=float(np.abs(step_df[IMPORT_PRICE_COLUMN]-step_df[IMPORT_PRICE_PRED_COLUMN]).mean())if not step_df.empty and{IMPORT_PRICE_COLUMN,IMPORT_PRICE_PRED_COLUMN}.issubset(step_df.columns)else float('nan');load_mae,pv_mae=(float(np.abs(agent_df['load']-agent_df['load_pred']).mean()),float(np.abs(agent_df['pv']-agent_df['pv_pred']).mean()))if not agent_df.empty else(float('nan'),float('nan'));v_min=float(rollout.meta.get('v_min_pu',np.nan));v_max=float(rollout.meta.get('v_max_pu',np.nan))
+	if grid_df.empty or not np.isfinite(v_min)or not np.isfinite(v_max):voltage_violation_bus_points,voltage_violation_steps,min_vm_pu,max_vm_pu=float('nan'),float('nan'),float('nan'),float('nan')
+	else:violation_mask=(grid_df['vm_pu']<v_min)|(grid_df['vm_pu']>v_max);voltage_violation_bus_points,voltage_violation_steps=int(violation_mask.sum()),int(grid_df.loc[violation_mask,['episode_idx','step']].drop_duplicates().shape[0]);min_vm_pu,max_vm_pu=float(grid_df['vm_pu'].min()),float(grid_df['vm_pu'].max())
+	voltage_step_delta_p95_pu,voltage_step_delta_max_pu=_summarize_voltage_step_delta(grid_df);voltage_spread_mean_pu,voltage_spread_max_pu=_summarize_voltage_spread(grid_df);feeder_netload_ramp_mean_abs_kw,feeder_netload_ramp_max_kw=_summarize_grouped_ramp(step_df,'feeder_post_action_net_load_kw');trafo_loading_limit_pct=float(rollout.meta.get('trafo_loading_limit_pct',rollout.meta.get('loading_limit_pct',np.nan)));trafo_loading_max_pct=float(step_df['trafo_loading_pct_max'].max())if'trafo_loading_pct_max'in step_df.columns else float('nan')
+	if'n_trafo_violations'in step_df.columns:trafo_overload_steps=int((step_df['n_trafo_violations'].astype(float)>.0).sum())
+	elif np.isfinite(trafo_loading_max_pct)and np.isfinite(trafo_loading_limit_pct)and'trafo_loading_pct_max'in step_df.columns:trafo_overload_steps=int((step_df['trafo_loading_pct_max'].astype(float)>trafo_loading_limit_pct).sum())
+	else:trafo_overload_steps=float('nan')
+	battery_net_power_kw_mean_abs=float(np.mean(np.abs(step_df['battery_discharge_total'].astype(float)-step_df['battery_charge_total'].astype(float))))if{'battery_charge_total','battery_discharge_total'}.issubset(step_df.columns)else float('nan');metrics={'controller':str(rollout.meta.get('controller','unknown')),'soc_mode':str(rollout.meta.get('soc_mode','reset')),'purchase_cost_total':purchase_cost_total,'purchase_cost_total_eur':purchase_cost_total,'export_subsidy_total':export_subsidy_total,'export_subsidy_total_eur':export_subsidy_total,'total_cost_eur':total_cost_eur,'objective_total':objective_total,'soc_penalty_total':soc_penalty_total,'voltage_penalty_total':voltage_penalty_total,'trafo_penalty_total':trafo_penalty_total,'line_penalty_total':line_penalty_total,'voltage_violation_count':voltage_violation_bus_points,'price_mae':price_mae,'load_mae':load_mae,'pv_mae':pv_mae,'voltage_violation_steps':voltage_violation_steps,'voltage_violation_bus_points':voltage_violation_bus_points,'min_vm_pu':min_vm_pu,'max_vm_pu':max_vm_pu,'v_min_pu':v_min,'v_max_pu':v_max,'voltage_step_delta_p95_pu':voltage_step_delta_p95_pu,'voltage_step_delta_max_pu':voltage_step_delta_max_pu,'voltage_spread_mean_pu':voltage_spread_mean_pu,'voltage_spread_max_pu':voltage_spread_max_pu,'trafo_overload_steps':trafo_overload_steps,'trafo_loading_max_pct':trafo_loading_max_pct,'feeder_netload_ramp_mean_abs_kw':feeder_netload_ramp_mean_abs_kw,'feeder_netload_ramp_max_kw':feeder_netload_ramp_max_kw,'battery_net_power_kw_mean_abs':battery_net_power_kw_mean_abs,'returned_primary_objective_eur':float(rollout.meta.get('returned_primary_objective_eur',np.nan))}
+	if not summary_df.empty:
+		for row in summary_df.itertuples(index=False):profile=str(getattr(row,'agent_profile','unknown')).strip().lower();safe_profile=''.join(ch if ch.isalnum()else'_'for ch in profile).strip('_')or'unknown';metrics[f"purchase_cost_{safe_profile}"]=float(getattr(row,'purchase_cost'))
+	return metrics
+def compare_rollout_metrics(*rollouts:RolloutResult)->pd.DataFrame:rows=[summarize_rollout_metrics(rollout)for rollout in rollouts];return pd.DataFrame(rows)if rows else pd.DataFrame(columns=COMPARE_METRIC_COLUMNS)
+def build_compare_economic_table(metrics_df:pd.DataFrame)->pd.DataFrame:
+	if metrics_df.empty:return pd.DataFrame(columns=ECONOMIC_TABLE_COLUMNS)
+	required_columns=ECONOMIC_TABLE_COLUMNS[1:]
+	if metrics_df.loc[:,required_columns].isna().any().any():incomplete=metrics_df.loc[metrics_df.loc[:,required_columns].isna().any(axis=1),'controller'].astype(str).tolist();raise ValueError(f"Compare economic table requires final-dispatch purchase/export/total cost fields. Missing values detected for: {incomplete}")
+	return metrics_df.loc[:,ECONOMIC_TABLE_COLUMNS].copy()
+def build_compare_safety_table(metrics_df:pd.DataFrame)->pd.DataFrame:
+	if metrics_df.empty:return pd.DataFrame(columns=SAFETY_TABLE_COLUMNS)
+	return metrics_df.loc[:,SAFETY_TABLE_COLUMNS].copy()
+def _canonicalize_compare_value(value:Any):
+	if isinstance(value,Mapping):return{str(key):_canonicalize_compare_value(sub)for(key,sub)in sorted(dict(value).items(),key=lambda item:str(item[0]))}
+	if isinstance(value,list):return[_canonicalize_compare_value(item)for item in value]
+	return round(float(value),10)if isinstance(value,float)else value
+def validate_compare_model_bundles(model_roots:Mapping[str,str|Path],*,expected_count:int=3)->dict[str,dict[str,object]]:
+	if len(model_roots)!=int(expected_count):raise ValueError(f"Compare requires exactly {expected_count} DRL model roots, got {len(model_roots)}.")
+	required_files='train_result.json','experiment_controls.json','data_controls.json','battery_controls.json','train_controls.json','checkpoint_controls.json';signatures:dict[str,dict[str,object]]={};bundles:dict[str,dict[str,object]]={}
+	for(label,model_root)in dict(model_roots).items():
+		resolved_model_root=Path(model_root).resolve();meta_dir=resolved_model_root/'_meta';missing=[filename for filename in required_files if not(meta_dir/filename).exists()]
+		if missing:raise FileNotFoundError(f"Training metadata is incomplete for '{resolved_model_root}'. Missing: {missing}")
+		bundle={'model_root':str(resolved_model_root),'meta_dir':str(meta_dir),**{filename.removesuffix('.json'):json.loads((meta_dir/filename).read_text(encoding='utf-8'))for filename in required_files}};reward_controls=dict(dict(bundle['experiment_controls']).get('reward_controls',{}));removed_reward_keys=sorted(set(reward_controls).intersection({'w_action_pen','lambda_throughput'}))
+		if removed_reward_keys:raise ValueError(f"Stored reward_controls use removed legacy key(s): {removed_reward_keys}. Regenerate the checkpoint bundle with the current mainline schema.")
+		train_controls=dict(bundle['train_controls']);data_controls=dict(bundle['data_controls']);signatures[str(label)]={'prediction_mode':str(data_controls.get('prediction_mode','perfect')),'seed':int(dict(bundle['experiment_controls']).get('seed',0)),'export_subsidy_eur_per_kwh':float(reward_controls.get('export_subsidy_eur_per_kwh',.079)),'w_soc_pen':float(reward_controls.get('w_soc_pen',.0)),'agent_profiles':list(data_controls.get('agent_profiles',[])),'agent_bus_ids':list(data_controls.get('agent_bus_ids',[])),'load_scale':list(data_controls.get('load_scale',[])),'pv_scale':list(data_controls.get('pv_scale',[])),'future_horizon':int(data_controls.get('future_horizon',0)),'train_year':data_controls.get('train_year'),'test_year':data_controls.get('test_year'),'test_start_date':data_controls.get('test_start_date'),'test_end_date':data_controls.get('test_end_date'),'shared_data_signature':bundle.get('train_result',{}).get('shared_data_signature'),'battery_controls':dict(bundle['battery_controls']),'forecast_controls':dict(dict(bundle['experiment_controls']).get('forecast_controls',{})),'model_controls':dict(dict(bundle['experiment_controls']).get('model_controls',{})),'train_controls':{key:train_controls.get(key)for key in('profile','model_family','train_episodes','max_train_steps','num_envs','vec_env_type','parallel_episode_sampling','batch_size','buffer_size','update_interval','updates_per_step','policy_update_freq','actor_lr','critic_lr','noise_std_init','noise_std_min','noise_decay_steps','use_noise_decay')}};bundles[str(label)]=bundle
+	labels=list(signatures);reference_label=labels[0];mismatch_lines=[f"{field_name}: {reference_label}={reference_value!r} vs {label}={current_signature[field_name]!r}"for(label,current_signature)in list(signatures.items())[1:]for(field_name,reference_value)in signatures[reference_label].items()if _canonicalize_compare_value(current_signature[field_name])!=_canonicalize_compare_value(reference_value)]
+	if mismatch_lines:raise ValueError('Compare model metadata mismatch detected. All DRL runs must share the same subsidy, hyperparameters, forecast controls, battery controls, dates, and seed.\n'+'\n'.join(mismatch_lines))
+	return bundles
+def _get_local_mpc_solver(env,*,agent_idx:int,import_price_seq:np.ndarray,battery_capacity_kwh:float,p_max_kw:float,dt_hours:float,efficiency:float,soc_min:float,soc_max:float,export_subsidy_eur_per_kwh:float):
+	from controllers.mpc import gurobi_agent_mpc as local_mpc_module;cache=getattr(env,'_local_mpc_solver_cache',None)
+	if not isinstance(cache,dict):cache={};setattr(env,'_local_mpc_solver_cache',cache)
+	stats=getattr(env,'_local_mpc_stats',None)
+	if not isinstance(stats,dict):stats={};setattr(env,'_local_mpc_stats',stats)
+	for key in('solver_build_count','solver_reuse_count','solve_count','solve_time_sec_total'):stats.setdefault(key,.0)
+	horizon=int(np.asarray(import_price_seq,dtype=np.float32).reshape(-1).size);cache_key=int(agent_idx),int(horizon),float(battery_capacity_kwh),float(p_max_kw),float(dt_hours),float(efficiency),float(soc_min),float(soc_max),float(export_subsidy_eur_per_kwh);solver=cache.get(cache_key)
+	if solver is None:solver=local_mpc_module._ReusableLocalMPCSolver(horizon=horizon,battery_capacity_kwh=float(battery_capacity_kwh),p_max_kw=float(p_max_kw),dt_hours=float(dt_hours),efficiency=float(efficiency),soc_min=float(soc_min),soc_max=float(soc_max),export_subsidy_eur_per_kwh=float(export_subsidy_eur_per_kwh));cache[cache_key]=solver;stats['solver_build_count']=float(stats['solver_build_count'])+1.
+	else:stats['solver_reuse_count']=float(stats['solver_reuse_count'])+1.
+	return solver,stats
+def _clip_global_oracle_battery_power_kw(env,battery_power_kw:np.ndarray)->np.ndarray:battery_power_kw=np.asarray(battery_power_kw,dtype=np.float32);e_t=np.asarray(env.soc,dtype=np.float32)*np.asarray(env.agent_c_bat,dtype=np.float32);e_min=float(env.soc_min)*np.asarray(env.agent_c_bat,dtype=np.float32);e_max=float(env.soc_max)*np.asarray(env.agent_c_bat,dtype=np.float32);p_max=np.asarray(env.agent_p_max,dtype=np.float32);eff=max(float(env.eff),1e-06);p_max_charge=np.minimum(p_max,np.maximum(.0,(e_max-e_t)/(eff*float(env.dt))));p_max_discharge=np.minimum(p_max,np.maximum(.0,(e_t-e_min)*eff/float(env.dt)));return np.clip(battery_power_kw,-p_max_discharge,p_max_charge).astype(np.float32)
+def _assemble_global_oracle_actions(env,battery_power_kw:np.ndarray,pv_curtail_kw:np.ndarray)->tuple[list[np.ndarray],np.ndarray]:clipped_battery_kw=_clip_global_oracle_battery_power_kw(env,battery_power_kw);pv_raw_kw=np.maximum(np.asarray(env.get_signal_step('pv'),dtype=np.float32),.0);clipped_curtail_kw=np.minimum(np.maximum(np.asarray(pv_curtail_kw,dtype=np.float32),.0),pv_raw_kw);p_max_kw=np.maximum(np.asarray(env.agent_p_max,dtype=np.float32),1e-06);battery_action=np.clip(clipped_battery_kw/p_max_kw,-1.,1.).astype(np.float32);pv_utilization=np.ones_like(pv_raw_kw,dtype=np.float32);valid_mask=pv_raw_kw>1e-06;pv_utilization[valid_mask]=1.-clipped_curtail_kw[valid_mask]/pv_raw_kw[valid_mask];pv_action=np.clip(2.*pv_utilization-1.,-1.,1.).astype(np.float32);action_array=np.stack([battery_action,pv_action],axis=-1).astype(np.float32);return[action_array[agent_idx].copy()for agent_idx in range(env.n)],action_array
+def _mpc_policy(env,obs:dict[str,np.ndarray])->tuple[list[np.ndarray],dict[str,np.ndarray]]:
+	from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy;from scripts.utils.price_protocol import derive_import_price_seq,get_import_price_markup;requested_battery_kw=np.zeros((env.n,),dtype=np.float32);requested_pv_curtail_kw=np.zeros((env.n,),dtype=np.float32);wholesale_price_seq=np.asarray(obs[WHOLESALE_PRICE_SEQ_FIELD],dtype=np.float32);import_price_seq=derive_import_price_seq(wholesale_price_seq,markup_eur_per_kwh=float(getattr(env,'import_price_markup_eur_per_kwh',get_import_price_markup(env))));load_seq=np.asarray(obs['load_seq'],dtype=np.float32);pv_seq=np.asarray(obs['pv_seq'],dtype=np.float32);export_subsidy_eur_per_kwh=float(getattr(env.reward_fn,'export_subsidy_eur_per_kwh',.079))
+	for agent_idx in range(env.n):
+		solver,solver_stats=_get_local_mpc_solver(env,agent_idx=agent_idx,import_price_seq=import_price_seq,battery_capacity_kwh=float(env.agent_c_bat[agent_idx]),p_max_kw=float(env.agent_p_max[agent_idx]),dt_hours=float(env.dt),efficiency=float(env.eff),soc_min=float(env.soc_min),soc_max=float(env.soc_max),export_subsidy_eur_per_kwh=export_subsidy_eur_per_kwh);solve_result=solver.solve_full_horizon(import_price_seq=import_price_seq,load_seq=load_seq[agent_idx],pv_seq=pv_seq[agent_idx],soc=float(env.soc[agent_idx]),pv_curtail_upper_kw=np.maximum(pv_seq[agent_idx],.0).astype(np.float32,copy=False))
+		if not bool(solve_result.feasible):raise RuntimeError(f"Local MPC returned an infeasible or unbounded full-horizon solution for agent {agent_idx}. This usually means the relaxed continuous local MPC formulation is not properly bounded on the current price window.")
+		solver_stats['solve_count']=float(solver_stats['solve_count'])+1.;solver_stats['solve_time_sec_total']=float(solver_stats['solve_time_sec_total'])+float(solve_result.solve_time_sec);requested_battery_kw[agent_idx]=np.float32(solve_result.signed_battery_kw[0])if solve_result.signed_battery_kw.size else np.float32(.0);requested_pv_curtail_kw[agent_idx]=np.float32(solve_result.pv_curtail_kw[0])if solve_result.pv_curtail_kw.size else np.float32(.0)
+	actions,action_array=_assemble_global_oracle_actions(env,battery_power_kw=requested_battery_kw,pv_curtail_kw=requested_pv_curtail_kw);safety_local=build_safety_local_numpy(soc=np.asarray(env.soc,dtype=np.float32),load_raw=np.asarray(env.get_signal_step('load'),dtype=np.float32),pv_raw=np.asarray(env.get_signal_step('pv'),dtype=np.float32),battery_capacity_kwh=np.asarray(env.agent_c_bat,dtype=np.float32),p_max_kw=np.asarray(env.agent_p_max,dtype=np.float32));return actions,compute_action_gap_metrics_numpy(safety_local,action_array,action_array)
+def collect_madrl_rollout(cfg,*,model_root=None,algorithm:str|None=None,episode_tag:int|None=None,experiment_name:str='grid_mainline',checkpoint_root=None,label:str|None=None,episode_indices:list[int]|None=None):from scripts.mainline_madrl import load_madrl_controller;from scripts.utils.grid_notebook_workflow import collect_controller_rollout,resolve_evaluation_mode,resolve_prediction_mode_from_forecast_backend;prediction_mode=resolve_prediction_mode_from_forecast_backend(cfg.forecast.type);loaded=load_madrl_controller(cfg,model_root,algorithm=algorithm,episode_tag=episode_tag,device=cfg.runtime.device,prediction_mode=prediction_mode,experiment_name=experiment_name,checkpoint_root=checkpoint_root);return collect_controller_rollout(loaded['cfg'],label=label or f"DRL ({resolve_evaluation_mode(prediction_mode)})",controller=loaded['controller'],episode_indices=episode_indices)
+def collect_local_mpc_rollout(cfg,*,prediction_mode:str,label:str|None=None):
+	from scripts.utils.grid_notebook_workflow import PERFECT_PREDICTION_MODE,build_comparison_cfg,collect_controller_rollout,normalize_prediction_mode;comparison_cfg=build_comparison_cfg(cfg,prediction_mode=prediction_mode);resolved_mode=normalize_prediction_mode(prediction_mode);rollout_label=label or(LOCAL_MPC_PERFECT_LABEL if resolved_mode==PERFECT_PREDICTION_MODE else LOCAL_MPC_LSTM_LABEL);rollout=collect_controller_rollout(comparison_cfg,label=rollout_label,action_fn=_mpc_policy)
+	if not rollout.step_df.empty and{'purchase_cost_total','export_subsidy_total'}.issubset(rollout.step_df.columns):rollout.step_df['objective_total']=rollout.step_df['purchase_cost_total'].astype(float)-rollout.step_df['export_subsidy_total'].astype(float)
+	if not rollout.agent_df.empty and{'purchase_cost','export_subsidy'}.issubset(rollout.agent_df.columns):rollout.agent_df['objective_total']=rollout.agent_df['purchase_cost'].astype(float)-rollout.agent_df['export_subsidy'].astype(float)
+	if not rollout.summary.empty and{'purchase_cost','export_subsidy'}.issubset(rollout.summary.columns):rollout.summary['objective_total']=rollout.summary['purchase_cost'].astype(float)-rollout.summary['export_subsidy'].astype(float)
+	rollout.meta['local_mpc_price_mode']='import_adjusted';rollout.meta['local_mpc_objective_mode']='economic_only';return rollout
+def expand_episode_indices(full_input:Any)->np.ndarray:
+	lengths=np.asarray(full_input.episode_lengths,dtype=np.int32).reshape(-1);indices=np.asarray(full_input.episode_indices,dtype=np.int32).reshape(-1)
+	if lengths.size!=indices.size:raise ValueError('episode_lengths and episode_indices must have the same length.')
+	pieces=[np.full((int(length),),int(episode_idx),dtype=np.int32)for(length,episode_idx)in zip(lengths.tolist(),indices.tolist(),strict=False)if int(length)>0];return np.concatenate(pieces,axis=0)if pieces else np.zeros((0,),dtype=np.int32)
+def _require_solution_matrix(value:Any,name:str)->np.ndarray:
+	if value is None:raise ValueError(f"Result is missing required solution field '{name}'.")
+	return np.asarray(value,dtype=np.float32)
+def validate_misocp_result_schema(result:Any)->None:
+	required_fields='agent_import_mw','agent_export_mw','agent_net_grid_mw','agent_purchase_cost_eur','agent_export_subsidy_eur','agent_net_cost_eur';missing_fields=[field for field in required_fields if not hasattr(result,field)]
+	if missing_fields:missing_display=', '.join(missing_fields);raise ValueError(f"solve_result uses an outdated MISOCPResult schema; missing fields: {missing_display}. This usually means the notebook kernel still holds an older 'controllers.mpc.global_socp_mpc' module. Re-run the first import cell and the solve cell, or restart the kernel before rebuilding notebook diagnostics.")
+def _timestamps_from_full_input(full_input:Any)->pd.Index:raw=pd.Index([str(value)for value in tuple(full_input.timestamps)],name='timestamp');parsed=pd.to_datetime(raw,errors='coerce');return parsed if parsed.notna().all()else raw
+def _line_loading_max(line_loading_pct:np.ndarray,horizon_steps:int)->np.ndarray:
+	if line_loading_pct.size==0:return np.zeros((horizon_steps,),dtype=np.float32)
+	return np.max(line_loading_pct,axis=0).astype(np.float32)
+def _fixed_feeder_components_from_problem(problem:Any)->tuple[float,float]:fixed_active_kw=np.asarray(problem.network.p_base_mw,dtype=np.float32).reshape(-1)*1e3;fixed_load_kw=float(np.clip(fixed_active_kw,.0,None).sum());fixed_generation_kw=float(np.clip(-fixed_active_kw,.0,None).sum());return fixed_load_kw,fixed_generation_kw
+def format_solver_summary(result:Any,*,total_steps:int|None=None,episode_count:int|None=None)->pd.Series:
+	horizon_steps=int(total_steps if total_steps is not None else getattr(result,'horizon_steps',0));summary_note=''
+	if bool(getattr(result,'time_limit_feasible',False)):summary_note='Reached time limit with an incumbent; objective is feasible but not proven optimal.'
+	elif not bool(getattr(result,'has_solution',False)):summary_note='Solver returned no incumbent; inspect the raw log for the failure mode.'
+	total_runtime_sec=float(getattr(result,'solve_time_sec',float('nan')));chunk_summaries=list(getattr(result,'chunk_summaries',[])or[]);finite_chunk_runtimes=[float(item.get('solve_time_sec',float('nan')))for item in chunk_summaries if np.isfinite(float(item.get('solve_time_sec',float('nan'))))];model_size=getattr(result,'model_size',None);return pd.Series({'status_code':int(result.status_code),'status_label':str(result.status_label),'has_solution':bool(result.has_solution),'time_limit_feasible':bool(result.time_limit_feasible),'solve_mode':str(result.solve_mode),'horizon_steps':int(horizon_steps),'episode_count':np.nan if episode_count is None else int(episode_count),'solve_time_sec':float(result.solve_time_sec),'total_runtime_sec':total_runtime_sec,'max_chunk_runtime_sec':float(max(finite_chunk_runtimes))if finite_chunk_runtimes else float('nan'),'mip_gap':float(result.mip_gap),'best_bound':float(result.best_bound),'objective_value':float(result.objective_value),'sol_count':int(getattr(result,'sol_count',0)),'node_count':float(getattr(result,'node_count',float('nan'))),'iter_count':float(getattr(result,'iter_count',float('nan'))),'bar_iter_count':float(getattr(result,'bar_iter_count',float('nan'))),'is_near_optimal':bool(str(getattr(result,'solve_mode',''))=='chunked_window'),'economics_scope':'agent_only','physical_tiebreaker_eur':float(getattr(result,'physical_tiebreaker_eur',float('nan'))),'physical_tiebreaker_weight':float(getattr(result,'physical_tiebreaker_weight',float('nan'))),'stage1_primary_objective_eur':float(getattr(result,'stage1_primary_objective_eur',float('nan'))),'num_vars':int(getattr(model_size,'num_vars',0)),'num_binary_vars':int(getattr(model_size,'num_binary_vars',0)),'num_linear_constraints':int(getattr(model_size,'num_linear_constraints',0)),'num_quadratic_constraints':int(getattr(model_size,'num_quadratic_constraints',0)),'solver_note':summary_note},name='solver_summary')
+def build_full_horizon_step_df(problem:Any,full_input:Any,result:Any)->pd.DataFrame:
+	validate_misocp_result_schema(result);load_seq=np.asarray(full_input.load_seq,dtype=np.float32);pv_seq=np.asarray(full_input.pv_seq,dtype=np.float32);wholesale_price_seq=np.asarray(full_input.wholesale_price_seq,dtype=np.float32).reshape(-1);import_price_seq=np.asarray(full_input.import_price_seq,dtype=np.float32).reshape(-1);episode_idx=expand_episode_indices(full_input);timestamps=_timestamps_from_full_input(full_input);horizon_steps=int(import_price_seq.shape[0])
+	if episode_idx.shape[0]!=horizon_steps:raise ValueError('Expanded episode index series does not match the full-horizon length.')
+	if load_seq.shape[1]!=horizon_steps or pv_seq.shape[1]!=horizon_steps:raise ValueError('load_seq and pv_seq must match the full-horizon length.')
+	if wholesale_price_seq.shape[0]!=horizon_steps:raise ValueError('wholesale_price_seq must match the full-horizon length.')
+	battery_charge_mw,battery_discharge_mw,pv_curtail_mw,bus_vm_pu,energy_mwh,line_loading_pct,trafo_loading_pct=_require_solution_matrix(result.battery_charge_mw,'battery_charge_mw'),_require_solution_matrix(result.battery_discharge_mw,'battery_discharge_mw'),_require_solution_matrix(result.pv_curtail_mw,'pv_curtail_mw'),_require_solution_matrix(result.bus_vm_pu,'bus_vm_pu'),_require_solution_matrix(result.energy_mwh,'energy_mwh'),_require_solution_matrix(result.line_loading_pct,'line_loading_pct'),_require_solution_matrix(result.trafo_loading_pct,'trafo_loading_pct');root_import_mw,root_export_mw=_require_solution_matrix(result.root_import_mw,'root_import_mw').reshape(-1),_require_solution_matrix(result.root_export_mw,'root_export_mw').reshape(-1);agent_import_mw,agent_export_mw,agent_net_grid_mw=_require_solution_matrix(result.agent_import_mw,'agent_import_mw'),_require_solution_matrix(result.agent_export_mw,'agent_export_mw'),_require_solution_matrix(result.agent_net_grid_mw,'agent_net_grid_mw');fixed_load_kw,fixed_generation_kw=_fixed_feeder_components_from_problem(problem);agent_load_kw,pv_raw_kw=load_seq.sum(axis=0).astype(np.float32),pv_seq.sum(axis=0).astype(np.float32);pv_curtail_kw,pv_effective_kw=(pv_curtail_mw.sum(axis=0)*1e3).astype(np.float32),np.maximum(pv_raw_kw-(pv_curtail_mw.sum(axis=0)*1e3).astype(np.float32),.0).astype(np.float32);battery_charge_kw,battery_discharge_kw=(battery_charge_mw.sum(axis=0)*1e3).astype(np.float32),(battery_discharge_mw.sum(axis=0)*1e3).astype(np.float32);simultaneous_kw=(np.minimum(battery_charge_mw,battery_discharge_mw)*1e3).astype(np.float32);grid_import_kw,grid_export_kw=(root_import_mw*1e3).astype(np.float32),(root_export_mw*1e3).astype(np.float32);root_net_exchange_kw=(grid_import_kw-grid_export_kw).astype(np.float32);agent_import_kw_total,agent_export_kw_total,agent_net_exchange_kw_total=(agent_import_mw.sum(axis=0)*1e3).astype(np.float32),(agent_export_mw.sum(axis=0)*1e3).astype(np.float32),(agent_net_grid_mw.sum(axis=0)*1e3).astype(np.float32);agent_raw_net_load_kw=(agent_load_kw-pv_raw_kw).astype(np.float32);agent_effective_net_load_kw=(agent_load_kw-pv_effective_kw).astype(np.float32);agent_post_action_net_load_kw=(agent_effective_net_load_kw+battery_charge_kw-battery_discharge_kw).astype(np.float32);feeder_raw_net_load_kw=(agent_raw_net_load_kw+fixed_load_kw-fixed_generation_kw).astype(np.float32);feeder_effective_net_load_kw=(agent_effective_net_load_kw+fixed_load_kw-fixed_generation_kw).astype(np.float32);feeder_post_action_net_load_kw=(agent_post_action_net_load_kw+fixed_load_kw-fixed_generation_kw).astype(np.float32);balance_supply_kw=(pv_effective_kw+fixed_generation_kw+battery_discharge_kw+grid_import_kw).astype(np.float32);balance_demand_kw=(agent_load_kw+fixed_load_kw+battery_charge_kw+grid_export_kw).astype(np.float32);balance_residual_kw=(balance_supply_kw-balance_demand_kw).astype(np.float32);agent_export_rate=float(result.agent_export_subsidy_eur)/max(float(np.sum(agent_export_kw_total*np.float32(problem.dt_hours))),1e-06)if float(np.sum(agent_export_kw_total))>.0 else .0;feeder_export_rate=float(result.feeder_export_subsidy_eur)/max(float(np.sum(grid_export_kw*np.float32(problem.dt_hours))),1e-06)if float(np.sum(grid_export_kw))>.0 else .0;agent_purchase_cost_eur_step=(agent_import_kw_total*np.float32(problem.dt_hours)*import_price_seq.astype(np.float32)).astype(np.float32);agent_export_subsidy_eur_step=(agent_export_kw_total*np.float32(problem.dt_hours)*np.float32(agent_export_rate)).astype(np.float32);agent_net_cost_eur_step=(agent_purchase_cost_eur_step-agent_export_subsidy_eur_step).astype(np.float32);feeder_purchase_cost_eur_step=(grid_import_kw*np.float32(problem.dt_hours)*import_price_seq.astype(np.float32)).astype(np.float32);feeder_export_subsidy_eur_step=(grid_export_kw*np.float32(problem.dt_hours)*np.float32(feeder_export_rate)).astype(np.float32);feeder_net_cost_eur_step=(feeder_purchase_cost_eur_step-feeder_export_subsidy_eur_step).astype(np.float32);agent_root_gap_kw=(root_net_exchange_kw-agent_post_action_net_load_kw).astype(np.float32);return pd.DataFrame({'timestamp':timestamps,'episode_idx':episode_idx,'global_step':np.arange(horizon_steps,dtype=np.int32),'wholesale_price':wholesale_price_seq.astype(np.float32),IMPORT_PRICE_COLUMN:import_price_seq.astype(np.float32),'fixed_load_kw':np.full((horizon_steps,),fixed_load_kw,dtype=np.float32),'fixed_generation_kw':np.full((horizon_steps,),fixed_generation_kw,dtype=np.float32),'agent_load_kw':agent_load_kw,'pv_raw_kw':pv_raw_kw,'pv_curtail_kw':pv_curtail_kw,'pv_effective_kw':pv_effective_kw,'battery_charge_kw':battery_charge_kw,'battery_discharge_kw':battery_discharge_kw,'agent_import_kw_total':agent_import_kw_total,'agent_export_kw_total':agent_export_kw_total,'agent_net_exchange_kw_total':agent_net_exchange_kw_total,'grid_import_kw':grid_import_kw,'grid_export_kw':grid_export_kw,'agent_purchase_cost_eur_step':agent_purchase_cost_eur_step,'agent_export_subsidy_eur_step':agent_export_subsidy_eur_step,'agent_net_cost_eur_step':agent_net_cost_eur_step,'feeder_purchase_cost_eur_step':feeder_purchase_cost_eur_step,'feeder_export_subsidy_eur_step':feeder_export_subsidy_eur_step,'feeder_net_cost_eur_step':feeder_net_cost_eur_step,'agent_raw_net_load_kw':agent_raw_net_load_kw,'agent_effective_net_load_kw':agent_effective_net_load_kw,'agent_post_action_net_load_kw':agent_post_action_net_load_kw,'feeder_raw_net_load_kw':feeder_raw_net_load_kw,'feeder_effective_net_load_kw':feeder_effective_net_load_kw,'feeder_post_action_net_load_kw':feeder_post_action_net_load_kw,'raw_net_load_kw':feeder_raw_net_load_kw,'effective_net_load_kw':feeder_effective_net_load_kw,'post_action_net_load_kw':feeder_post_action_net_load_kw,'root_net_exchange_kw':root_net_exchange_kw,'agent_root_gap_kw':agent_root_gap_kw,'balance_supply_kw':balance_supply_kw,'balance_demand_kw':balance_demand_kw,'balance_residual_kw':balance_residual_kw,'network_loss_kw_estimate':balance_residual_kw,'aggregate_stored_energy_kwh':np.sum(energy_mwh[:,1:],axis=0).astype(np.float32)*1e3,'trafo_limit_reference_kw':np.full((horizon_steps,),float(problem.trafo_limit_mva)*1e3,dtype=np.float32),'min_vm_pu':np.min(bus_vm_pu,axis=0).astype(np.float32),'mean_vm_pu':np.mean(bus_vm_pu,axis=0).astype(np.float32),'max_vm_pu':np.max(bus_vm_pu,axis=0).astype(np.float32),'max_line_loading_pct':_line_loading_max(line_loading_pct,horizon_steps),'trafo_loading_pct':np.asarray(trafo_loading_pct,dtype=np.float32).reshape(-1)[:horizon_steps],'simultaneous_kw_total':np.sum(simultaneous_kw,axis=0).astype(np.float32)})
+def build_chunk_boundary_soc_df(problem:Any,full_input:Any,result:Any)->pd.DataFrame:
+	columns=['boundary_step','boundary_timestamp','chunk_left','chunk_right','max_abs_soc_kink','mean_abs_soc_kink'];chunk_summaries=list(getattr(result,'chunk_summaries',[])or[])
+	if len(chunk_summaries)<2:return pd.DataFrame(columns=columns)
+	energy_mwh=_require_solution_matrix(result.energy_mwh,'energy_mwh');soc=energy_mwh/np.maximum(np.asarray(problem.capacity_mwh,dtype=np.float32).reshape(-1,1),1e-06);timestamps=_timestamps_from_full_input(full_input);horizon_steps=int(np.asarray(full_input.import_price_seq,dtype=np.float32).reshape(-1).size);rows=[{'boundary_step':boundary_step,'boundary_timestamp':timestamps[boundary_step],'chunk_left':int(left_summary['chunk_idx']),'chunk_right':int(right_summary['chunk_idx']),'max_abs_soc_kink':float(np.max(kink))if kink.size else .0,'mean_abs_soc_kink':float(np.mean(kink))if kink.size else .0}for(left_summary,right_summary)in zip(chunk_summaries[:-1],chunk_summaries[1:],strict=False)for boundary_step in[int(left_summary['end_step'])]if 0<boundary_step<horizon_steps-1 for kink in[np.abs(soc[:,boundary_step+1]-soc[:,boundary_step]-(soc[:,boundary_step]-soc[:,boundary_step-1])).astype(np.float32)]];return pd.DataFrame(rows,columns=columns)
+def _linear_fit_summary(x_values:Any,y_values:Any)->dict[str,float]:
+	x_array=np.asarray(x_values,dtype=np.float64).reshape(-1);y_array=np.asarray(y_values,dtype=np.float64).reshape(-1);finite_mask=np.isfinite(x_array)&np.isfinite(y_array)
+	if int(np.sum(finite_mask))<2 or np.allclose(x_array[finite_mask],x_array[finite_mask][0],atol=1e-12,rtol=.0):return{'k':float('nan'),'b':float('nan'),'r2':float('nan')}
+	slope,intercept=np.polyfit(x_array[finite_mask],y_array[finite_mask],deg=1);y_pred=slope*x_array[finite_mask]+intercept;ss_res=float(np.sum((y_array[finite_mask]-y_pred)**2));ss_tot=float(np.sum((y_array[finite_mask]-float(np.mean(y_array[finite_mask])))**2));return{'k':float(slope),'b':float(intercept),'r2':1. if ss_tot<=1e-12 and ss_res<=1e-12 else float('nan')if ss_tot<=1e-12 else float(1.-ss_res/ss_tot)}
+def build_soc_relaxation_diagnostics(problem:Any,full_input:Any,result:Any,*,top_k:int=10)->dict[str,Any]:branch_p_pu=_require_solution_matrix(result.branch_p_pu,'branch_p_pu');branch_q_pu=_require_solution_matrix(result.branch_q_pu,'branch_q_pu');branch_i2_pu=_require_solution_matrix(result.branch_i2_pu,'branch_i2_pu');bus_v_sq=_require_solution_matrix(result.bus_v_sq,'bus_v_sq');parent_pos=np.asarray(problem.network.branch_parent_pos,dtype=np.int32).reshape(-1);child_pos=np.asarray(problem.network.branch_child_pos,dtype=np.int32).reshape(-1);bus_ids=np.asarray(problem.network.bus_ids,dtype=np.int32).reshape(-1);timestamps=_timestamps_from_full_input(full_input);episode_idx=expand_episode_indices(full_input);v_parent_sq=np.asarray(bus_v_sq[parent_pos,:],dtype=np.float32);soc_slack=np.asarray(branch_i2_pu-(branch_p_pu**2+branch_q_pu**2)/np.maximum(v_parent_sq,1e-06),dtype=np.float32);finite_slack=soc_slack[np.isfinite(soc_slack)];p95_soc_slack=float(np.percentile(finite_slack,95.))if finite_slack.size else float('nan');step_df=pd.DataFrame({'global_step':np.arange(branch_p_pu.shape[1],dtype=np.int32),'timestamp':timestamps,'episode_idx':episode_idx.astype(np.int32),'soc_slack_max':np.max(soc_slack,axis=0).astype(np.float32),'soc_slack_mean':np.mean(soc_slack,axis=0).astype(np.float32),'soc_slack_p95_global':np.full((branch_p_pu.shape[1],),p95_soc_slack,dtype=np.float32)});worst_rows=[{'branch_idx':int(branch_idx),'global_step':int(step_idx),'timestamp':timestamps[int(step_idx)],'episode_idx':int(episode_idx[int(step_idx)]),'parent_bus_id':int(bus_ids[int(parent_pos[int(branch_idx)])]),'child_bus_id':int(bus_ids[int(child_pos[int(branch_idx)])]),'v_parent_sq_pu':float(v_parent_sq[int(branch_idx),int(step_idx)]),'branch_p_pu':float(branch_p_pu[int(branch_idx),int(step_idx)]),'branch_q_pu':float(branch_q_pu[int(branch_idx),int(step_idx)]),'branch_i2_pu':float(branch_i2_pu[int(branch_idx),int(step_idx)]),'soc_slack':float(soc_slack[int(branch_idx),int(step_idx)])}for flat_idx in np.argsort(soc_slack.reshape(-1))[::-1][:max(int(top_k),0)]for(branch_idx,step_idx)in[np.unravel_index(int(flat_idx),soc_slack.shape)]];return{'step_df':step_df,'worst_df':pd.DataFrame(worst_rows),'summary':pd.Series({'max_soc_slack':float(np.max(finite_slack))if finite_slack.size else float('nan'),'mean_soc_slack':float(np.mean(finite_slack))if finite_slack.size else float('nan'),'p95_soc_slack':p95_soc_slack,'soc_relaxation_is_tight':bool(np.isfinite(p95_soc_slack)and p95_soc_slack<_SOC_SLACK_TIGHT_P95_THRESHOLD)},name='soc_relaxation_summary'),'soc_slack':soc_slack}
+def build_root_q_diagnostic_df(problem:Any,full_input:Any,result:Any)->pd.DataFrame:branch_i2_pu=_require_solution_matrix(result.branch_i2_pu,'branch_i2_pu');root_q_kvar=_require_solution_matrix(result.root_q_kvar,'root_q_kvar').reshape(-1);branch_x_pu=np.asarray(problem.network.branch_x_pu,dtype=np.float32).reshape(-1);timestamps=_timestamps_from_full_input(full_input);episode_idx=expand_episode_indices(full_input);background_q_base_total_kvar=float(np.sum(np.asarray(problem.network.q_base_mvar,dtype=np.float32))*1e3);network_q_loss_proxy_kvar=(np.sum(branch_x_pu[:,None]*branch_i2_pu,axis=0)*np.float32(float(problem.network.s_base_mva)*1e3)).astype(np.float32);return pd.DataFrame({'global_step':np.arange(root_q_kvar.shape[0],dtype=np.int32),'timestamp':timestamps,'episode_idx':episode_idx.astype(np.int32),'background_q_base_total_kvar':np.full((root_q_kvar.shape[0],),background_q_base_total_kvar,dtype=np.float32),'network_q_loss_proxy_kvar':network_q_loss_proxy_kvar,'root_q_kvar':root_q_kvar.astype(np.float32),'root_q_residual_kvar':(root_q_kvar.astype(np.float32)-background_q_base_total_kvar-network_q_loss_proxy_kvar).astype(np.float32)})
+def build_misocp_validation_df(rows:list[dict[str,Any]])->pd.DataFrame:
+	records=[]
+	for row in rows:record=dict(row);available=bool(record.get('pp_root_p_available',np.isfinite(float(record.get('pp_root_p_kw',float('nan'))))));record['pp_root_p_available']=available;record['max_vm_abs_err_pu']=float(np.max(np.abs(np.asarray(record.get('misocp_vm_pu',[]),dtype=np.float32)-np.asarray(record.get('pp_vm_pu',[]),dtype=np.float32))))if np.asarray(record.get('misocp_vm_pu',[]),dtype=np.float32).size and np.asarray(record.get('misocp_vm_pu',[]),dtype=np.float32).shape==np.asarray(record.get('pp_vm_pu',[]),dtype=np.float32).shape else float('nan');record['max_line_loading_abs_err_pct']=float(np.max(np.abs(np.asarray(record.get('misocp_line_loading_pct',[]),dtype=np.float32)-np.asarray(record.get('pp_line_loading_pct',[]),dtype=np.float32))))if np.asarray(record.get('misocp_line_loading_pct',[]),dtype=np.float32).size and np.asarray(record.get('misocp_line_loading_pct',[]),dtype=np.float32).shape==np.asarray(record.get('pp_line_loading_pct',[]),dtype=np.float32).shape else float('nan');record['trafo_loading_abs_err_pct']=float(np.max(np.abs(np.asarray(record.get('misocp_trafo_loading_pct',[]),dtype=np.float32)-np.asarray(record.get('pp_trafo_loading_pct',[]),dtype=np.float32))))if np.asarray(record.get('misocp_trafo_loading_pct',[]),dtype=np.float32).size and np.asarray(record.get('misocp_trafo_loading_pct',[]),dtype=np.float32).shape==np.asarray(record.get('pp_trafo_loading_pct',[]),dtype=np.float32).shape else float('nan');record['root_p_abs_err_kw']=float(abs(float(record.get('root_p_kw',float('nan')))-float(record.get('pp_root_p_kw',float('nan')))))if available and np.isfinite(float(record.get('pp_root_p_kw',float('nan'))))else float('nan');record['root_s_abs_err_kva']=float(abs(float(record.get('misocp_root_s_kva',float('nan')))-float(record.get('pp_root_s_kva',float('nan')))))if np.isfinite(float(record.get('misocp_root_s_kva',float('nan'))))and np.isfinite(float(record.get('pp_root_s_kva',float('nan'))))else float('nan');record['root_power_validation_unavailable']=bool(not available);limits=[record['max_vm_abs_err_pu']<=.01 if np.isfinite(record['max_vm_abs_err_pu'])else False,record['max_line_loading_abs_err_pct']<=1. if np.isfinite(record['max_line_loading_abs_err_pct'])else False,record['trafo_loading_abs_err_pct']<=1. if np.isfinite(record['trafo_loading_abs_err_pct'])else False,record['root_p_abs_err_kw']<=1. if np.isfinite(record['root_p_abs_err_kw'])else True];record['within_tolerance']=bool(all(limits));records.append(record)
+	return pd.DataFrame(records)
+def summarize_misocp_validation(validation_df:pd.DataFrame)->pd.Series:
+	if validation_df.empty:return pd.Series({'steps_outside_tolerance':0,'pp_root_p_available_ratio':float('nan'),'root_power_validation_unavailable':False,'root_p_fit_k':float('nan'),'root_p_fit_b':float('nan'),'root_p_fit_r2':float('nan'),'root_s_fit_k':float('nan'),'root_s_fit_b':float('nan'),'root_s_fit_r2':float('nan'),'max_solver_feeder_gap_kw':float('nan'),'mean_abs_solver_feeder_gap_kw':float('nan'),'max_replay_feeder_gap_kw':float('nan'),'mean_abs_replay_feeder_gap_kw':float('nan'),'p95_soc_slack':float('nan'),'root_p_fit_interpretation':'insufficient_data'},name='misocp_validation_summary')
+	root_p_fit=_linear_fit_summary(validation_df.get('root_p_kw',pd.Series(dtype=float)),validation_df.get('pp_root_p_kw',pd.Series(dtype=float)));root_s_fit=_linear_fit_summary(validation_df.get('misocp_root_s_kva',pd.Series(dtype=float)),validation_df.get('pp_root_s_kva',pd.Series(dtype=float)));interpretation='insufficient_data'if not all(np.isfinite(root_p_fit[key])for key in('k','b','r2'))else'consistent'if abs(root_p_fit['k']-1.)<=.05 and abs(root_p_fit['b'])<=1. and root_p_fit['r2']>.99 else'nonlinear_or_noise_dominated'if root_p_fit['r2']<.9 else'systematic_linear_bias';return pd.Series({'steps_outside_tolerance':int((~validation_df.get('within_tolerance',pd.Series(False,index=validation_df.index)).astype(bool)).sum()),'pp_root_p_available_ratio':float(validation_df.get('pp_root_p_available',pd.Series(False,index=validation_df.index)).astype(bool).mean()),'root_power_validation_unavailable':bool((~validation_df.get('pp_root_p_available',pd.Series(True,index=validation_df.index)).astype(bool)).any()),'root_p_fit_k':root_p_fit['k'],'root_p_fit_b':root_p_fit['b'],'root_p_fit_r2':root_p_fit['r2'],'root_s_fit_k':root_s_fit['k'],'root_s_fit_b':root_s_fit['b'],'root_s_fit_r2':root_s_fit['r2'],'max_solver_feeder_gap_kw':float(np.nanmax(np.abs(validation_df.get('solver_feeder_gap_kw',pd.Series(dtype=float)).to_numpy(dtype=np.float64))))if'solver_feeder_gap_kw'in validation_df.columns else float('nan'),'mean_abs_solver_feeder_gap_kw':float(np.nanmean(np.abs(validation_df.get('solver_feeder_gap_kw',pd.Series(dtype=float)).to_numpy(dtype=np.float64))))if'solver_feeder_gap_kw'in validation_df.columns else float('nan'),'max_replay_feeder_gap_kw':float(np.nanmax(np.abs(validation_df.get('replay_feeder_gap_kw',pd.Series(dtype=float)).to_numpy(dtype=np.float64))))if'replay_feeder_gap_kw'in validation_df.columns else float('nan'),'mean_abs_replay_feeder_gap_kw':float(np.nanmean(np.abs(validation_df.get('replay_feeder_gap_kw',pd.Series(dtype=float)).to_numpy(dtype=np.float64))))if'replay_feeder_gap_kw'in validation_df.columns else float('nan'),'p95_soc_slack':float(np.nanmax(validation_df.get('soc_slack_p95_global',pd.Series(dtype=float)).to_numpy(dtype=np.float64)))if'soc_slack_p95_global'in validation_df.columns else float('nan'),'root_p_fit_interpretation':interpretation},name='misocp_validation_summary')
+def build_misocp_validation_artifacts(env:Any,problem:Any,full_input:Any,result:Any,*,controller_label:str,export_subsidy:float,agent_profiles:list[str]|tuple[str,...]|None=None,agent_bus_ids:list[int]|tuple[int,...]|None=None,v_min_pu:float|None=None,v_max_pu:float|None=None)->dict[str,Any]:
+	from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy,merge_action_info_into_step_info;from controllers.mpc.global_socp_mpc import _SIMULTANEOUS_THRESHOLD_RATIO;from scripts.utils.grid_notebook_workflow import RolloutResult,_aligned_prediction,_build_rollout_records,_step_timestamp;resolved_profiles=list(agent_profiles or[f"agent_{idx}"for idx in range(int(env.n))]);resolved_agent_bus_ids=list(agent_bus_ids or getattr(getattr(env,'_grid_core',None),'agent_bus_ids',[]));bus_ids=[int(bus_id)for bus_id in env._grid_core.net.bus.index.tolist()];agent_bus_set=set(resolved_agent_bus_ids);fixed_load_kw,fixed_generation_kw=_fixed_feeder_components_from_problem(problem);trafo_limit_reference_kw=float(problem.trafo_limit_mva)*1e3;threshold_kw=(_SIMULTANEOUS_THRESHOLD_RATIO*np.asarray(env.agent_p_max,dtype=np.float32)).astype(np.float32);step_rows:list[dict[str,object]]=[];agent_rows:list[dict[str,object]]=[];grid_rows:list[dict[str,object]]=[];diagnostic_rows:list[dict[str,object]]=[];carried_soc=np.asarray(full_input.soc_init,dtype=np.float32).copy();timestamps=_timestamps_from_full_input(full_input);soc_relaxation_artifacts=build_soc_relaxation_diagnostics(problem,full_input,result,top_k=20);soc_relaxation_step_df,soc_relaxation_worst_df,soc_relaxation_summary=soc_relaxation_artifacts['step_df'],soc_relaxation_artifacts['worst_df'],soc_relaxation_artifacts['summary'];root_q_diagnostic_df=build_root_q_diagnostic_df(problem,full_input,result);soc_relaxation_lookup=soc_relaxation_step_df.set_index('global_step',drop=False)if not soc_relaxation_step_df.empty else pd.DataFrame();root_q_lookup=root_q_diagnostic_df.set_index('global_step',drop=False)if not root_q_diagnostic_df.empty else pd.DataFrame();reward_cfg=getattr(env,'_reward_cfg',None);soc_pen_weight,import_price_markup=float(getattr(reward_cfg,'w_soc_pen',.0)),float(getattr(reward_cfg,IMPORT_PRICE_MARKUP_KEY,.0))
+	for(episode_list_idx,episode_idx)in enumerate(np.asarray(full_input.episode_indices,dtype=np.int32).tolist()):
+		obs,reset_info=env.reset(episode_idx=int(episode_idx))
+		if episode_list_idx>0:env.soc=carried_soc.copy();obs=env.obs_builder.build(env)
+		raw_obs=env.obs_builder.build_raw(env);previous_raw_obs=None;episode_offset,episode_length=int(np.asarray(full_input.episode_offsets,dtype=np.int32)[episode_list_idx]),int(np.asarray(full_input.episode_lengths,dtype=np.int32)[episode_list_idx])
+		for step_in_episode in range(episode_length):global_step=episode_offset+step_in_episode;timestamp=timestamps[global_step]if global_step<len(timestamps)else _step_timestamp(reset_info,step_in_episode);wholesale_price_pred=_aligned_prediction(previous_raw_obs,raw_obs,WHOLESALE_PRICE_SEQ_FIELD);import_price_pred=float(derive_import_price(wholesale_price_pred,markup_eur_per_kwh=import_price_markup));load_pred,pv_pred=_aligned_prediction(previous_raw_obs,raw_obs,'load_seq'),_aligned_prediction(previous_raw_obs,raw_obs,'pv_seq');battery_power_kw,pv_curtail_kw=((np.asarray(result.battery_charge_mw[:,global_step],dtype=np.float32)-np.asarray(result.battery_discharge_mw[:,global_step],dtype=np.float32))*1e3).astype(np.float32),(np.asarray(result.pv_curtail_mw[:,global_step],dtype=np.float32)*1e3).astype(np.float32);actions,action_array=_assemble_global_oracle_actions(env,battery_power_kw,pv_curtail_kw);action_info=compute_action_gap_metrics_numpy(build_safety_local_numpy(soc=np.asarray(env.soc,dtype=np.float32),load_raw=np.asarray(env.get_signal_step('load'),dtype=np.float32),pv_raw=np.asarray(env.get_signal_step('pv'),dtype=np.float32),battery_capacity_kwh=np.asarray(env.agent_c_bat,dtype=np.float32),p_max_kw=np.asarray(env.agent_p_max,dtype=np.float32)),action_array,action_array);simultaneous_kw=(np.minimum(np.asarray(result.battery_charge_mw[:,global_step],dtype=np.float32),np.asarray(result.battery_discharge_mw[:,global_step],dtype=np.float32))*1e3).astype(np.float32);simultaneous_mask=simultaneous_kw>threshold_kw;action_info.update({'misocp_fallback':np.asarray(.0,dtype=np.float32),'misocp_time_limit_feasible':np.asarray(float(result.time_limit_feasible),dtype=np.float32),'solve_time_sec':np.asarray(float(result.solve_time_sec),dtype=np.float32),'root_import_kw':np.asarray(float(result.root_import_mw[global_step]*1e3),dtype=np.float32),'root_export_kw':np.asarray(float(result.root_export_mw[global_step]*1e3),dtype=np.float32),'simultaneous_charge_discharge_kw_total':np.asarray(float(np.sum(simultaneous_kw)),dtype=np.float32),'simultaneous_agent_count':np.asarray(float(np.sum(simultaneous_mask)),dtype=np.float32),'simultaneous_step_flag':np.asarray(float(np.any(simultaneous_mask)),dtype=np.float32)});next_obs,reward,terminated,truncated,info=env.step(actions);info,action_penalty=merge_action_info_into_step_info(info,action_info,soc_pen_weight=soc_pen_weight,apply_action_penalty=False);info['reward']=(np.asarray(reward,dtype=np.float32).reshape(-1)-np.asarray(action_penalty,dtype=np.float32)).astype(np.float32);del terminated,truncated;raw_next_obs=env.obs_builder.build_raw(env)if not bool(info.get('episode_done',False))else next_obs;soc_row,root_q_row=soc_relaxation_lookup.loc[int(global_step)]if not soc_relaxation_lookup.empty else None,root_q_lookup.loc[int(global_step)]if not root_q_lookup.empty else None;rollout_records=_build_rollout_records(controller_label=controller_label,episode_idx=int(episode_idx),step_in_episode=step_in_episode,timestamp=timestamp,info=info,load_pred=load_pred,pv_pred=pv_pred,wholesale_price_pred=float(wholesale_price_pred),import_price_pred=float(import_price_pred),agent_profiles=resolved_profiles,bus_ids=bus_ids,agent_bus_set=agent_bus_set,dt_hours=float(env.dt),export_subsidy=float(export_subsidy),fixed_load_kw=fixed_load_kw,fixed_generation_kw=fixed_generation_kw,global_step=int(global_step));step_row=rollout_records['step_row'];pp_root_p_kw,pp_root_p_available=float(rollout_records['pp_root_p_kw']),bool(step_row['pp_root_p_available']);agent_post_action_net_load_kw,feeder_post_action_net_load_kw=float(step_row['agent_post_action_net_load_kw']),float(step_row['feeder_post_action_net_load_kw']);pp_trafo_loading_pct=rollout_records['pp_trafo_loading_pct'];step_row.update({'root_net_exchange_kw':float(result.root_p_kw[global_step]),'agent_root_gap_kw':float(result.root_p_kw[global_step]-agent_post_action_net_load_kw),'solver_feeder_gap_kw':float(result.root_p_kw[global_step]-feeder_post_action_net_load_kw),'replay_feeder_gap_kw':float(pp_root_p_kw-feeder_post_action_net_load_kw)if pp_root_p_available else float('nan'),'misocp_root_s_kva':float(np.hypot(float(result.root_p_kw[global_step]),float(result.root_q_kvar[global_step]))),'pp_root_s_kva':float(np.max(pp_trafo_loading_pct)/1e2*float(problem.network.s_base_mva)*1e3)if pp_trafo_loading_pct.size else float('nan'),'soc_slack_max':float(soc_row['soc_slack_max'])if soc_row is not None else float('nan'),'soc_slack_mean':float(soc_row['soc_slack_mean'])if soc_row is not None else float('nan'),'soc_slack_p95_global':float(soc_relaxation_summary.get('p95_soc_slack',float('nan')))if not soc_relaxation_summary.empty else float('nan'),'background_q_base_total_kvar':float(root_q_row['background_q_base_total_kvar'])if root_q_row is not None else float('nan'),'network_q_loss_proxy_kvar':float(root_q_row['network_q_loss_proxy_kvar'])if root_q_row is not None else float('nan'),'root_q_residual_kvar':float(root_q_row['root_q_residual_kvar'])if root_q_row is not None else float('nan')});step_rows.append(step_row);diagnostic_rows.append({'controller':controller_label,'episode_idx':int(episode_idx),'step':int(step_in_episode),'timestamp':timestamp,'solve_time_sec':float(result.solve_time_sec),'misocp_vm_pu':np.asarray(result.bus_vm_pu[:,global_step],dtype=np.float32).copy(),'pp_vm_pu':rollout_records['pp_vm_pu'],'misocp_line_loading_pct':np.asarray(result.line_loading_pct[:,global_step],dtype=np.float32).copy(),'pp_line_loading_pct':rollout_records['pp_line_loading_pct'],'misocp_trafo_loading_pct':np.asarray(result.trafo_loading_pct[:,global_step],dtype=np.float32).copy(),'pp_trafo_loading_pct':pp_trafo_loading_pct,'root_p_kw':float(result.root_p_kw[global_step]),'pp_root_p_kw':pp_root_p_kw,'pp_root_p_available':pp_root_p_available,'misocp_root_s_kva':float(step_row['misocp_root_s_kva']),'pp_root_s_kva':float(step_row['pp_root_s_kva']),'root_q_kvar':float(result.root_q_kvar[global_step]),'soc_slack_max':float(step_row['soc_slack_max']),'soc_slack_mean':float(step_row['soc_slack_mean']),'soc_slack_p95_global':float(step_row['soc_slack_p95_global']),'background_q_base_total_kvar':float(step_row['background_q_base_total_kvar']),'network_q_loss_proxy_kvar':float(step_row['network_q_loss_proxy_kvar']),'root_q_residual_kvar':float(step_row['root_q_residual_kvar']),'solver_feeder_gap_kw':float(step_row['solver_feeder_gap_kw']),'replay_feeder_gap_kw':float(step_row['replay_feeder_gap_kw'])});agent_rows.extend(rollout_records['agent_rows']);grid_rows.extend(rollout_records['grid_rows']);previous_raw_obs,obs,raw_obs=raw_obs,next_obs,raw_next_obs
+		carried_soc=np.asarray(env.soc,dtype=np.float32).copy()
+	step_df=pd.DataFrame(step_rows).sort_values(['episode_idx','step']).reset_index(drop=True);agent_df=pd.DataFrame(agent_rows).sort_values(['episode_idx','step','agent_id']).reset_index(drop=True);grid_df=pd.DataFrame(grid_rows).sort_values(['episode_idx','step','bus_id']).reset_index(drop=True);summary=agent_df.groupby(['controller','agent_profile'],as_index=False)[['purchase_cost','export_subsidy','objective_total']].sum()if{'purchase_cost','export_subsidy','objective_total'}.issubset(agent_df.columns)else pd.DataFrame();validation_df=build_misocp_validation_df(diagnostic_rows);validation_summary=summarize_misocp_validation(validation_df);health_warning='MISOCP-vs-pandapower validation exceeded at least one tolerance.'if not validation_df.empty and bool((~validation_df['within_tolerance']).any())else''
+	if bool(validation_summary.get('root_power_validation_unavailable',False)):health_warning=(health_warning+' 'if health_warning else'')+'Root-power validation is unavailable for at least one step because GridEnv did not expose trafo_p_signed_kw.'
+	rollout=RolloutResult(step_df=step_df,agent_df=agent_df,grid_df=grid_df,summary=summary,meta={'controller':controller_label,'agent_profiles':resolved_profiles,'agent_bus_ids':resolved_agent_bus_ids,'bus_ids':bus_ids,'v_min_pu':np.nan if v_min_pu is None else float(v_min_pu),'v_max_pu':np.nan if v_max_pu is None else float(v_max_pu),'trafo_limit_kw':trafo_limit_reference_kw,'misocp_validation_df':validation_df,'misocp_validation_summary':validation_summary,'misocp_health_warning':health_warning,'soc_relaxation_summary':soc_relaxation_summary,'economics_scope':'agent_only'});return{'rollout':rollout,'step_df':step_df,'agent_df':agent_df,'grid_df':grid_df,'diagnostic_rows':diagnostic_rows,'validation_df':validation_df,'validation_summary':validation_summary,'soc_relaxation_step_df':soc_relaxation_step_df,'soc_relaxation_worst_df':soc_relaxation_worst_df,'soc_relaxation_summary':soc_relaxation_summary,'root_q_diagnostic_df':root_q_diagnostic_df}
+def collect_global_full_horizon_rollout(cfg,*,label:str|None=None,time_limit_sec:float=6e2):
+	from controllers.mpc.global_socp_mpc import GurobiSolveConfig,GlobalMISOCPProblem,_FULL_HORIZON_TIME_LIMIT_SEC,default_primary_solve_config;from scripts.builder import build_env;from scripts.utils.grid_notebook_workflow import PERFECT_PREDICTION_MODE,build_comparison_cfg,ensure_forecast_ready,resolve_evaluation_mode;comparison_cfg=build_comparison_cfg(cfg,prediction_mode=PERFECT_PREDICTION_MODE);rollout_label=str(label)if label is not None else'';resolved_time_limit=float(time_limit_sec if time_limit_sec is not None else _FULL_HORIZON_TIME_LIMIT_SEC);comparison_cfg.runtime.forecast_ready=None if getattr(getattr(comparison_cfg,'runtime',None),'shared_data_dir',None)not in(None,'')else ensure_forecast_ready(comparison_cfg);env=build_env(comparison_cfg,mode='test')
+	try:
+		problem=GlobalMISOCPProblem.from_env(env,comparison_cfg);selected_episode_indices=list(getattr(comparison_cfg.runtime,'selected_episode_indices',[])or[]);full_input=problem.build_full_horizon_input(env,episode_indices=None if not selected_episode_indices else selected_episode_indices);export_subsidy=float(getattr(comparison_cfg.reward,'export_subsidy_eur_per_kwh',problem.export_subsidy_default));primary_config=default_primary_solve_config();primary_config=GurobiSolveConfig(time_limit_sec=resolved_time_limit,mip_gap=float(primary_config.mip_gap),threads=primary_config.threads,presolve=primary_config.presolve,cuts=primary_config.cuts,heuristics=primary_config.heuristics,mip_focus=primary_config.mip_focus);result=problem.solve_chunked_windows(full_input,export_subsidy=export_subsidy,chunk_steps=min(96,int(full_input.horizon_steps)),verbose=False,solve_config=primary_config);solve_mode=str(result.solve_mode)
+		if not result.has_solution:raise RuntimeError(f"Global MISOCP failed to produce a feasible incumbent in solve_mode={solve_mode!r}. Final status={result.status_label!r}.")
+		if not rollout_label:rollout_label='Global MISOCP (chunked_window)'
+		validation_artifacts=build_misocp_validation_artifacts(env,problem,full_input,result,controller_label=rollout_label,export_subsidy=export_subsidy,agent_profiles=list(comparison_cfg.data.agent_profiles),agent_bus_ids=list(comparison_cfg.grid.agent_bus_ids),v_min_pu=float(comparison_cfg.grid.v_min_pu),v_max_pu=float(comparison_cfg.grid.v_max_pu));rollout=validation_artifacts['rollout'];simultaneous_step_ratio=float(rollout.step_df['simultaneous_step_flag'].mean())if not rollout.step_df.empty and'simultaneous_step_flag'in rollout.step_df.columns else .0;rollout.meta.update({'controller':rollout_label,'n_agents':int(env.n),'agent_profiles':list(comparison_cfg.data.agent_profiles),'agent_bus_ids':list(comparison_cfg.grid.agent_bus_ids),'future_horizon':int(comparison_cfg.env.future_horizon),'prediction_mode':PERFECT_PREDICTION_MODE,'evaluation_mode':resolve_evaluation_mode(PERFECT_PREDICTION_MODE),'dt_hours':float(comparison_cfg.env.dt),'loading_limit_pct':float(comparison_cfg.grid.line_max_loading_pct),'trafo_loading_limit_pct':float(comparison_cfg.grid.line_max_loading_pct),'export_subsidy_eur_per_kwh':export_subsidy,IMPORT_PRICE_MARKUP_KEY:float(getattr(getattr(comparison_cfg,'reward',None),IMPORT_PRICE_MARKUP_KEY,.0)),'soc_mode':'continuous','solve_mode':solve_mode,'global_oracle_time_limit_sec':resolved_time_limit,'global_oracle_runtime_sec':float(result.solve_time_sec),'global_oracle_gap':float(result.mip_gap),'global_oracle_status_label':str(result.status_label),'agent_purchase_cost_eur':float(result.agent_purchase_cost_eur),'agent_export_subsidy_eur':float(result.agent_export_subsidy_eur),'agent_net_cost_eur':float(result.agent_net_cost_eur),'feeder_purchase_cost_eur':float(result.feeder_purchase_cost_eur),'feeder_export_subsidy_eur':float(result.feeder_export_subsidy_eur),'feeder_net_cost_eur':float(result.feeder_net_cost_eur),'episode_offsets':np.asarray(full_input.episode_offsets,dtype=np.int32).copy(),'episode_lengths':np.asarray(full_input.episode_lengths,dtype=np.int32).copy(),'misocp_simultaneous_step_ratio':simultaneous_step_ratio,'is_near_optimal':bool(solve_mode=='chunked_window'),'misocp_validation_df':validation_artifacts['validation_df'],'misocp_validation_summary':validation_artifacts['validation_summary']});return rollout
+	finally:env.close()

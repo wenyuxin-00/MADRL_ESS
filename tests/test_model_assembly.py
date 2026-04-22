@@ -13,7 +13,7 @@ from controllers.madrl.base_agent import get_agent_cls
 from controllers.madrl_controller import MADRLController
 from models.assembly import build_actor_network, build_critic_network, validate_and_finalize_model_config
 from scripts.builder import build_env
-from scripts.utils.nested import add_batch_dim, to_torch_nested
+from scripts.utils.torch_runtime import add_batch_dim, to_torch_nested
 from tests.support.helpers import make_case_dir, make_smoke_config
 
 
