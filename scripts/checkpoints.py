@@ -14,12 +14,21 @@ def _format_run_timestamp(timestamp:datetime|str|None=None)->str:
 	return timestamp.strftime('%Y%m%d_%H%M%S')if isinstance(timestamp,datetime)else str(timestamp).strip()
 def build_training_run_label(*,algorithm:str,prediction_mode:str,experiment_name:str,train_episodes:int|None,max_train_steps:int|None,timestamp:datetime|str|None=None)->str:algorithm_token=slugify_checkpoint_token(algorithm,default='model');prediction_token=slugify_checkpoint_token(prediction_mode,default='perfect');experiment_token=slugify_checkpoint_token(experiment_name,default='grid_mainline');budget_token=build_checkpoint_budget_token(train_episodes=train_episodes,max_train_steps=max_train_steps);time_token=slugify_checkpoint_token(_format_run_timestamp(timestamp),default='run');return'_'.join([algorithm_token,prediction_token,experiment_token,budget_token,time_token])
 def build_training_run_paths(checkpoint_root,*,algorithm:str,prediction_mode:str,experiment_name:str,train_episodes:int|None,max_train_steps:int|None,timestamp:datetime|str|None=None)->dict[str,object]:checkpoint_root=Path(checkpoint_root).resolve();algorithm_token=str(algorithm).strip();prediction_token=slugify_checkpoint_token(prediction_mode,default='perfect');experiment_token=slugify_checkpoint_token(experiment_name,default='grid_mainline');run_label=build_training_run_label(algorithm=algorithm_token,prediction_mode=prediction_token,experiment_name=experiment_token,train_episodes=train_episodes,max_train_steps=max_train_steps,timestamp=timestamp);model_root=checkpoint_root/algorithm_token/prediction_token/experiment_token/run_label;meta_dir=model_root/'_meta';return{'checkpoint_root':checkpoint_root,'algorithm':algorithm_token,'prediction_mode':prediction_token,'experiment_name':experiment_token,'run_label':run_label,'model_root':model_root,'meta_dir':meta_dir,'result_json_path':meta_dir/'train_result.json','progress_json_path':meta_dir/'progress.json','log_path':meta_dir/'train.log'}
+def _run_has_result_metadata(run_dir:Path)->bool:return(run_dir/'_meta'/'train_result.json').exists()
+def _run_is_loadable(run_dir:Path,algorithm:str)->bool:
+	if not _run_has_result_metadata(run_dir):return False
+	try:resolve_checkpoint_to_load(run_dir,algorithm)
+	except FileNotFoundError:return False
+	return True
 def find_latest_training_run(checkpoint_root,*,algorithm:str,prediction_mode:str,experiment_name:str)->Path:
 	checkpoint_root=Path(checkpoint_root).resolve();base_dir=checkpoint_root/str(algorithm).strip()/slugify_checkpoint_token(prediction_mode,default='perfect')/slugify_checkpoint_token(experiment_name,default='grid_mainline')
 	if not base_dir.exists():raise FileNotFoundError(f"No training runs found under '{base_dir}'.")
 	candidates=sorted((path for path in base_dir.iterdir()if path.is_dir()and path.name!='_meta'),key=lambda path:('_'.join(path.name.rsplit('_',2)[-2:])if len(path.name.rsplit('_',2))>=3 else path.name,path.name))
 	if not candidates:raise FileNotFoundError(f"No run directories found under '{base_dir}'.")
-	return candidates[-1]
+	loadable_candidates=[path for path in candidates if _run_is_loadable(path,str(algorithm).strip())]
+	if loadable_candidates:return loadable_candidates[-1]
+	incomplete_runs=', '.join(path.name for path in candidates[-3:])
+	raise FileNotFoundError(f"No complete training runs were found under '{base_dir}'. Found only incomplete run directories: {incomplete_runs}. Re-run the canonical notebook to produce a full checkpoint bundle with train_result.json.")
 def get_algorithm_checkpoint_dir(model_dir,algorithm:str)->Path:return Path(model_dir)/algorithm
 def checkpoint_tag_exists(algo_dir,episode_tag:int)->bool:algo_dir=Path(algo_dir);actor_files=list(algo_dir.glob(f"actor_agent_*_ep_{episode_tag}.pth"));critic_files=list(algo_dir.glob(f"critic_agent_*_ep_{episode_tag}.pth"));return bool(actor_files)and bool(critic_files)
 def infer_latest_checkpoint_tag(model_dir,algorithm:str)->int:

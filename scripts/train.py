@@ -74,14 +74,16 @@ class TrainRunner:
 	def select_action_batch(self,obs_np:dict)->np.ndarray:return self._select_action_batch_with_info(obs_np)[0]
 	_apply_controller_action_postprocessing=apply_controller_action_postprocessing;_build_shared_update_ctx=build_shared_update_ctx;_select_action_batch_with_info=select_action_batch_with_info;build_reward_summary=build_reward_summary;build_safety_summary=build_safety_summary;close=close_runner;save_model=save_runner_model
 	def run(self)->int:
-		target_interactions=self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit)//self.cfg.train.num_envs;interaction_step=episodes_completed=update_calls=0;noise_decay=float(self.cfg.train.resolved_noise_std_decay());started_at=datetime.now().astimezone();run_start=time.perf_counter();action_time_total=env_step_time_total=update_time_total=.0;reward_metas=list(self.env_evaluate.reward_fn.component_meta);self.reward_component_meta=reward_metas;self.episode_reward_components={str(meta.key):[]for meta in reward_metas};progress_postfix_interval=max(1,int(getattr(self.cfg.train,'progress_postfix_interval',10)));active_episode_rewards=np.zeros(self.cfg.train.num_envs,dtype=np.float32);active_component_totals={str(meta.key):np.zeros(self.cfg.train.num_envs,dtype=np.float32)for meta in reward_metas};progress=tqdm(total=target_interactions,desc='Training',unit='iters',disable=not bool(getattr(self.cfg.train,'show_progress',True)));pending_progress_steps,last_progress_emit_step=0,-1
-		def emit_progress(*,force:bool=False)->None:
-			nonlocal pending_progress_steps,last_progress_emit_step
-			if not(force or interaction_step%progress_postfix_interval==0 or interaction_step>=target_interactions):return
-			if force and pending_progress_steps==0 and last_progress_emit_step==interaction_step:return
+		target_interactions=self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit)//self.cfg.train.num_envs;interaction_step=episodes_completed=update_calls=0;noise_decay=float(self.cfg.train.resolved_noise_std_decay());started_at=datetime.now().astimezone();run_start=time.perf_counter();action_time_total=env_step_time_total=update_time_total=.0;reward_metas=list(self.env_evaluate.reward_fn.component_meta);self.reward_component_meta=reward_metas;self.episode_reward_components={str(meta.key):[]for meta in reward_metas};progress_episode_interval=max(1,int(getattr(self.cfg.train,'progress_episode_interval',10)));active_episode_rewards=np.zeros(self.cfg.train.num_envs,dtype=np.float32);active_component_totals={str(meta.key):np.zeros(self.cfg.train.num_envs,dtype=np.float32)for meta in reward_metas};progress=tqdm(total=max(target_interactions,1),desc='Training',unit='step',disable=not bool(getattr(self.cfg.train,'show_progress',True)));last_progress_emit_episode,next_progress_episode_mark=-1,progress_episode_interval
+		def emit_progress_postfix(*,force:bool=False)->None:
+			nonlocal last_progress_emit_episode,next_progress_episode_mark
+			if episodes_completed<=0:return
+			if not force and episodes_completed<next_progress_episode_mark:return
+			if last_progress_emit_episode==episodes_completed:return
 			avg_reward=float(np.mean(self.episode_rewards[-50:]))if self.episode_rewards else .0;elapsed_seconds=max(time.perf_counter()-run_start,.0);remaining_seconds=_estimate_remaining_seconds(interaction_step=interaction_step,target_interactions=target_interactions,elapsed_seconds=elapsed_seconds)
-			if pending_progress_steps>0:progress.update(pending_progress_steps);pending_progress_steps=0
-			last_progress_emit_step=interaction_step;progress.set_postfix({'avg_reward':f"{avg_reward:.2f}",'steps/s':f"{self.total_steps/max(time.perf_counter()-run_start,1e-06):.1f}",'act_ms':f"{1e3*action_time_total/max(interaction_step,1):.2f}",'env_ms':f"{1e3*env_step_time_total/max(interaction_step,1):.2f}",'upd_ms':f"{1e3*update_time_total/max(update_calls,1):.2f}",'eta':'--'if remaining_seconds is None else f"{remaining_seconds:.1f}s"})
+			last_progress_emit_episode=episodes_completed
+			while episodes_completed>=next_progress_episode_mark:next_progress_episode_mark+=progress_episode_interval
+			progress.set_postfix({'avg_reward':f"{avg_reward:.2f}",'steps/s':f"{self.total_steps/max(time.perf_counter()-run_start,1e-06):.1f}",'act_ms':f"{1e3*action_time_total/max(interaction_step,1):.2f}",'env_ms':f"{1e3*env_step_time_total/max(interaction_step,1):.2f}",'upd_ms':f"{1e3*update_time_total/max(update_calls,1):.2f}",'eta':'--'if remaining_seconds is None else f"{remaining_seconds:.1f}s"})
 		try:
 			obs,_=self.env.reset()
 			while interaction_step<target_interactions:
@@ -89,14 +91,16 @@ class TrainRunner:
 				for(env_idx,info)in enumerate(info_list):
 					step_total=float(np.sum(reward[env_idx]));active_episode_rewards[env_idx]+=step_total
 					for meta in reward_metas:component_key=str(meta.key);component_value=float(np.sum(np.asarray(info[meta.key],dtype=np.float32)));active_component_totals[component_key][env_idx]+=float(meta.sign)*component_value
-				self.replay_buffer.store_transitions_batched(obs,action_batch,reward,next_obs,done);obs=next_obs;interaction_step+=1;pending_progress_steps+=1;self.total_steps+=self.cfg.train.num_envs
+				self.replay_buffer.store_transitions_batched(obs,action_batch,reward,next_obs,done);obs=next_obs;interaction_step+=1;self.total_steps+=self.cfg.train.num_envs;progress.update(1)
+				completed_episodes_this_step=0
 				for(env_idx,info)in enumerate(info_list):
 					if not bool(info.get('episode_done',False)):continue
 					episode_reward=float(active_episode_rewards[env_idx]);self.episode_rewards.append(episode_reward)
 					for meta in reward_metas:component_key=str(meta.key);self.episode_reward_components[component_key].append(float(active_component_totals[component_key][env_idx]))
 					self.writer.add_scalar('train_episode_total_reward',episode_reward,global_step=self.total_steps);active_episode_rewards[env_idx]=.0
 					for meta in reward_metas:active_component_totals[str(meta.key)][env_idx]=.0
-					episodes_completed+=1;self.episodes_completed=episodes_completed
+					episodes_completed+=1;self.episodes_completed=episodes_completed;completed_episodes_this_step+=1
+				if completed_episodes_this_step>0:emit_progress_postfix()
 				if self.cfg.train.use_noise_decay:self.noise_std=max(self.noise_std-noise_decay,float(self.cfg.train.noise_std_min))
 				if self.replay_buffer.current_size>=self.cfg.train.batch_size and interaction_step%self.cfg.train.update_interval==0:
 					update_start=time.perf_counter()
@@ -105,6 +109,5 @@ class TrainRunner:
 						for agent in self.agent_n:agent.train_on_batch(batch_torch,self.agent_n,shared_ctx=shared_update_ctx)
 						update_calls+=1
 					update_time_total+=time.perf_counter()-update_start
-				emit_progress()
-		finally:emit_progress(force=True);progress.close()
+		finally:emit_progress_postfix(force=True);progress.close()
 		finished_at=datetime.now().astimezone();total_elapsed=max(time.perf_counter()-run_start,1e-06);self.run_metadata={'started_at':_iso_timestamp(started_at),'finished_at':_iso_timestamp(finished_at),'elapsed_seconds':float(round(total_elapsed,3)),'estimated_end_time':_iso_timestamp(finished_at)};self.perf_summary={'seed':self.seed,'runtime_mode':str(self.cfg.runtime.execution_mode),'device':str(self.cfg.runtime.device),'vec_env':self.vec_env_name,'total_wall_time_s':total_elapsed,'action_time_s':action_time_total,'env_step_time_s':env_step_time_total,'update_time_s':update_time_total,'sample_time_s':.0,'history_time_s':.0,'agent_update_time_s':.0,'update_calls':update_calls,'steps_per_sec':self.total_steps/total_elapsed,'avg_action_ms_per_iter':1e3*action_time_total/max(interaction_step,1),'avg_env_ms_per_iter':1e3*env_step_time_total/max(interaction_step,1),'avg_update_ms_per_call':1e3*update_time_total/max(update_calls,1),'projection_time_s':float(sum(stage_stats['time_s']for stage_stats in self._safety_projection_stats.values())),'rollout_projection_time_s':float(self._safety_projection_stats['rollout']['time_s']),'target_projection_time_s':float(self._safety_projection_stats['target']['time_s']),'actor_projection_time_s':float(self._safety_projection_stats['actor']['time_s']),'rollout_projection_calls':int(self._safety_projection_stats['rollout']['calls']),'target_projection_calls':int(self._safety_projection_stats['target']['calls']),'actor_projection_calls':int(self._safety_projection_stats['actor']['calls'])};self.episodes_completed=episodes_completed;return episodes_completed

@@ -6,6 +6,8 @@ def test_resolve_madrl_model_root_supports_auto_discovery_and_algo_dir(tmp_path)
     run_root = checkpoint_root / "MATD3" / "perfect" / "grid_mainline" / "matd3_perfect_grid_mainline_ep10_20260325_120000"
     algo_dir = run_root / "MATD3"
     algo_dir.mkdir(parents=True, exist_ok=True)
+    (run_root / "_meta").mkdir(parents=True, exist_ok=True)
+    (run_root / "_meta" / "train_result.json").write_text("{}", encoding="utf-8")
     (algo_dir / "actor_agent_0_ep_10.pth").write_bytes(b"actor")
     (algo_dir / "critic_agent_0_ep_10.pth").write_bytes(b"critic")
 

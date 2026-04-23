@@ -47,7 +47,10 @@ from scripts.utils.grid_notebook_workflow import (
     PERFECT_PREDICTION_MODE,
     RolloutResult,
     apply_notebook_experiment_settings,
+    build_comparison_cfg,
+    bootstrap_madrl_notebook_shared_data,
     collect_controller_rollout,
+    load_rollout_record,
     normalize_date_input,
     plot_battery_power_and_soc_comparison,
     plot_price_prediction_comparison,
@@ -55,8 +58,10 @@ from scripts.utils.grid_notebook_workflow import (
     plot_global_misocp_validation,
     plot_power_balance_comparison,
     plot_voltage_profile_comparison,
+    resolve_madrl_notebook_training,
     resolve_evaluation_mode,
     resolve_forecast_backend,
+    save_rollout_record,
 )
 from predictors.mainline_forecast import (
     get_mainline_forecast_controls,
@@ -88,6 +93,15 @@ def _expand_cfg_to_multiday(cfg, *, evaluation_days: int = 5) -> None:
     )
 
 
+def _enable_normal_comparison_contract(cfg) -> None:
+    shared_data_dir = (Path(cfg.data.data_dir).resolve().parent / "_test_shared_data_contract").resolve()
+    shared_data_dir.mkdir(parents=True, exist_ok=True)
+    cfg.forecast.type = "lstm"
+    cfg.forecast.auto_train_missing = False
+    cfg.runtime.shared_data_dir = str(shared_data_dir)
+    cfg.runtime.shared_data_signature = "sig-normal-contract"
+
+
 def test_resolve_forecast_backend_handles_mainline_modes():
     assert resolve_forecast_backend(PERFECT_PREDICTION_MODE, 24) == "perfect"
     assert resolve_forecast_backend(NORMAL_PREDICTION_MODE, 24) == "lstm"
@@ -98,6 +112,69 @@ def test_resolve_forecast_backend_handles_mainline_modes():
 def test_resolve_evaluation_mode_maps_prediction_modes():
     assert resolve_evaluation_mode(PERFECT_PREDICTION_MODE) == ORACLE_EVAL_MODE
     assert resolve_evaluation_mode(NORMAL_PREDICTION_MODE) == FORECAST_EVAL_MODE
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_fragment"),
+    [
+        ("shared_data_dir", None, "cfg.runtime.shared_data_dir"),
+        ("shared_data_signature", None, "cfg.runtime.shared_data_signature"),
+        ("auto_train_missing", True, "cfg.forecast.auto_train_missing=False"),
+    ],
+)
+def test_build_comparison_cfg_rejects_missing_normal_runtime_contract(tmp_path, field_name, field_value, expected_fragment):
+    case_dir = make_case_dir(tmp_path, f"grid_nb_normal_contract_{field_name}")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _enable_normal_comparison_contract(cfg)
+
+    if field_name == "auto_train_missing":
+        cfg.forecast.auto_train_missing = field_value
+    else:
+        setattr(cfg.runtime, field_name, field_value)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_comparison_cfg(cfg, prediction_mode="normal")
+
+    assert expected_fragment in str(exc_info.value)
+
+
+def test_build_comparison_cfg_allows_perfect_mode_without_shared_data_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_nb_perfect_without_shared_data")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode="perfect")
+
+    assert comparison_cfg.forecast.type == "perfect"
+    assert comparison_cfg.runtime.shared_data_dir is None
+    assert comparison_cfg.runtime.shared_data_signature is None
+
+
+def test_build_comparison_cfg_preserves_normal_shared_data_contract_when_cfg_is_already_lstm(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_nb_normal_with_shared_data")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _enable_normal_comparison_contract(cfg)
+
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode="normal")
+
+    assert comparison_cfg.forecast.type == "lstm"
+    assert comparison_cfg.runtime.shared_data_dir == cfg.runtime.shared_data_dir
+    assert comparison_cfg.runtime.shared_data_signature == cfg.runtime.shared_data_signature
+    assert comparison_cfg.runtime.forecast_ready == cfg.runtime.forecast_ready
+
+
+def test_build_comparison_cfg_clears_only_the_comparison_copy_for_perfect_mode(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_nb_perfect_clears_copy_only")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _enable_normal_comparison_contract(cfg)
+
+    comparison_cfg = build_comparison_cfg(cfg, prediction_mode="perfect")
+
+    assert comparison_cfg.forecast.type == "perfect"
+    assert comparison_cfg.runtime.shared_data_dir is None
+    assert comparison_cfg.runtime.shared_data_signature is None
+    assert comparison_cfg.runtime.forecast_ready is None
+    assert cfg.runtime.shared_data_dir is not None
+    assert cfg.runtime.shared_data_signature == "sig-normal-contract"
 
 
 def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_path):
@@ -256,8 +333,318 @@ def test_apply_notebook_experiment_settings_backfills_partial_forecast_controls_
     assert cfg.forecast.load_component_split is True
     assert cfg.forecast.load_scaler_type == "robust"
     assert cfg.forecast.signal_training_overrides["wholesale_price"]["epochs"] == 99
+
+
+def test_resolve_madrl_notebook_training_builds_external_launch_payloads(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_external")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
+    cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
+    cfg.runtime.shared_data_signature = "sig-123"
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+    captured: dict[str, object] = {}
+
+    def _fake_run_external_train_mainline(**kwargs):
+        captured.update(kwargs)
+        return {
+            "result": {
+                "model_root": str(case_dir / "models" / "run_a"),
+                "shared_data_signature": "sig-123",
+                "episodes_completed": 12,
+            },
+            "launch_info": {"result_json_path": str(case_dir / "models" / "run_a" / "_meta" / "train_result.json")},
+        }
+
+    monkeypatch.setattr(mainline_madrl, "run_external_train_mainline", _fake_run_external_train_mainline)
+
+    resolved = resolve_madrl_notebook_training(
+        cfg,
+        spec=spec,
+        force_retrain_madrl=True,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base.ipynb",
+    )
+
+    assert captured["env_name"] == "GridTrainBase"
+    assert captured["project_root"] == case_dir.resolve()
+    assert captured["train_controls"]["show_progress"] is True
+    assert captured["train_controls"]["progress_episode_interval"] == int(cfg.train.progress_episode_interval)
+    assert captured["experiment_controls"]["runtime_controls"]["shared_data_dir"] == str((case_dir / "shared_data").resolve())
+    assert captured["experiment_controls"]["runtime_controls"]["shared_data_signature"] == "sig-123"
+    assert resolved["model_root"].endswith("run_a")
+    assert resolved["result_json_path"].endswith("train_result.json")
+    assert resolved["train_result"]["episodes_completed"] == 12
+
+
+def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_load")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
+    cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
+    cfg.runtime.shared_data_signature = "sig-456"
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+
+    def _fake_load_madrl_training_result(**kwargs):
+        assert kwargs["experiment_name"] == "train_base"
+        return {
+            "model_root": str(case_dir / "models" / "run_b"),
+            "result_json_path": str(case_dir / "models" / "run_b" / "_meta" / "train_result.json"),
+            "result": {
+                "prediction_mode": "normal",
+                "shared_data_signature": "sig-456",
+                "data_controls": {
+                    "agent_profiles": list(cfg.data.agent_profiles),
+                    "agent_bus_ids": list(cfg.grid.agent_bus_ids),
+                    "load_scale": list(cfg.data.load_scale),
+                    "pv_scale": list(cfg.data.pv_scale),
+                    "future_horizon": int(cfg.env.future_horizon),
+                    "test_start_date": str(cfg.data.test_start_date),
+                    "test_end_date": str(cfg.data.test_end_date),
+                },
+            },
+        }
+
+    monkeypatch.setattr(mainline_madrl, "load_madrl_training_result", _fake_load_madrl_training_result)
+
+    resolved = resolve_madrl_notebook_training(
+        cfg,
+        spec=spec,
+        force_retrain_madrl=False,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base.ipynb",
+    )
+
+    assert resolved["model_root"].endswith("run_b")
+    assert resolved["result_json_path"].endswith("train_result.json")
+    assert resolved["train_result"]["shared_data_signature"] == "sig-456"
+
+
+def test_resolve_madrl_notebook_training_rejects_mismatched_saved_run(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
+    cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
+    cfg.runtime.shared_data_signature = "sig-789"
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+
+    monkeypatch.setattr(
+        mainline_madrl,
+        "load_madrl_training_result",
+        lambda **kwargs: {
+            "model_root": str(case_dir / "models" / "run_c"),
+            "result_json_path": str(case_dir / "models" / "run_c" / "_meta" / "train_result.json"),
+            "result": {
+                "prediction_mode": "normal",
+                "data_controls": {
+                    "agent_profiles": ["SFH12", "SFH99"],
+                    "agent_bus_ids": list(cfg.grid.agent_bus_ids),
+                    "load_scale": list(cfg.data.load_scale),
+                    "pv_scale": list(cfg.data.pv_scale),
+                    "future_horizon": int(cfg.env.future_horizon),
+                    "test_start_date": str(cfg.data.test_start_date),
+                    "test_end_date": str(cfg.data.test_end_date),
+                },
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="agent_profiles"):
+        resolve_madrl_notebook_training(
+            cfg,
+            spec=spec,
+            force_retrain_madrl=False,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_base.ipynb",
+        )
     assert cfg.forecast.signal_training_overrides["wholesale_price"]["hidden_size"] == 64
     assert cfg.forecast.signal_training_overrides["load"]["hidden_size"] == 64
+
+
+def test_bootstrap_madrl_notebook_shared_data_reads_record_and_updates_cfg(tmp_path):
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_shared_data_bootstrap")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    shared_data_dir = (case_dir / "shared_data" / "pkg_a").resolve()
+    shared_data_dir.mkdir(parents=True, exist_ok=True)
+    record_path = case_dir / "notebooks" / "record" / "forecast" / "lstm" / "shared_data_record.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "shared_data_dir": str(shared_data_dir),
+                "signature_hash": "sig-bootstrap",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = bootstrap_madrl_notebook_shared_data(
+        cfg,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base.ipynb",
+    )
+
+    assert resolved["shared_data_record_path"] == str(record_path.resolve())
+    assert resolved["shared_data_dir"] == str(shared_data_dir)
+    assert resolved["shared_data_signature"] == "sig-bootstrap"
+    assert cfg.runtime.shared_data_dir == str(shared_data_dir)
+    assert cfg.runtime.shared_data_signature == "sig-bootstrap"
+
+
+def test_bootstrap_madrl_notebook_shared_data_rejects_missing_record(tmp_path):
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_shared_data_missing_record")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+
+    with pytest.raises(FileNotFoundError, match="shared_data_record.json"):
+        bootstrap_madrl_notebook_shared_data(
+            cfg,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_base_safe.ipynb",
+        )
+
+
+def test_bootstrap_madrl_notebook_shared_data_rejects_missing_shared_data_dir(tmp_path):
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_shared_data_missing_dir")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    record_path = case_dir / "notebooks" / "record" / "forecast" / "lstm" / "shared_data_record.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_shared_dir = (case_dir / "shared_data" / "missing_pkg").resolve()
+    record_path.write_text(
+        json.dumps(
+            {
+                "shared_data_dir": str(missing_shared_dir),
+                "signature_hash": "sig-missing-dir",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError, match=str(missing_shared_dir).replace("\\", "\\\\")):
+        bootstrap_madrl_notebook_shared_data(
+            cfg,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_base_safe.ipynb",
+        )
+
+
+def test_bootstrap_madrl_notebook_shared_data_rejects_missing_signature(tmp_path):
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_shared_data_missing_signature")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    shared_data_dir = (case_dir / "shared_data" / "pkg_b").resolve()
+    shared_data_dir.mkdir(parents=True, exist_ok=True)
+    record_path = case_dir / "notebooks" / "record" / "forecast" / "lstm" / "shared_data_record.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps({"shared_data_dir": str(shared_data_dir)}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="signature_hash"):
+        bootstrap_madrl_notebook_shared_data(
+            cfg,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_projection_safe.ipynb",
+        )
+
+
+def test_resolve_madrl_notebook_training_requires_shared_data_runtime_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_requires_shared_data")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+
+    with pytest.raises(ValueError, match="shared_data_record.json"):
+        resolve_madrl_notebook_training(
+            cfg,
+            spec=spec,
+            force_retrain_madrl=True,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_base.ipynb",
+        )
+
+
+def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_payload_alignment")
+    shared_data_dir = (case_dir / "shared_data" / "pkg_c").resolve()
+    shared_data_dir.mkdir(parents=True, exist_ok=True)
+    captured: list[dict[str, object]] = []
+
+    def _fake_run_external_train_mainline(**kwargs):
+        captured.append(dict(kwargs))
+        experiment_name = str(dict(kwargs["checkpoint_controls"])["experiment_name"])
+        return {
+            "result": {
+                "model_root": str(case_dir / "models" / experiment_name),
+                "shared_data_signature": "sig-aligned",
+                "episodes_completed": 1,
+            },
+            "launch_info": {
+                "result_json_path": str(case_dir / "models" / experiment_name / "_meta" / "train_result.json")
+            },
+        }
+
+    monkeypatch.setattr(mainline_madrl, "run_external_train_mainline", _fake_run_external_train_mainline)
+
+    base_cfg = make_smoke_config(case_dir / "base_case", algorithm="MATD3")
+    base_cfg.runtime.shared_data_dir = str(shared_data_dir)
+    base_cfg.runtime.shared_data_signature = "sig-aligned"
+    base_cfg.reward.w_soc_pen = 0.5
+    base_cfg.reward.w_voltage_pen = 0.0
+    base_cfg.reward.w_line_pen = 0.0
+    base_cfg.reward.w_trafo_pen = 0.0
+
+    safe_cfg = make_smoke_config(case_dir / "safe_case", algorithm="MATD3")
+    safe_cfg.runtime.shared_data_dir = str(shared_data_dir)
+    safe_cfg.runtime.shared_data_signature = "sig-aligned"
+    safe_cfg.reward.w_soc_pen = 2.0
+    safe_cfg.reward.w_voltage_pen = 400.0
+    safe_cfg.reward.w_line_pen = 0.0
+    safe_cfg.reward.w_trafo_pen = 10.0
+
+    resolve_madrl_notebook_training(
+        base_cfg,
+        spec={"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"},
+        force_retrain_madrl=True,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base.ipynb",
+    )
+    resolve_madrl_notebook_training(
+        safe_cfg,
+        spec={"algorithm": "MATD3", "experiment_name": "train_base_safe", "env_name": "GridTrainBaseSafe"},
+        force_retrain_madrl=True,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base_safe.ipynb",
+    )
+
+    assert len(captured) == 2
+    base_payload, safe_payload = captured
+    assert base_payload["data_controls"] == safe_payload["data_controls"]
+    assert base_payload["train_controls"] == safe_payload["train_controls"]
+    assert base_payload["battery_controls"] == safe_payload["battery_controls"]
+    assert base_payload["experiment_controls"]["runtime_controls"] == safe_payload["experiment_controls"]["runtime_controls"]
+    assert base_payload["experiment_controls"]["reward_controls"] == {
+        "w_soc_pen": 0.5,
+        "w_voltage_pen": 0.0,
+        "w_line_pen": 0.0,
+        "w_trafo_pen": 0.0,
+        "export_subsidy_eur_per_kwh": 0.079,
+        "import_price_markup_eur_per_kwh": 0.2,
+    }
+    assert safe_payload["experiment_controls"]["reward_controls"] == {
+        "w_soc_pen": 2.0,
+        "w_voltage_pen": 400.0,
+        "w_line_pen": 0.0,
+        "w_trafo_pen": 10.0,
+        "export_subsidy_eur_per_kwh": 0.079,
+        "import_price_markup_eur_per_kwh": 0.2,
+    }
+    assert base_payload["checkpoint_controls"]["experiment_name"] == "train_base"
+    assert safe_payload["checkpoint_controls"]["experiment_name"] == "train_base_safe"
+    assert base_payload["env_name"] == "GridTrainBase"
+    assert safe_payload["env_name"] == "GridTrainBaseSafe"
 
 
 def test_forecast_lstm_notebook_uses_shared_forecast_preset():
@@ -265,17 +652,40 @@ def test_forecast_lstm_notebook_uses_shared_forecast_preset():
     notebook_path = repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb"
     joined_source = "\n".join(_load_code_cells(notebook_path))
 
-    assert "get_mainline_forecast_controls" in joined_source
-    assert "auto_train_missing=False" in joined_source
+    assert "force_retrain_forecast = False" in joined_source
+    assert "get_mainline_forecast_controls(auto_train_missing=False)" in joined_source
+    assert "ensure_lstm_artifacts" in joined_source
     assert "ensure_madrl_shared_data" in joined_source
-    assert "compute_evaluations=False" in joined_source
-    assert "test_window_2020-06-01_2020-06-07" in joined_source
-    assert "hidden_size = 128" not in joined_source
-    assert "batch_size = 1024" not in joined_source
-    assert "epochs = 20" not in joined_source
+    assert "predictions.parquet" in joined_source
+    assert "shared_data_record.json" in joined_source
     assert "reuse_saved_artifacts" not in joined_source
     assert "legacy_aliases" not in joined_source
     assert "delete_stale_load_artifacts" not in joined_source
+
+
+def test_forecast_test_notebook_is_read_only_lstm_diagnostic():
+    repo_root = Path(__file__).resolve().parents[1]
+    notebook_path = repo_root / "notebooks" / "forecast" / "forecast_test.ipynb"
+    code_cells = _load_code_cells(notebook_path)
+    joined_source = "\n".join(code_cells)
+
+    for cell_index, source in enumerate(code_cells):
+        compile(source, f"{notebook_path.name}:cell{cell_index}", "exec")
+
+    assert "ensure_lstm_artifacts" in joined_source
+    assert "auto_train_missing = False" in joined_source
+    assert "shared_data_record.json" in joined_source
+    assert "wholesale_price_seq.npy" in joined_source
+    assert "load_seq.npy" in joined_source
+    assert "pv_seq.npy" in joined_source
+    assert "history_date = '2020-06-01'" in joined_source
+    assert "forecast_steps = 24" in joined_source
+    assert "generated_lstm" in joined_source
+    assert "shared_data" in joined_source
+    assert "train_signal_lstm" not in joined_source
+    assert "ensure_madrl_shared_data" not in joined_source
+    assert ".to_parquet(" not in joined_source
+    assert ".write_text(" not in joined_source
 
 
 def test_summarize_cfg_supports_fixed_battery_vectors(tmp_path):
@@ -428,6 +838,8 @@ def test_normalize_date_input_accepts_compact_dates():
 def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
     case_dir = make_case_dir(tmp_path, "grid_rollout_voltage")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.data.test_start_date = "2020-01-01"
+    cfg.data.test_end_date = "2020-01-01"
 
     rollout = collect_controller_rollout(
         cfg,
@@ -516,6 +928,8 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
 def test_collect_controller_rollout_skips_forecast_preflight_in_shared_data_mode(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_shared_data")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.data.test_start_date = "2020-01-01"
+    cfg.data.test_end_date = "2020-01-01"
     shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
     cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
     cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
@@ -554,9 +968,41 @@ def test_collect_controller_rollout_respects_shared_data_selected_episode_indice
     assert rollout.meta["selected_episode_indices"] == [1, 2, 3]
 
 
+def test_collect_controller_rollout_can_carry_soc_across_episodes(tmp_path):
+    case_dir = make_case_dir(tmp_path, "grid_rollout_continuous_soc")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.runtime.selected_episode_indices = [0, 1]
+
+    rollout = collect_controller_rollout(
+        cfg,
+        label="ChargePolicy",
+        action_fn=lambda env, obs: [np.array([0.1, 1.0], dtype=np.float32) for _ in range(env.n)],
+        soc_mode="continuous",
+    )
+
+    assert rollout.meta["soc_mode"] == "continuous"
+    assert {"soc_start", "soc_end", "global_step"}.issubset(rollout.agent_df.columns)
+    first_episode_end = (
+        rollout.agent_df.loc[
+            (rollout.agent_df["episode_idx"] == 0) & (rollout.agent_df["step"] == cfg.env.episode_limit - 1)
+        ]
+        .sort_values("agent_id")["soc_end"]
+        .to_numpy(dtype=np.float32)
+    )
+    second_episode_start = (
+        rollout.agent_df.loc[(rollout.agent_df["episode_idx"] == 1) & (rollout.agent_df["step"] == 0)]
+        .sort_values("agent_id")["soc_start"]
+        .to_numpy(dtype=np.float32)
+    )
+    assert np.allclose(second_episode_start, first_episode_end)
+    assert not np.allclose(second_episode_start, np.full_like(second_episode_start, cfg.env.init_soc))
+    assert rollout.step_df["global_step"].tolist() == list(range(len(rollout.step_df)))
+
+
 def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_mpc")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _enable_normal_comparison_contract(cfg)
 
     recorded_modes: list[str] = []
     recorded_subsidies: list[float] = []
@@ -564,10 +1010,11 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
     recorded_solve_calls: list[dict[str, np.ndarray | float | int]] = []
     recorded_actions: list[np.ndarray] = []
 
-    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
+    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None, soc_mode="reset"):
         assert controller is None
         assert controller_builder is None
         assert action_fn is not None
+        assert soc_mode == "continuous"
         recorded_modes.append(str(local_cfg.forecast.type))
 
         class _DummyGridNet:
@@ -703,9 +1150,11 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
 def test_collect_local_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_mpc_objective")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    _enable_normal_comparison_contract(cfg)
 
-    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None):
+    def _fake_collect_controller_rollout(local_cfg, *, label: str, controller=None, controller_builder=None, action_fn=None, soc_mode="reset"):
         del local_cfg, controller, controller_builder, action_fn
+        assert soc_mode == "continuous"
         step_df = pd.DataFrame(
             [
                 {
@@ -829,6 +1278,8 @@ def test_get_local_mpc_solver_reuses_solver_per_agent_only(monkeypatch):
 def test_collect_global_full_horizon_rollout_reports_continuous_soc_mode(tmp_path):
     case_dir = make_case_dir(tmp_path, "grid_rollout_global_oracle")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.data.test_start_date = "2020-01-01"
+    cfg.data.test_end_date = "2020-01-01"
 
     rollout = collect_global_full_horizon_rollout(
         cfg,
@@ -840,6 +1291,7 @@ def test_collect_global_full_horizon_rollout_reports_continuous_soc_mode(tmp_pat
     assert rollout.meta["soc_mode"] == "continuous"
     assert rollout.meta["solve_mode"] in {"single_window", "chunked_window"}
     assert "is_near_optimal" in rollout.meta
+    assert rollout.meta["global_oracle_gap"] <= rollout.meta["global_oracle_target_gap"]
     assert "misocp_validation_df" in rollout.meta
     assert isinstance(rollout.meta["misocp_validation_df"], pd.DataFrame)
     assert not rollout.step_df.empty
@@ -851,6 +1303,11 @@ def test_plot_global_misocp_validation_builds_figure():
     validation_df = pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+            "soc_slack_max": [0.00003, 0.00004],
+            "soc_slack_mean": [0.00001, 0.00002],
+            "soc_slack_p95_global": [0.00004, 0.00004],
+            "solver_feeder_gap_kw": [0.01, -0.02],
+            "replay_feeder_gap_kw": [0.03, -0.04],
             "max_vm_abs_err_pu": [0.0002, 0.0003],
             "max_line_loading_abs_err_pct": [0.1, 0.2],
             "trafo_loading_abs_err_pct": [0.2, 0.3],
@@ -872,7 +1329,29 @@ def test_plot_global_misocp_validation_builds_figure():
 
     figure = plot_global_misocp_validation(rollout)
 
-    assert len(figure.axes) == 4
+    assert len(figure.axes) == 5
+
+
+def test_plot_global_misocp_validation_requires_tightness_columns():
+    validation_df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+            "max_vm_abs_err_pu": [0.0002, 0.0003],
+            "max_line_loading_abs_err_pct": [0.1, 0.2],
+            "trafo_loading_abs_err_pct": [0.2, 0.3],
+            "root_p_abs_err_kw": [0.01, 0.02],
+        }
+    )
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={"controller": "Global MISOCP", "misocp_validation_df": validation_df},
+    )
+
+    with pytest.raises(ValueError, match="soc_slack_max"):
+        plot_global_misocp_validation(rollout)
 
 
 def test_compare_rollout_metrics_returns_expected_columns():
@@ -949,6 +1428,7 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "v_min_pu": 0.95,
                 "v_max_pu": 1.05,
                 "trafo_loading_limit_pct": 100.0,
+                "import_price_markup_eur_per_kwh": 0.2,
                 "high_budget_refinement_warn": controller == "Local MPC (forecast_eval)",
                 "returned_primary_objective_eur": 1.9,
             },
@@ -997,6 +1477,105 @@ def test_compare_rollout_metrics_returns_expected_columns():
     }.issubset(metrics_df.columns)
     assert metrics_df.loc[metrics_df["controller"] == "Local MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
     assert metrics_df.loc[metrics_df["controller"] == "Local MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
+
+
+def test_compare_rollout_metrics_derives_missing_import_price_from_wholesale_only():
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+                "wholesale_price": [0.10, 0.20],
+                "wholesale_price_pred": [0.12, 0.19],
+                "purchase_cost_total": [1.0, 1.1],
+                "export_subsidy_total": [0.1, 0.1],
+                "objective_total": [0.9, 1.0],
+                "feeder_post_action_net_load_kw": [1.0, 1.2],
+                "trafo_loading_pct_max": [60.0, 65.0],
+                "n_trafo_violations": [0, 0],
+                "episode_idx": [0, 0],
+                "step": [0, 1],
+            }
+        ),
+        agent_df=pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+                "agent_profile": ["A", "A"],
+                "agent_id": [0, 0],
+                "episode_idx": [0, 0],
+                "step": [0, 1],
+                "load": [1.0, 1.1],
+                "load_pred": [1.0, 1.1],
+                "pv": [0.2, 0.3],
+                "pv_pred": [0.2, 0.3],
+            }
+        ),
+        grid_df=pd.DataFrame(
+            {
+                "controller": ["Derived price"] * 2,
+                "episode_idx": [0, 0],
+                "step": [0, 1],
+                "timestamp": pd.date_range("2020-01-01", periods=2, freq="15min"),
+                "bus_id": [1, 1],
+                "vm_pu": [1.0, 1.0],
+                "is_agent_bus": [True, True],
+            }
+        ),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Derived price",
+            "agent_profiles": ["A"],
+            "agent_bus_ids": [1],
+            "v_min_pu": 0.95,
+            "v_max_pu": 1.05,
+            "trafo_loading_limit_pct": 100.0,
+            "import_price_markup_eur_per_kwh": 0.2,
+        },
+    )
+
+    metrics_df = compare_rollout_metrics(rollout)
+
+    assert metrics_df.loc[0, "price_mae"] == pytest.approx(0.015)
+
+
+def test_save_and_load_rollout_record_materializes_import_price_from_wholesale(tmp_path):
+    timestamps = pd.date_range("2020-01-01", periods=2, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "episode_idx": [0, 0],
+                "step": [0, 1],
+                "wholesale_price": [0.10, 0.20],
+                "wholesale_price_pred": [0.12, 0.19],
+            }
+        ),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "Saved rollout",
+            "agent_profiles": ["A"],
+            "agent_bus_ids": [1],
+            "v_min_pu": 0.95,
+            "v_max_pu": 1.05,
+            "import_price_markup_eur_per_kwh": 0.2,
+        },
+    )
+
+    save_rollout_record(
+        rollout,
+        category="forecast",
+        scheme_name="price_protocol_roundtrip",
+        root=tmp_path,
+    )
+    loaded = load_rollout_record(
+        category="forecast",
+        scheme_name="price_protocol_roundtrip",
+        root=tmp_path,
+    )
+
+    np.testing.assert_allclose(loaded.step_df["import_price"].to_numpy(dtype=np.float32), np.array([0.3, 0.4], dtype=np.float32))
+    np.testing.assert_allclose(loaded.step_df["import_price_pred"].to_numpy(dtype=np.float32), np.array([0.32, 0.39], dtype=np.float32))
 
 
 def test_build_compare_tables_use_final_dispatch_costs():

@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np,pandas as pd
 from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY,IMPORT_PRICE_PRED_COLUMN,WHOLESALE_PRICE_PRED_COLUMN,derive_import_price_seq
+from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY,canonicalize_step_price_frame,require_import_price_markup
 from scripts.utils.admm_mpc_solver import AdmmMpcStepResult,AdmmMpcSurrogateCache,AdmmMpcWindowData,_compute_default_rho,_day_episode_length,build_admm_mpc_surrogate_cache,build_admm_mpc_window_data,resolve_default_terminal_cost_weight,run_admm_mpc_step
 ADMM_MPC_LSTM_LABEL='ADMM MPC + LSTM Forecast'
 ADMM_MPC_PERFECT_LABEL='ADMM MPC + Perfect Forecast'
@@ -35,7 +35,7 @@ class _AdmmMpcController:
 def collect_admm_mpc_rollout(cfg,*,prediction_mode:str='normal',label:str|None=None,show_progress:bool=True,rho_init:float|None=None,rho_min:float=.001,rho_max:float=1e3,rho_adaptation:str|None='residual_balancing',max_iters:int=100,max_iters_first_step:int=300,primal_tol:float=.001,dual_tol:float=.001,terminal_cost_multiplier:float=1.)->grid_nb.RolloutResult:
 	resolved_mode=grid_nb.normalize_prediction_mode(prediction_mode);comparison_cfg=grid_nb.build_comparison_cfg(cfg,prediction_mode=resolved_mode);comparison_cfg.env.episode_limit=_day_episode_length(float(comparison_cfg.env.dt));resolved_label=str(label)if label is not None else ADMM_MPC_PERFECT_LABEL if resolved_mode==grid_nb.PERFECT_PREDICTION_MODE else ADMM_MPC_LSTM_LABEL
 	def _controller_builder(env):controller=_AdmmMpcController(env,comparison_cfg,rho_init=rho_init,rho_min=float(rho_min),rho_max=float(rho_max),rho_adaptation=rho_adaptation,max_iters=int(max_iters),max_iters_first_step=int(max_iters_first_step),primal_tol=float(primal_tol),dual_tol=float(dual_tol),terminal_cost_multiplier=float(terminal_cost_multiplier),show_progress=bool(show_progress));_controller_builder.controller=controller;return controller
-	rollout=grid_nb.collect_controller_rollout(comparison_cfg,label=resolved_label,controller_builder=_controller_builder);controller=getattr(_controller_builder,'controller',None)
+	rollout=grid_nb.collect_controller_rollout(comparison_cfg,label=resolved_label,controller_builder=_controller_builder,soc_mode='continuous');controller=getattr(_controller_builder,'controller',None)
 	try:augmented=_augment_rollout_with_diagnostics(rollout,controller.diagnostic_rows if controller is not None else[],forecast_backend=str(comparison_cfg.forecast.type));augmented.meta.update({'controller':resolved_label,'prediction_mode':resolved_mode,'economics_scope':'agent_only','soc_mode':'continuous','future_horizon':int(comparison_cfg.env.future_horizon)});return augmented
 	finally:
 		if controller is not None:controller.close()
@@ -48,6 +48,6 @@ def _augment_rollout_with_diagnostics(rollout:grid_nb.RolloutResult,diagnostic_r
 	if not diagnostic_df.empty:merge_keys=[column for column in('episode_idx','step','global_step')if column in diagnostic_df.columns];step_df=step_df.merge(diagnostic_df,on=merge_keys,how='left')
 	for(column,default_value)in[('admm_converged',False),('admm_iterations',0),('admm_final_primal_residual',np.nan),('admm_final_dual_residual',np.nan),('admm_solve_time_sec',np.nan),('admm_rho_final',np.nan)]:
 		if column not in step_df.columns:step_df[column]=default_value
-	step_df['admm_converged']=step_df['admm_converged'].astype(bool);import_price_markup=float(rollout.meta.get(IMPORT_PRICE_MARKUP_KEY,.0))
-	if WHOLESALE_PRICE_PRED_COLUMN in step_df.columns and IMPORT_PRICE_PRED_COLUMN not in step_df.columns:step_df[IMPORT_PRICE_PRED_COLUMN]=derive_import_price_seq(step_df[WHOLESALE_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64),markup_eur_per_kwh=import_price_markup)
+	step_df['admm_converged']=step_df['admm_converged'].astype(bool)
+	if not step_df.empty:step_df=canonicalize_step_price_frame(step_df,markup_eur_per_kwh=require_import_price_markup(rollout.meta,context=f"Rollout '{rollout.meta.get('controller','ADMM MPC')}' metadata"),context=f"Rollout '{rollout.meta.get('controller','ADMM MPC')}' step_df",require_actual=True,require_prediction=False)
 	step_df['objective_total']=step_df['purchase_cost_total'].astype(float)-step_df['export_subsidy_total'].astype(float);meta=dict(rollout.meta);meta['forecast_backend']=str(forecast_backend);meta['admm_terminal_cost_mode']='quadratic_to_soc_target';return grid_nb.RolloutResult(step_df=step_df,agent_df=agent_df,grid_df=grid_df,summary=rollout.summary.copy(),meta=meta)

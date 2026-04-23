@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt,numpy as np,pandas as pd
 from matplotlib.patches import Patch
-from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN,IMPORT_PRICE_PRED_COLUMN
+from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN,IMPORT_PRICE_PRED_COLUMN,WHOLESALE_PRICE_PRED_COLUMN,WHOLESALE_PRICE_SIGNAL,canonicalize_step_price_frame,require_import_price_markup
 if TYPE_CHECKING:from scripts.utils.grid_notebook_workflow import RolloutResult
 NORMAL_PREDICTION_MODE='normal'
 _TITLE,_LABEL,_TICK,_LEGEND=20,18,16,16
@@ -21,7 +21,14 @@ def _require(df:pd.DataFrame,columns:set[str],label:str,message:str)->None:
 def _with_pv_raw_total(step_df:pd.DataFrame)->pd.DataFrame:
 	if'pv_raw_total'not in step_df.columns and{'pv_effective_total','pv_curtail_total'}.issubset(step_df.columns):step_df['pv_raw_total']=step_df['pv_effective_total'].to_numpy(dtype=np.float32)+step_df['pv_curtail_total'].to_numpy(dtype=np.float32)
 	return step_df
-def _plot_agent_forecasts(axes,step_df:pd.DataFrame,agent_df:pd.DataFrame,profiles,*,title:str)->None:
+def _canonical_price_step_df(rollout:RolloutResult,*,require_prediction:bool)->pd.DataFrame:
+	step_df=rollout.step_df.copy()
+	if step_df.empty or not any(column in step_df.columns for column in(WHOLESALE_PRICE_SIGNAL,IMPORT_PRICE_COLUMN,WHOLESALE_PRICE_PRED_COLUMN,IMPORT_PRICE_PRED_COLUMN)):return step_df
+	has_actual_import=IMPORT_PRICE_COLUMN in step_df.columns;has_pred_import=IMPORT_PRICE_PRED_COLUMN in step_df.columns
+	if has_actual_import and(has_pred_import or not require_prediction):return step_df
+	return canonicalize_step_price_frame(step_df,markup_eur_per_kwh=require_import_price_markup(rollout.meta,context=f"Rollout '{_controller(rollout)}' metadata"),context=f"Rollout '{_controller(rollout)}' step_df",require_actual=True,require_prediction=require_prediction)
+def _plot_agent_forecasts(axes,rollout:RolloutResult,profiles,*,title:str)->None:
+	step_df,agent_df=_canonical_price_step_df(rollout,require_prediction=True),rollout.agent_df
 	axes[0].plot(step_df['timestamp'],step_df[IMPORT_PRICE_COLUMN],color='#111827',linewidth=1.6,label='Actual');axes[0].plot(step_df['timestamp'],step_df[IMPORT_PRICE_PRED_COLUMN],color='#dc2626',linewidth=1.4,linestyle='--',label='Forecast');axes[0].set_title(title);axes[0].set_ylabel('Import Price');axes[0].grid(True,alpha=.25);axes[0].legend(loc='upper right');by_profile={profile:agent_df.loc[agent_df['agent_profile']==profile]for profile in profiles}
 	for(axis,signal)in zip(axes[1:],('pv','load'),strict=False):
 		for(agent_idx,profile)in enumerate(profiles):frame=by_profile[profile];color=_AGENT_COLORS[agent_idx%len(_AGENT_COLORS)];axis.plot(frame['timestamp'],frame[signal],color=color,linewidth=1.4,label=f"{profile} actual");axis.plot(frame['timestamp'],frame[f"{signal}_pred"],color=color,linewidth=1.2,linestyle='--',label=f"{profile} forecast")
@@ -38,7 +45,7 @@ def _plot_voltage(axis,rollout:RolloutResult,*,legend:bool)->None:
 	for(key,color,label)in[('v_min_pu','#dc2626','V min'),('v_max_pu','#ea580c','V max')]:axis.axhline(float(rollout.meta[key]),color=color,linestyle='--',linewidth=1.1,label=label if legend else None)
 def plot_rollout_dashboard(rollout:RolloutResult,*,figsize:tuple[float,float]|None=None):
 	if rollout.step_df.empty or rollout.agent_df.empty:raise ValueError('Rollout is empty; nothing to plot.')
-	profiles=list(rollout.meta['agent_profiles']);fig,axes=plt.subplots(6+len(profiles),1,figsize=figsize or(18.,2.8*(6+len(profiles))),sharex=True);axes=np.atleast_1d(axes);step_df=_with_pv_raw_total(rollout.step_df.copy());_plot_agent_forecasts(axes[:3],step_df,rollout.agent_df,profiles,title=f"Test Rollout Dashboard - {_controller(rollout)}");_plot_voltage(axes[3],rollout,legend=True);axes[3].set_ylabel('Voltage [p.u.]');axes[3].legend(loc='upper right',ncol=2);net_specs=[('base_net_load_total','#111827','-','Raw net load'),('base_net_load_effective_total','#16a34a','-.','Post-curtail net load'),('net_load_total','#2563eb','--','Post-action net load')]
+	profiles=list(rollout.meta['agent_profiles']);fig,axes=plt.subplots(6+len(profiles),1,figsize=figsize or(18.,2.8*(6+len(profiles))),sharex=True);axes=np.atleast_1d(axes);step_df=_with_pv_raw_total(rollout.step_df.copy());_plot_agent_forecasts(axes[:3],rollout,profiles,title=f"Test Rollout Dashboard - {_controller(rollout)}");_plot_voltage(axes[3],rollout,legend=True);axes[3].set_ylabel('Voltage [p.u.]');axes[3].legend(loc='upper right',ncol=2);net_specs=[('base_net_load_total','#111827','-','Raw net load'),('base_net_load_effective_total','#16a34a','-.','Post-curtail net load'),('net_load_total','#2563eb','--','Post-action net load')]
 	for(column,color,linestyle,label)in net_specs:
 		if column in step_df.columns:axes[4].plot(step_df['timestamp'],step_df[column],color=color,linewidth=1.6 if column=='base_net_load_total'else 1.5,linestyle=linestyle,label=label)
 	limit=rollout.meta.get('trafo_limit_kw')
@@ -56,8 +63,8 @@ def plot_voltage_profile_comparison(*rollouts:RolloutResult,figsize:tuple[float,
 	axes[-1].set_xlabel('Timestamp',fontsize=_LABEL);fig.tight_layout();return fig
 def plot_price_prediction_comparison(*rollouts:RolloutResult,figsize:tuple[float,float]=(2e1,5.)):
 	if not rollouts:raise ValueError('At least one rollout is required.')
-	ref=next((rollout for rollout in rollouts if str(rollout.meta.get('prediction_mode',''))==NORMAL_PREDICTION_MODE),rollouts[0]);_require(ref.step_df,{'timestamp',IMPORT_PRICE_COLUMN},_controller(ref),"Rollout '{label}' is missing actual price columns: {missing}");fig,axis=plt.subplots(1,1,figsize=figsize);axis.plot(ref.step_df['timestamp'],ref.step_df[IMPORT_PRICE_COLUMN],color='#111827',linewidth=1.8,label='Actual import price');predicted_rollouts=[item for item in rollouts if str(item.meta.get('prediction_mode',''))in('',NORMAL_PREDICTION_MODE)]or[ref]
-	for(idx,rollout)in enumerate(predicted_rollouts):step_df=rollout.step_df;_require(step_df,{'timestamp',IMPORT_PRICE_PRED_COLUMN},_controller(rollout),"Rollout '{label}' is missing predicted price columns: {missing}");label='Predicted import price'if len(predicted_rollouts)==1 else f"Predicted import price ({_controller(rollout)})";axis.plot(pd.to_datetime(step_df['timestamp']).to_numpy(),step_df[IMPORT_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64),color=_AGENT_COLORS[(idx+1)%len(_AGENT_COLORS)],linewidth=1.8,linestyle='--',label=label)
+	ref=next((rollout for rollout in rollouts if str(rollout.meta.get('prediction_mode',''))==NORMAL_PREDICTION_MODE),rollouts[0]);ref_step_df=_canonical_price_step_df(ref,require_prediction=False);_require(ref_step_df,{'timestamp',IMPORT_PRICE_COLUMN},_controller(ref),"Rollout '{label}' is missing actual price columns: {missing}");fig,axis=plt.subplots(1,1,figsize=figsize);axis.plot(ref_step_df['timestamp'],ref_step_df[IMPORT_PRICE_COLUMN],color='#111827',linewidth=1.8,label='Actual import price');predicted_rollouts=[item for item in rollouts if str(item.meta.get('prediction_mode',''))in('',NORMAL_PREDICTION_MODE)]or[ref]
+	for(idx,rollout)in enumerate(predicted_rollouts):step_df=_canonical_price_step_df(rollout,require_prediction=True);_require(step_df,{'timestamp',IMPORT_PRICE_PRED_COLUMN},_controller(rollout),"Rollout '{label}' is missing predicted price columns: {missing}");label='Predicted import price'if len(predicted_rollouts)==1 else f"Predicted import price ({_controller(rollout)})";axis.plot(pd.to_datetime(step_df['timestamp']).to_numpy(),step_df[IMPORT_PRICE_PRED_COLUMN].to_numpy(dtype=np.float64),color=_AGENT_COLORS[(idx+1)%len(_AGENT_COLORS)],linewidth=1.8,linestyle='--',label=label)
 	_compare_style(axis,title='Import Price And Derived Forecast',ylabel='EUR/kWh',xlabel='Timestamp');axis.legend(loc='upper right',ncol=2,fontsize=_LEGEND);fig.tight_layout();return fig
 def plot_net_load_comparison(*rollouts:RolloutResult,figsize:tuple[float,float]|None=None):
 	if not rollouts:raise ValueError('At least one rollout is required.')
@@ -102,6 +109,14 @@ def plot_battery_power_and_soc_comparison(*rollouts:RolloutResult,figsize:tuple[
 def plot_global_misocp_validation(rollout:RolloutResult,*,figsize:tuple[float,float]=(18.,1e1)):
 	validation_df=rollout.meta.get('misocp_validation_df',pd.DataFrame())
 	if not isinstance(validation_df,pd.DataFrame)or validation_df.empty:raise ValueError(f"Rollout '{_controller(rollout)}' has no MISOCP validation dataframe.")
-	fig,axes=plt.subplots(4,1,figsize=figsize,sharex=True);axes=np.atleast_1d(axes)
-	for(axis,column,title,ylabel)in zip(axes,('max_vm_abs_err_pu','max_line_loading_abs_err_pct','trafo_loading_abs_err_pct','root_p_abs_err_kw'),('Voltage replay error','Line loading replay error','Transformer loading replay error','Root active-power replay error'),('p.u.','%','%','kW'),strict=False):axis.plot(validation_df['timestamp'],validation_df[column],color='#2563eb',linewidth=1.7);_compare_style(axis,title=title,ylabel=ylabel)
+	required={'timestamp','soc_slack_max','soc_slack_mean','soc_slack_p95_global','solver_feeder_gap_kw','replay_feeder_gap_kw','root_p_abs_err_kw','max_vm_abs_err_pu','max_line_loading_abs_err_pct','trafo_loading_abs_err_pct'}
+	_require(validation_df,required,_controller(rollout),"Rollout '{label}' MISOCP validation dataframe is missing diagnostic columns: {missing}")
+	timestamps=pd.to_datetime(validation_df['timestamp']);fig,axes=plt.subplots(5,1,figsize=figsize,sharex=True);axes=np.atleast_1d(axes)
+	axes[0].plot(timestamps,validation_df['soc_slack_max'].to_numpy(dtype=np.float64),color='#dc2626',linewidth=1.5,label='Max SOC slack');axes[0].plot(timestamps,validation_df['soc_slack_mean'].to_numpy(dtype=np.float64),color='#2563eb',linewidth=1.5,label='Mean SOC slack');p95_values=validation_df['soc_slack_p95_global'].to_numpy(dtype=np.float64);finite_p95=p95_values[np.isfinite(p95_values)]
+	if finite_p95.size:axes[0].axhline(float(np.max(finite_p95)),color='#111827',linestyle='--',linewidth=1.2,label='Global p95')
+	_compare_style(axes[0],title='SOC relaxation tightness',ylabel='SOC slack [p.u.]');axes[0].legend(loc='upper right',ncol=3,fontsize=_LEGEND)
+	axes[1].plot(timestamps,np.abs(validation_df['solver_feeder_gap_kw'].to_numpy(dtype=np.float64)),color='#2563eb',linewidth=1.5,label='Solver feeder gap');axes[1].plot(timestamps,np.abs(validation_df['replay_feeder_gap_kw'].to_numpy(dtype=np.float64)),color='#f97316',linewidth=1.5,label='Replay feeder gap');_compare_style(axes[1],title='Feeder active-power gap',ylabel='|gap| [kW]');axes[1].legend(loc='upper right',ncol=2,fontsize=_LEGEND)
+	axes[2].plot(timestamps,validation_df['root_p_abs_err_kw'].to_numpy(dtype=np.float64),color='#2563eb',linewidth=1.5,label='Root P abs error');axes[2].axhline(1.,color='#dc2626',linestyle='--',linewidth=1.2,label='1 kW tolerance');_compare_style(axes[2],title='Root active-power replay error',ylabel='kW');axes[2].legend(loc='upper right',ncol=2,fontsize=_LEGEND)
+	axes[3].plot(timestamps,validation_df['max_vm_abs_err_pu'].to_numpy(dtype=np.float64),color='#2563eb',linewidth=1.5,label='Max voltage error');axes[3].axhline(.01,color='#dc2626',linestyle='--',linewidth=1.2,label='0.01 p.u. tolerance');_compare_style(axes[3],title='Voltage replay error',ylabel='p.u.');axes[3].legend(loc='upper right',ncol=2,fontsize=_LEGEND)
+	axes[4].plot(timestamps,validation_df['max_line_loading_abs_err_pct'].to_numpy(dtype=np.float64),color='#2563eb',linewidth=1.5,label='Line loading error');axes[4].plot(timestamps,validation_df['trafo_loading_abs_err_pct'].to_numpy(dtype=np.float64),color='#f97316',linewidth=1.5,label='Transformer loading error');axes[4].axhline(1.,color='#dc2626',linestyle='--',linewidth=1.2,label='1% tolerance');_compare_style(axes[4],title='Loading replay error',ylabel='%');axes[4].legend(loc='upper right',ncol=3,fontsize=_LEGEND)
 	axes[-1].set_xlabel('Timestamp',fontsize=_LABEL);fig.suptitle('\n'.join(text for text in(_controller(rollout),str(rollout.meta.get('misocp_health_warning','')).strip())if text),fontsize=_LABEL);fig.tight_layout();return fig

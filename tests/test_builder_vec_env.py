@@ -97,7 +97,7 @@ def test_build_env_uses_shared_data_manifest_controls_and_episode_subset(tmp_pat
         assert cfg.runtime.effective_split_controls["source"] == "shared_data_manifest"
         assert cfg.runtime.effective_split_controls["start_date"] is None
         assert cfg.runtime.effective_split_controls["end_date"] is None
-        assert cfg.runtime.effective_split_controls["window_strategy"] == "full_year_runtime_slice"
+        assert cfg.runtime.effective_split_controls["window_strategy"] == "cfg_window"
         assert cfg.runtime.selected_episode_indices == [1, 2, 3]
     finally:
         env.close()

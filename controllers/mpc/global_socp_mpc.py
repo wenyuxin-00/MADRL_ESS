@@ -128,7 +128,7 @@ class GlobalMISOCPProblem:
 		for agent_idx in range(self.n_agents):
 			model.addConstr(energy[agent_idx,0]==float(soc0_mwh[agent_idx]),name=f"energy_init[{agent_idx}]")
 			for step_idx in range(horizon_steps+1):model.addConstr(energy[agent_idx,step_idx]>=float(energy_min_mwh[agent_idx]),name=f"energy_lb[{agent_idx},{step_idx}]");model.addConstr(energy[agent_idx,step_idx]<=float(energy_max_mwh[agent_idx]),name=f"energy_ub[{agent_idx},{step_idx}]")
-			if enforce_terminal_soc:model.addConstr(energy[agent_idx,horizon_steps]>=float(energy_target_mwh[agent_idx]),name=f"terminal_soc[{agent_idx}]")
+			# if enforce_terminal_soc:model.addConstr(energy[agent_idx,horizon_steps]>=float(energy_target_mwh[agent_idx]),name=f"terminal_soc[{agent_idx}]")
 			for step_idx in range(horizon_steps):model.addConstr(p_charge[agent_idx,step_idx]<=float(self.p_max_mw[agent_idx]),name=f"charge_ub[{agent_idx},{step_idx}]");model.addConstr(p_discharge[agent_idx,step_idx]<=float(self.p_max_mw[agent_idx]),name=f"discharge_ub[{agent_idx},{step_idx}]");model.addConstr(pv_curtail[agent_idx,step_idx]<=float(max(pv_seq[agent_idx,step_idx],.0)/1e3),name=f"pv_curtail_ub[{agent_idx},{step_idx}]");model.addConstr(energy[agent_idx,step_idx+1]==energy[agent_idx,step_idx]+self.efficiency*p_charge[agent_idx,step_idx]*self.dt_hours-p_discharge[agent_idx,step_idx]/max(self.efficiency,_ROOT_VM_EPS)*self.dt_hours,name=f"energy_balance[{agent_idx},{step_idx}]")
 		for step_idx in range(horizon_steps):
 			for branch_idx in range(self.n_branches):

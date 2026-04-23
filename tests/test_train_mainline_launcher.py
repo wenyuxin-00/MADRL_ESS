@@ -175,15 +175,16 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "model_family": "mlp",
         "num_envs": 2,
         "vec_env_type": "subproc",
-        "train_episodes": 1,
-        "max_train_steps": 4,
+        "train_episodes": 2,
+        "max_train_steps": None,
         "batch_size": 2,
         "buffer_size": 32,
         "update_interval": 1,
         "updates_per_step": 1,
         "policy_update_freq": 2,
         "use_noise_decay": True,
-        "show_progress": False,
+        "show_progress": True,
+        "progress_episode_interval": 1,
         "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
@@ -238,6 +239,12 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    combined_output = f"{completed.stdout}\n{completed.stderr}"
+    assert "Training:" in combined_output
+    assert "0/96" in combined_output
+    assert "avg_reward=" in combined_output
+    for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
+        assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
     reward_summary_path = Path(result["reward_summary_path"])
     reward_summary = json.loads(reward_summary_path.read_text(encoding="utf-8"))
@@ -411,6 +418,9 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    combined_output = f"{completed.stdout}\n{completed.stderr}"
+    for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
+        assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
     reward_summary = json.loads(Path(result["reward_summary_path"]).read_text(encoding="utf-8"))
 

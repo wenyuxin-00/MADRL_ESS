@@ -66,8 +66,8 @@ def _make_cfg(*, future_horizon: int = 4, n_agents: int = 2, test_start_date: st
             v_max_pu=1.05,
             agent_bus_ids=[idx + 1 for idx in range(int(n_agents))],
         ),
-        forecast=SimpleNamespace(type="perfect", lstm_artifact_root=None),
-        runtime=SimpleNamespace(shared_data_dir=None, shared_data_signature=None, forecast_ready=None),
+        forecast=SimpleNamespace(type="lstm", lstm_artifact_root=None, auto_train_missing=False),
+        runtime=SimpleNamespace(shared_data_dir="test-shared-data-dir", shared_data_signature="test-shared-data-signature", forecast_ready=None),
         data=SimpleNamespace(
             test_start_date=str(test_start_date),
             test_end_date=str(test_end_date),

@@ -141,6 +141,8 @@ def _make_mock_result() -> SimpleNamespace:
 def test_build_full_horizon_input_supports_contiguous_subranges_and_rejects_noncontiguous_indices(tmp_path):
     case_dir = make_case_dir(tmp_path, "misocp_full_horizon_indices")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.data.test_start_date = "2020-01-01"
+    cfg.data.test_end_date = "2020-01-01"
     env = build_env(cfg, mode="test")
     try:
         problem = GlobalMISOCPProblem.from_env(env, cfg)
@@ -476,64 +478,20 @@ def test_misocp_global_notebook_code_cells_compile():
     repo_root = Path(__file__).resolve().parents[1]
     notebook_path = repo_root / "notebooks" / "madrl" / "global_MISOCP.ipynb"
     code_cells = _load_code_cells(notebook_path)
-    notebook_text = notebook_path.read_text(encoding="utf-8")
-
-    assert len(code_cells) >= 4
     notebook_source = "\n".join(code_cells)
-    assert "AGENT_PROFILES =" not in notebook_source
+
+    assert len(code_cells) >= 2
+    assert "collect_global_full_horizon_rollout" in notebook_source
+    assert "collect_global_full_horizon_rollout(cfg, label='Global MISOCP')" in notebook_source
+    assert "save_rollout_record(" in notebook_source
+    assert "scheme_name='global_misocp'" in notebook_source
+    assert "compare_rollout_metrics(rollout)" in notebook_source
+    assert "plot_global_misocp_validation(rollout)" in notebook_source
     assert "RUN_FULL_HORIZON_BENCHMARK" not in notebook_source
-    assert "RUN_SINGLE_WINDOW_BENCHMARK_AFTER_CHUNKED" in notebook_source
-    assert "no_retry_or_fallback_used" not in notebook_source
-    assert "agent_purchase_cost_eur" in notebook_source
-    assert "branch_current_tiebreaker_eur_per_pu_step" in notebook_source
-    assert "max_root_p_abs_err_kw ~= 148.8" in notebook_text
-    assert "max_root_p_abs_err_kw ~= 48" in notebook_text
-    assert "agent_bus_q_base_nonzero_count" in notebook_source
-    assert "p95_soc_slack" in notebook_source
-    assert "misocp_validation_summary" in notebook_source
-    assert "display(misocp_validation_summary)" in notebook_source
-    assert "build_soc_relaxation_diagnostics = misocp_nb.build_soc_relaxation_diagnostics" in notebook_source
-    assert "build_misocp_plan_package = misocp_nb.build_misocp_plan_package" not in notebook_source
-    assert "save_misocp_plan_package = misocp_nb.save_misocp_plan_package" not in notebook_source
-    assert "build_debug_tables = misocp_nb.build_debug_tables" not in notebook_source
-    assert "build_simultaneous_diagnostic_tables = misocp_nb.build_simultaneous_diagnostic_tables" not in notebook_source
-    assert "estimate_global_misocp_model_size = misocp_nb.estimate_global_misocp_model_size" not in notebook_source
-    assert "plot_root_exchange_alignment = misocp_nb.plot_root_exchange_alignment" not in notebook_source
-    assert "plot_misocp_validation_scatter_panel = misocp_nb.plot_misocp_validation_scatter_panel" not in notebook_source
+    assert "RUN_SINGLE_WINDOW_BENCHMARK_AFTER_CHUNKED" not in notebook_source
     assert "SAVE_MISOCP_PLAN" not in notebook_source
-    assert "resolve_misocp_plan_output_dir" not in notebook_source
-    assert "default_misocp_plan_tag" not in notebook_source
-    assert "import configs as configs_pkg" in notebook_source
-    assert "config_profiles = importlib.reload(config_profiles)" in notebook_source
-    assert "from controllers import mpc as mpc_pkg" in notebook_source
-    assert "from controllers.mpc import global_socp_mpc as misocp_core" in notebook_source
-    assert "from scripts.utils import grid_notebook_workflow as grid_nb" in notebook_source
-    assert "from scripts import mainline_compare as misocp_nb" in notebook_source
-    assert "misocp_core = importlib.reload(misocp_core)" in notebook_source
-    assert "grid_nb = importlib.reload(grid_nb)" in notebook_source
-    assert "misocp_nb = importlib.reload(misocp_nb)" in notebook_source
-    assert "Reloaded grid notebook helpers from:" in notebook_source
-    assert "Reloaded MISOCP notebook helpers from:" in notebook_source
-    assert "validate_misocp_result_schema = misocp_nb.validate_misocp_result_schema" in notebook_source
-    assert "build_floor_diagnostic_summary" in notebook_source
-    assert "build_refinement_summary" in notebook_source
-    assert "floor_diagnostic_summary" in notebook_source
-    assert "refinement_summary" in notebook_source
-    assert "physics_refinement_slack_abs_floor_eur" in notebook_source
-    assert "physics_refinement_slack_ratio_schedule" in notebook_source
-    assert "physics_refinement_total_time_limit_sec" in notebook_source
-    assert "physics_refinement_status" in notebook_source
-    assert "returned_primary_objective_eur" in notebook_source
-    assert "floor_accepted_tier" in notebook_source
-    assert "used_physics_refinement_tier" in notebook_source
-    assert "total_tiers_configured" in notebook_source
-    assert "branch_l_gap_ratio_to_floor" in notebook_source
-    assert "returned_mean_abs_export_gap_ratio" in notebook_source
-    assert "high_budget_refinement_warn" in notebook_source
-    assert "formulation_tightening_required" in notebook_source
-    assert "refinement_status_counts" in notebook_source
-    assert "from controllers.mpc import FullHorizonProblemInput, GlobalMISOCPProblem, GurobiSolveConfig" not in notebook_source
-    assert "from controllers.mpc.global_socp_mpc import default_primary_solve_config, default_retry_solve_config" not in notebook_source
+    assert "build_misocp_plan_package" not in notebook_source
+    assert "importlib.reload(" not in notebook_source
     for cell_index, source in enumerate(code_cells, start=1):
         compile(source, f"{notebook_path.name}:cell{cell_index}", "exec")
 

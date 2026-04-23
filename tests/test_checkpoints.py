@@ -19,6 +19,12 @@ def _touch_checkpoint_pair(algo_dir: Path, episode_tag: int) -> None:
     (algo_dir / f"critic_agent_0_ep_{episode_tag}.pth").write_bytes(b"critic")
 
 
+def _write_train_result(run_root: Path) -> None:
+    meta_dir = run_root / "_meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "train_result.json").write_text("{}", encoding="utf-8")
+
+
 def test_checkpoint_manifest_round_trip(tmp_path):
     case_dir = make_case_dir(tmp_path, "checkpoint_roundtrip")
     model_dir = case_dir / "saved_models"
@@ -92,8 +98,16 @@ def test_find_latest_training_run_discovers_newest_run(tmp_path):
         max_train_steps=None,
         timestamp=datetime(2026, 3, 25, 10, 30, 0),
     )
-    Path(older["model_root"]).mkdir(parents=True, exist_ok=True)
-    Path(newer["model_root"]).mkdir(parents=True, exist_ok=True)
+    older_root = Path(older["model_root"])
+    newer_root = Path(newer["model_root"])
+    older_algo_dir = older_root / "MATD3"
+    newer_algo_dir = newer_root / "MATD3"
+    older_algo_dir.mkdir(parents=True, exist_ok=True)
+    newer_algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(older_algo_dir, episode_tag=50)
+    _touch_checkpoint_pair(newer_algo_dir, episode_tag=100)
+    _write_train_result(older_root)
+    _write_train_result(newer_root)
 
     resolved = find_latest_training_run(
         checkpoint_root,
@@ -103,3 +117,43 @@ def test_find_latest_training_run_discovers_newest_run(tmp_path):
     )
 
     assert resolved == Path(newer["model_root"])
+
+
+def test_find_latest_training_run_skips_incomplete_newest_run(tmp_path):
+    checkpoint_root = tmp_path / "checkpoints"
+    complete = build_training_run_paths(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="normal",
+        experiment_name="train_base",
+        train_episodes=150,
+        max_train_steps=None,
+        timestamp=datetime(2026, 4, 21, 17, 46, 57),
+    )
+    incomplete = build_training_run_paths(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="normal",
+        experiment_name="train_base",
+        train_episodes=200,
+        max_train_steps=None,
+        timestamp=datetime(2026, 4, 22, 22, 20, 50),
+    )
+    complete_root = Path(complete["model_root"])
+    incomplete_root = Path(incomplete["model_root"])
+    complete_algo_dir = complete_root / "MATD3"
+    complete_algo_dir.mkdir(parents=True, exist_ok=True)
+    incomplete_root.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(complete_algo_dir, episode_tag=150)
+    _write_train_result(complete_root)
+    (incomplete_root / "_meta").mkdir(parents=True, exist_ok=True)
+    (incomplete_root / "_meta" / "train.log").write_text("partial run", encoding="utf-8")
+
+    resolved = find_latest_training_run(
+        checkpoint_root,
+        algorithm="MATD3",
+        prediction_mode="normal",
+        experiment_name="train_base",
+    )
+
+    assert resolved == complete_root

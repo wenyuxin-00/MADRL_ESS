@@ -66,8 +66,8 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
     step_df = pd.DataFrame(
         {
             "timestamp": timestamps,
-            "import_price": [0.10, 0.20, 0.15],
-            "import_price_pred": [0.12, 0.18, 0.16],
+            "wholesale_price": [-0.10, 0.00, -0.05],
+            "wholesale_price_pred": [-0.08, -0.02, -0.04],
             "base_net_load_total": [2.40, 2.55, 2.70],
             "base_net_load_effective_total": [2.00, 2.15, 2.30],
             "net_load_total": [2.10, 2.20, 2.35],
@@ -152,6 +152,7 @@ def test_rollout_dashboard_renders_expected_main_panels_for_three_agents():
             "agent_bus_ids": [2, 3, 4],
             "v_min_pu": 0.95,
             "v_max_pu": 1.05,
+            "import_price_markup_eur_per_kwh": 0.2,
         },
     )
 

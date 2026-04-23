@@ -71,7 +71,7 @@ def test_ensure_madrl_shared_data_reuses_existing_directory(tmp_path) -> None:
     assert first.shared_data_dir == second.shared_data_dir
 
 
-def test_ensure_madrl_shared_data_cross_year_reuses_signature_when_test_window_changes(tmp_path) -> None:
+def test_ensure_madrl_shared_data_cross_year_changes_signature_when_test_window_changes(tmp_path) -> None:
     cfg = _make_multiday_cfg(tmp_path / "case", evaluation_days=5)
     first = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
@@ -79,15 +79,15 @@ def test_ensure_madrl_shared_data_cross_year_reuses_signature_when_test_window_c
     cfg.data.test_end_date = "2020-01-04"
     second = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
-    assert first.signature_hash == second.signature_hash
-    assert first.shared_data_dir == second.shared_data_dir
-    assert first.manifest["data_controls"]["test_window_strategy"] == "full_year_runtime_slice"
+    assert first.signature_hash != second.signature_hash
+    assert first.shared_data_dir != second.shared_data_dir
+    assert first.manifest["data_controls"]["test_window_strategy"] == "cfg_window"
     selected = select_shared_data_episode_indices(
         second.manifest["splits"]["test"],
         start_date="2020-01-02",
         end_date="2020-01-04",
     )
-    assert selected == [1, 2, 3]
+    assert selected == [0, 1, 2]
 
 
 def test_ensure_madrl_shared_data_same_year_implicit_exclusion_changes_signature_with_test_window(tmp_path) -> None:
@@ -105,7 +105,7 @@ def test_ensure_madrl_shared_data_same_year_implicit_exclusion_changes_signature
     assert second.manifest["data_controls"]["test_window_strategy"] == "cfg_window"
 
 
-def test_ensure_madrl_shared_data_same_year_explicit_train_range_reuses_signature_when_test_window_changes(tmp_path) -> None:
+def test_ensure_madrl_shared_data_same_year_explicit_train_range_changes_signature_when_test_window_changes(tmp_path) -> None:
     cfg = _make_multiday_cfg(tmp_path / "same_year_explicit", evaluation_days=5)
     cfg.data.train_year = 2020
     cfg.data.test_year = 2020
@@ -117,9 +117,9 @@ def test_ensure_madrl_shared_data_same_year_explicit_train_range_reuses_signatur
     cfg.data.test_end_date = "2020-01-05"
     second = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
-    assert first.signature_hash == second.signature_hash
-    assert first.shared_data_dir == second.shared_data_dir
-    assert second.manifest["data_controls"]["test_window_strategy"] == "full_year_runtime_slice"
+    assert first.signature_hash != second.signature_hash
+    assert first.shared_data_dir != second.shared_data_dir
+    assert second.manifest["data_controls"]["test_window_strategy"] == "cfg_window"
 
 
 def test_ensure_madrl_shared_data_accepts_shared_artifact_meta_without_agent_index(tmp_path, monkeypatch) -> None:
