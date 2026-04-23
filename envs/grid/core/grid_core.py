@@ -3,13 +3,13 @@ import dataclasses,warnings
 from dataclasses import dataclass,field
 from typing import TYPE_CHECKING,Any
 import numpy as np
-from envs.grid.core.net_builder import build_simbench_net
+from envs.grid.core.net_builder import build_simbench_net,zero_static_power_elements
 if TYPE_CHECKING:from envs.grid.deployments import AgentDeployment
 @dataclass
 class GridStepResult:converged:bool;vm_pu:np.ndarray;line_loading_pct:np.ndarray;trafo_loading_pct:np.ndarray;v_violation:np.ndarray;trafo_p_signed_kw:np.ndarray=field(default_factory=lambda:np.zeros(0,dtype=np.float32));psi_v_raw:float=.0;psi_line_raw:float=.0;psi_trafo_raw:float=.0
 class GridCore:
 	def __init__(self,deployments:list['AgentDeployment'],grid_cfg:Any)->None:
-		self.deployments=deployments;self.grid_cfg=grid_cfg;self.n_agents=len(deployments);self.agent_bus_ids=[deployment.bus_id for deployment in deployments];self.net=build_simbench_net(grid_cfg.sb_code);self.n_buses=int(len(self.net.bus));self.n_lines=int(len(self.net.line));self.n_trafos=int(len(getattr(self.net,'trafo',[])));bus_id_to_pos={bus_id:pos for(pos,bus_id)in enumerate(self.net.bus.index.tolist())};missing=[bus_id for bus_id in self.agent_bus_ids if bus_id not in bus_id_to_pos]
+		self.deployments=deployments;self.grid_cfg=grid_cfg;self.n_agents=len(deployments);self.agent_bus_ids=[deployment.bus_id for deployment in deployments];self.net=zero_static_power_elements(build_simbench_net(grid_cfg.sb_code));self.n_buses=int(len(self.net.bus));self.n_lines=int(len(self.net.line));self.n_trafos=int(len(getattr(self.net,'trafo',[])));bus_id_to_pos={bus_id:pos for(pos,bus_id)in enumerate(self.net.bus.index.tolist())};missing=[bus_id for bus_id in self.agent_bus_ids if bus_id not in bus_id_to_pos]
 		if missing:raise ValueError(f"agent_bus_id(s) {missing} are not present in network bus index.")
 		self._agent_bus_pos=np.asarray([bus_id_to_pos[bus_id]for bus_id in self.agent_bus_ids],dtype=np.int64);self._bus_rows=self._ensure_agent_bus_rows();self._last_valid=self._make_zero_result();self.last_pf_error=''
 	def _ensure_agent_bus_rows(self)->list[tuple[int,int,int,float,float]]:

@@ -10,8 +10,8 @@ CANONICAL_AGENT_BUS_IDS = [12, 4, 2]
 CANONICAL_LOAD_SCALE = [20.0, 20.0, 20.0]
 CANONICAL_PV_SCALE = [1.0, 1.0, 1.0]
 CANONICAL_BATTERY_CAPACITY_KWH = [50.0, 50.0, 50.0]
-CANONICAL_TEST_START_DATE = "2020-06-01"
-CANONICAL_TEST_END_DATE = "2020-06-07"
+CANONICAL_TEST_START_DATE = "2020-05-01"
+CANONICAL_TEST_END_DATE = "2020-05-07"
 COMPARE_SCHEME_ORDER = [
     "global_misocp",
     "local_mpc_perfect",
@@ -91,7 +91,6 @@ ADMM_NOTEBOOK_SPEC = {
     "max_iters_first_step": 300,
     "primal_tol": 1e-3,
     "dual_tol": 1e-3,
-    "terminal_cost_multiplier": 1.0,
 }
 
 

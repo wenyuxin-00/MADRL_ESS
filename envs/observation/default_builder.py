@@ -47,7 +47,9 @@ class DefaultObservationBuilder:
 		if self.precomputed:
 			cache_key=f"{name}_seq"
 			if cache_key not in env._episode_precomputed:raise KeyError(f"Precomputed observation data does not contain '{cache_key}'.")
-			return np.asarray(env._episode_precomputed[cache_key][env.cur_step],dtype=np.float32)
+			values=np.asarray(env._episode_precomputed[cache_key][env.cur_step],dtype=np.float32);expected_shape=(self.sequence_length,)if _SEQUENCE_SCOPES[name]=='shared'else(int(env.n),self.sequence_length)
+			if tuple(values.shape)!=expected_shape:raise ValueError(f"Precomputed observation horizon contract mismatch at DefaultObservationBuilder._sequence_feature(...): old shared-data object '{getattr(env,'_precomputed_data_dir',None)}' returned '{cache_key}' with shape {tuple(values.shape)}, but current cfg.env.future_horizon={self.future_horizon} and env.n={int(env.n)} require shape {expected_shape}. Expected shared-data generated with the current config. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun the consuming notebook or entrypoint.")
+			return values
 		if getattr(env,'forecaster',None)is None:return _pad_sequence(env.get_signal(name),env.cur_step,self.sequence_length)
 		history=_signal_history(env,name);timestamps=list(dict(getattr(env,'episode_meta',{})).get('timestamps')or[]);history_timestamps=[*env.history_timestamps,*[str(timestamp)for timestamp in timestamps[:max(0,int(env.cur_step)+1)]]];return np.asarray(env.forecaster.predict(history,self.sequence_length,signal_name=name,history_timestamps=history_timestamps),dtype=np.float32)
 	def _build(self,env,*,normalize:bool)->dict[str,np.ndarray]:

@@ -126,7 +126,6 @@ def _make_solver_problem(*, horizon: int = 8, n_agents: int = 2):
         p_max_kw=np.full((n_agents,), 2.0, dtype=np.float32),
         efficiency=1.0,
         energy_init_kwh=np.full((n_agents,), 2.0, dtype=np.float32),
-        energy_ref_kwh=np.full((n_agents,), 2.0, dtype=np.float32),
         energy_min_kwh=np.zeros((n_agents,), dtype=np.float32),
         energy_max_kwh=np.full((n_agents,), 4.0, dtype=np.float32),
         export_subsidy_eur_per_kwh=0.05,
@@ -250,16 +249,13 @@ def test_build_admm_mpc_window_data_shapes_and_import_price():
     assert data.load_seq.shape == (2, 5)
     assert data.pv_seq.shape == (2, 5)
     assert np.allclose(data.import_price_eur_per_kwh, raw_obs["wholesale_price_seq"] + 0.2)
-    assert np.allclose(data.energy_ref_kwh, np.full((2,), 2.0, dtype=np.float32))
+    assert not hasattr(data, "energy_ref_kwh")
 
 
-def test_resolve_default_terminal_cost_weight_matches_formula():
+def test_admm_window_data_has_no_terminal_soc_target():
     data = _make_solver_problem(horizon=6, n_agents=2)
-    weights = admm_mpc_nb.resolve_default_terminal_cost_weight(data, multiplier=1.5)
 
-    expected = 1.5 * 2.0 * float(np.mean(data.import_price_eur_per_kwh)) / 4.0
-    assert weights.shape == (2,)
-    assert np.allclose(weights, np.full((2,), expected, dtype=np.float32))
+    assert not hasattr(data, "energy_ref_kwh")
 
 
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
@@ -274,7 +270,6 @@ def test_rho_is_clamped_in_solver():
         env,
         window_data,
         surrogate_cache=surrogate_cache,
-        terminal_cost_weight_eur_per_kwh2=admm_mpc_nb.resolve_default_terminal_cost_weight(window_data),
         rho_init=1e9,
         rho_min=1e-3,
         rho_max=1e3,
@@ -439,7 +434,7 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
     assert rollout.meta["prediction_mode"] == "normal"
     assert rollout.meta["forecast_backend"] == "lstm"
     assert rollout.meta["economics_scope"] == "agent_only"
-    assert rollout.meta["admm_terminal_cost_mode"] == "quadratic_to_soc_target"
+    assert rollout.meta["admm_terminal_cost_mode"] == "none"
     assert bool(rollout.step_df.loc[0, "admm_converged"])
     assert int(rollout.step_df.loc[0, "admm_iterations"]) == 7
     assert float(rollout.step_df.loc[0, "wholesale_price_pred"]) == pytest.approx(0.3)
@@ -490,7 +485,6 @@ def test_admm_mpc_controller_keeps_progress_bar_enabled_for_notebooks(monkeypatc
         max_iters_first_step=300,
         primal_tol=1e-3,
         dual_tol=1e-3,
-        terminal_cost_multiplier=1.0,
         show_progress=True,
     )
     try:
@@ -536,7 +530,6 @@ def test_admm_mpc_controller_falls_back_to_stdout_progress_when_tqdm_unavailable
             p_max_kw=np.ones((2,), dtype=np.float32),
             efficiency=1.0,
             energy_init_kwh=np.ones((2,), dtype=np.float32),
-            energy_ref_kwh=np.ones((2,), dtype=np.float32),
             energy_min_kwh=np.zeros((2,), dtype=np.float32),
             energy_max_kwh=np.ones((2,), dtype=np.float32),
             export_subsidy_eur_per_kwh=0.079,
@@ -574,7 +567,6 @@ def test_admm_mpc_controller_falls_back_to_stdout_progress_when_tqdm_unavailable
         max_iters_first_step=300,
         primal_tol=1e-3,
         dual_tol=1e-3,
-        terminal_cost_multiplier=1.0,
         show_progress=True,
     )
     try:

@@ -59,6 +59,7 @@ def test_admm_mpc_notebook_uses_canonical_record_flow() -> None:
         "SAVE_ADMM_MPC_ROLLOUT",
         "ADMM_MPC_ROLLOUT_TAG_OVERRIDE",
         "shared_data_record.json",
+        "terminal_cost_multiplier",
     ]
     ordered_tokens = [
         "forecast_controls = get_mainline_forecast_controls(auto_train_missing=False)",

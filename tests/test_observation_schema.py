@@ -1,7 +1,11 @@
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import torch
 
 from data.loaders.registry import build_dataset
+from envs.observation.default_builder import DefaultObservationBuilder
 from envs.subproc_vec_env import DummyVecEnv, SubprocVecEnv
 from scripts.builder import build_env
 from tests.support.helpers import make_case_dir, make_smoke_config
@@ -42,6 +46,29 @@ def test_env_returns_structured_observation_schema(tmp_path):
     assert env.observation_layout["pv_seq"]["scope"] == "per_agent"
     assert "episode_idx" in reset_info
     env.close()
+
+
+def test_precomputed_sequence_feature_rejects_horizon_mismatch():
+    builder = DefaultObservationBuilder(
+        local_features=[],
+        sequence_features=["load"],
+        future_horizon=1,
+        precomputed=True,
+    )
+    env = SimpleNamespace(
+        n=2,
+        cur_step=0,
+        _precomputed_data_dir="old_shared_data/test",
+        _episode_precomputed={"load_seq": np.zeros((1, 2, 3), dtype=np.float32)},
+    )
+
+    with pytest.raises(ValueError, match="Precomputed observation horizon contract mismatch") as excinfo:
+        builder._sequence_feature(env, "load")
+
+    message = str(excinfo.value)
+    assert "load_seq" in message
+    assert "shape (2, 3)" in message
+    assert "cfg.env.future_horizon=1" in message
 
 
 def test_dummy_vec_env_stacks_structured_observations(tmp_path):

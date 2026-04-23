@@ -55,6 +55,17 @@ def grid_cfg():
     )
 
 
+def _assert_non_agent_power_zero(core) -> None:
+    agent_bus_set = {int(bus_id) for bus_id in core.agent_bus_ids}
+    for table_name in ("load", "sgen"):
+        table = getattr(core.net, table_name)
+        non_agent_mask = ~table["bus"].isin(agent_bus_set)
+        for column in ("p_mw", "q_mvar"):
+            if column in table.columns:
+                values = table.loc[non_agent_mask, column].to_numpy(dtype=np.float64)
+                assert np.allclose(values, 0.0)
+
+
 @pytest.mark.slow
 def test_simbench_net_loads(agent_deployments) -> None:
     from envs.grid.core.net_builder import build_simbench_net
@@ -64,6 +75,36 @@ def test_simbench_net_loads(agent_deployments) -> None:
     assert len(net.line) > 0
     for deployment in agent_deployments:
         assert deployment.bus_id in net.bus.index
+
+
+@pytest.mark.slow
+def test_grid_core_zeroes_non_agent_static_power(agent_deployments, grid_cfg) -> None:
+    from envs.grid.core.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    _assert_non_agent_power_zero(core)
+
+    base_load = np.ones(N_AGENTS, dtype=np.float32)
+    base_pv = np.ones(N_AGENTS, dtype=np.float32) * 0.25
+    core.reset(base_load, base_pv)
+
+    _assert_non_agent_power_zero(core)
+
+
+@pytest.mark.slow
+def test_grid_core_step_power_exists_only_on_agent_buses(agent_deployments, grid_cfg) -> None:
+    from envs.grid.core.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
+    core.reset(base_load, np.zeros(N_AGENTS, dtype=np.float32))
+
+    result = core.step(p_batt_kw=np.zeros(N_AGENTS, dtype=np.float32), base_load_kw=base_load)
+
+    assert result.converged
+    _assert_non_agent_power_zero(core)
+    agent_load = core.net.load.loc[core.net.load["bus"].isin(core.agent_bus_ids), "p_mw"]
+    assert float(agent_load.sum()) > 0.0
 
 
 @pytest.mark.slow

@@ -14,6 +14,17 @@ def _ensure_safe_pandapower_imports() -> None:
     os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 
+def zero_static_power_elements(net: "pp.pandapowerNet") -> "pp.pandapowerNet":
+    for element_name in ("load", "sgen"):
+        table = getattr(net, element_name, None)
+        if table is None or table.empty:
+            continue
+        zero_columns = [column for column in ("p_mw", "q_mvar") if column in table.columns]
+        if zero_columns:
+            table.loc[:, zero_columns] = 0.0
+    return net
+
+
 def build_simbench_net(sb_code: str) -> "pp.pandapowerNet":
     if sb_code not in _NET_CACHE:
         _ensure_safe_pandapower_imports()

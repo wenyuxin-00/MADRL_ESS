@@ -117,7 +117,6 @@ def test_network_model_extracts_tree_and_agent_reactive_background_is_zeroed(tmp
     cfg.grid.agent_bus_ids = [10, 4]
 
     network = NetworkModel.from_cfg(cfg, agent_bus_ids=cfg.grid.agent_bus_ids)
-    bus_to_pos = {int(bus_id): idx for idx, bus_id in enumerate(network.bus_ids)}
 
     assert network.root_bus_id not in cfg.grid.agent_bus_ids
     assert len(network.branch_parent_pos) == len(network.bus_ids) - 1
@@ -125,15 +124,8 @@ def test_network_model_extracts_tree_and_agent_reactive_background_is_zeroed(tmp
     assert int(network.root_outgoing_branches.size) == 1
     assert int(network.root_outgoing_branches[0]) == int(network.trafo_branch_index)
 
-    load_plus_sgen_pos = bus_to_pos[10]
-    load_only_pos = bus_to_pos[4]
-    assert abs(float(network.p_base_mw[load_plus_sgen_pos])) < 1e-7
-    assert abs(float(network.p_base_mw[load_only_pos])) < 1e-7
-    assert abs(float(network.q_base_mvar[load_plus_sgen_pos])) < 1e-7
-    assert abs(float(network.q_base_mvar[load_only_pos])) < 1e-7
-    non_agent_mask = np.ones_like(network.q_base_mvar, dtype=bool)
-    non_agent_mask[np.asarray(network.agent_bus_positions, dtype=np.int32)] = False
-    assert np.any(np.abs(np.asarray(network.q_base_mvar, dtype=np.float32)[non_agent_mask]) > 0.0)
+    assert np.allclose(network.p_base_mw, 0.0)
+    assert np.allclose(network.q_base_mvar, 0.0)
 
 
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")

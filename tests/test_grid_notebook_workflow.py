@@ -918,6 +918,20 @@ def test_collect_controller_rollout_tracks_full_grid_voltage(tmp_path):
         merged["net_load_total"],
         merged["net_load_total_from_agents"],
     )
+    assert np.allclose(rollout.step_df["fixed_load_kw"].astype(float), 0.0)
+    assert np.allclose(rollout.step_df["fixed_generation_kw"].astype(float), 0.0)
+    assert np.allclose(
+        rollout.step_df["feeder_raw_net_load_kw"].astype(float),
+        rollout.step_df["agent_raw_net_load_kw"].astype(float),
+    )
+    assert np.allclose(
+        rollout.step_df["feeder_effective_net_load_kw"].astype(float),
+        rollout.step_df["agent_effective_net_load_kw"].astype(float),
+    )
+    assert np.allclose(
+        rollout.step_df["feeder_post_action_net_load_kw"].astype(float),
+        rollout.step_df["agent_post_action_net_load_kw"].astype(float),
+    )
 
     assert np.allclose(
         rollout.step_df["pv_raw_total"].astype(float),

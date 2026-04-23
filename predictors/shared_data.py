@@ -105,6 +105,15 @@ class PrecomputedObservationStore:
 		self._arrays={name:np.load(self.split_dir/file_name,mmap_mode='r')for(name,file_name)in dict(self.manifest.get('files',{})).items()}
 	def episode(self,episode_idx:int)->dict[str,np.ndarray]:return{name:np.asarray(array[int(episode_idx)])for(name,array)in self._arrays.items()}
 def load_madrl_shared_data_manifest(path:str|Path)->dict[str,object]:return json.loads((Path(path).resolve()/'manifest.json').read_text(encoding='utf-8'))
+def _manifest_int(value:object,*,field:str,manifest_path:Path)->int:
+	try:return int(value)
+	except(TypeError,ValueError)as exc:raise ValueError(f"Invalid shared-data manifest field '{field}' at '{manifest_path}': expected integer, actual={value!r}. Expected a current shared MADRL data contract. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun the consuming notebook or entrypoint.")from exc
+def validate_madrl_shared_data_runtime_contract(cfg,*,shared_data_dir:str|Path,split_dir:str|Path,split_manifest:dict[str,object])->dict[str,object]:
+	shared_data_dir=Path(shared_data_dir).resolve();split_dir=Path(split_dir).resolve();root_manifest_path=shared_data_dir/'manifest.json';split_manifest_path=split_dir/'manifest.json';root_manifest=load_madrl_shared_data_manifest(shared_data_dir);expected_horizon=int(cfg.env.future_horizon);expected_sequence_length=expected_horizon+1;data_controls=dict(root_manifest.get('data_controls')or{});actual_horizon=_manifest_int(data_controls.get('future_horizon'),field='data_controls.future_horizon',manifest_path=root_manifest_path);actual_sequence_length=_manifest_int(split_manifest.get('sequence_length'),field='sequence_length',manifest_path=split_manifest_path);mismatches=[]
+	if actual_horizon!=expected_horizon:mismatches.append(f"old shared-data object '{shared_data_dir}' declares data_controls.future_horizon={actual_horizon}, but current cfg.env.future_horizon={expected_horizon}")
+	if actual_sequence_length!=expected_sequence_length:mismatches.append(f"old split manifest '{split_manifest_path}' declares sequence_length={actual_sequence_length}, but current cfg.env.future_horizon={expected_horizon} requires sequence_length={expected_sequence_length}")
+	if mismatches:raise ValueError("Shared-data horizon contract mismatch at scripts.builder.build_env(...): "+"; ".join(mismatches)+". Expected a shared MADRL data package generated with the current config. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun notebooks/madrl/local_MPC.ipynb or notebooks/madrl/ADMM_mpc.ipynb.")
+	return root_manifest
 def select_shared_data_episode_indices(manifest:dict[str,object],*,start_date:str|None,end_date:str|None)->list[int]:
 	if not(episodes:=list(manifest.get('episodes')or[])):raise ValueError('Shared-data split manifest does not contain episode metadata.')
 	if start_date in(None,'')and end_date in(None,''):return[int(entry['episode_idx'])for entry in episodes]

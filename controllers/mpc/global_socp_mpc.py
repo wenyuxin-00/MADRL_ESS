@@ -6,7 +6,7 @@ import numpy as np
 try:import gurobipy as gp;from gurobipy import GRB
 except ModuleNotFoundError:gp=None;GRB=None
 from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy
-from envs.grid.core.net_builder import build_simbench_net
+from envs.grid.core.net_builder import build_simbench_net,zero_static_power_elements
 from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY,WHOLESALE_PRICE_SEQ_FIELD,derive_import_price_seq,get_import_price_markup
 _GUROBI_ERROR_PREFIX='Global SOCP-MPC requires a working Gurobi installation/license'
 _ROOT_VM_EPS=1e-06
@@ -25,14 +25,14 @@ class NetworkModel:
 	s_base_mva:float;root_bus_id:int;trafo_lv_bus_id:int;root_vm_pu:float;loading_limit_scale:float;bus_ids:tuple[int,...];bus_pos:dict[int,int];v_base_kv:np.ndarray;p_base_mw:np.ndarray;q_base_mvar:np.ndarray;branch_parent_pos:np.ndarray;branch_child_pos:np.ndarray;branch_r_pu:np.ndarray;branch_x_pu:np.ndarray;branch_is_trafo:np.ndarray;branch_l_max_pu:np.ndarray;incoming_branch_by_bus:np.ndarray;outgoing_branches_by_bus:tuple[tuple[int,...],...];root_outgoing_branches:np.ndarray;trafo_branch_index:int;line_branch_indices:np.ndarray;agent_bus_positions:np.ndarray
 	@classmethod
 	def from_cfg(cls,cfg:Any,*,agent_bus_ids:list[int])->'NetworkModel':
-		grid_cfg=cfg.grid;net=build_simbench_net(str(grid_cfg.sb_code))
+		grid_cfg=cfg.grid;net=zero_static_power_elements(build_simbench_net(str(grid_cfg.sb_code)))
 		if len(getattr(net,'ext_grid',[]))!=1:raise ValueError('Global SOCP-MPC requires exactly one ext_grid bus.')
 		if len(getattr(net,'trafo',[]))!=1:raise ValueError('Global SOCP-MPC currently requires exactly one transformer.')
 		root_bus_id=int(net.ext_grid.iloc[0]['bus']);root_vm_pu=float(net.ext_grid.iloc[0]['vm_pu'])if'vm_pu'in net.ext_grid.columns else 1.;trafo_row=net.trafo.iloc[0];trafo_hv_bus=int(trafo_row['hv_bus']);trafo_lv_bus=int(trafo_row['lv_bus'])
 		if trafo_hv_bus!=root_bus_id:raise ValueError(f"Global SOCP-MPC expects the transformer HV bus to match the ext_grid root bus, got ext_grid={root_bus_id} and trafo_hv_bus={trafo_hv_bus}.")
 		s_base_mva=float(trafo_row['sn_mva'])
 		if s_base_mva<=.0:raise ValueError(f"Transformer sn_mva must be positive, got {s_base_mva}.")
-		agent_bus_ids=[int(bus_id)for bus_id in agent_bus_ids];cls._zero_agent_bus_active_injections(net,agent_bus_ids);p_base_mw,q_base_mvar=cls._aggregate_bus_demands(net);bus_ids=tuple(int(bus_id)for bus_id in net.bus.index.tolist());bus_pos={bus_id:idx for(idx,bus_id)in enumerate(bus_ids)};v_base_kv=np.asarray([float(net.bus.at[bus_id,'vn_kv'])for bus_id in bus_ids],dtype=np.float32);raw_edges:list[dict[str,object]]=[];vk_percent=float(trafo_row.get('vk_percent',.0));vkr_percent=float(trafo_row.get('vkr_percent',.0));x_percent=float(np.sqrt(max(vk_percent*vk_percent-vkr_percent*vkr_percent,.0)));raw_edges.append({'u':root_bus_id,'v':trafo_lv_bus,'r_pu':float(vkr_percent/1e2),'x_pu':float(x_percent/1e2),'l_max_pu':np.nan,'is_trafo':True})
+		agent_bus_ids=[int(bus_id)for bus_id in agent_bus_ids];p_base_mw,q_base_mvar=cls._aggregate_bus_demands(net);bus_ids=tuple(int(bus_id)for bus_id in net.bus.index.tolist());bus_pos={bus_id:idx for(idx,bus_id)in enumerate(bus_ids)};v_base_kv=np.asarray([float(net.bus.at[bus_id,'vn_kv'])for bus_id in bus_ids],dtype=np.float32);raw_edges:list[dict[str,object]]=[];vk_percent=float(trafo_row.get('vk_percent',.0));vkr_percent=float(trafo_row.get('vkr_percent',.0));x_percent=float(np.sqrt(max(vk_percent*vk_percent-vkr_percent*vkr_percent,.0)));raw_edges.append({'u':root_bus_id,'v':trafo_lv_bus,'r_pu':float(vkr_percent/1e2),'x_pu':float(x_percent/1e2),'l_max_pu':np.nan,'is_trafo':True})
 		for(_,row)in net.line.iterrows():
 			from_bus=int(row['from_bus']);to_bus=int(row['to_bus']);vn_kv=float(net.bus.at[from_bus,'vn_kv'])
 			if vn_kv<=.0:raise ValueError(f"Bus {from_bus} has invalid vn_kv={vn_kv}.")
@@ -44,15 +44,6 @@ class NetworkModel:
 		try:agent_bus_positions=np.asarray([bus_pos[bus_id]for bus_id in agent_bus_ids],dtype=np.int32)
 		except KeyError as exc:raise ValueError(f"Unknown agent bus id {exc.args[0]!r} in NetworkModel extraction.")from exc
 		line_branch_indices=np.asarray([idx for(idx,is_trafo)in enumerate(branch_is_trafo.tolist())if not bool(is_trafo)],dtype=np.int32);return cls(s_base_mva=s_base_mva,root_bus_id=root_bus_id,trafo_lv_bus_id=trafo_lv_bus,root_vm_pu=float(root_vm_pu),loading_limit_scale=float(max(float(grid_cfg.line_max_loading_pct),.0)/1e2),bus_ids=bus_ids,bus_pos=bus_pos,v_base_kv=v_base_kv.astype(np.float32,copy=False),p_base_mw=p_base_mw.astype(np.float32,copy=False),q_base_mvar=q_base_mvar.astype(np.float32,copy=False),branch_parent_pos=branch_parent_pos.astype(np.int32,copy=False),branch_child_pos=branch_child_pos.astype(np.int32,copy=False),branch_r_pu=branch_r_pu.astype(np.float32,copy=False),branch_x_pu=branch_x_pu.astype(np.float32,copy=False),branch_is_trafo=branch_is_trafo.astype(bool,copy=False),branch_l_max_pu=branch_l_max_pu.astype(np.float32,copy=False),incoming_branch_by_bus=incoming_branch_by_bus.astype(np.int32,copy=False),outgoing_branches_by_bus=outgoing_branches_by_bus,root_outgoing_branches=root_outgoing.astype(np.int32,copy=False),trafo_branch_index=trafo_branch_index,line_branch_indices=line_branch_indices,agent_bus_positions=agent_bus_positions.astype(np.int32,copy=False))
-	@staticmethod
-	def _zero_agent_bus_active_injections(net:Any,agent_bus_ids:list[int])->None:
-		agent_bus_set={int(bus_id)for bus_id in agent_bus_ids}
-		if hasattr(net,'load')and not net.load.empty:
-			load_mask=net.load['bus'].isin(agent_bus_set)
-			if bool(load_mask.any()):net.load.loc[load_mask,['p_mw','q_mvar']]=.0
-		if hasattr(net,'sgen')and not net.sgen.empty:
-			sgen_mask=net.sgen['bus'].isin(agent_bus_set)
-			if bool(sgen_mask.any()):net.sgen.loc[sgen_mask,['p_mw','q_mvar']]=.0
 	@staticmethod
 	def _aggregate_bus_demands(net:Any)->tuple[np.ndarray,np.ndarray]:
 		bus_ids=[int(bus_id)for bus_id in net.bus.index.tolist()];bus_pos={bus_id:idx for(idx,bus_id)in enumerate(bus_ids)};p_base=np.zeros((len(bus_ids),),dtype=np.float32);q_base=np.zeros((len(bus_ids),),dtype=np.float32)

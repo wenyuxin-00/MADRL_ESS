@@ -66,6 +66,23 @@ def test_build_env_uses_shared_data_without_building_live_forecaster(tmp_path, m
         env.close()
 
 
+def test_build_env_rejects_shared_data_future_horizon_mismatch(tmp_path):
+    case_dir = make_case_dir(tmp_path, "shared_data_env_horizon_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
+    cfg.env.future_horizon = int(cfg.env.future_horizon) + 1
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
+
+    with pytest.raises(ValueError, match="Shared-data horizon contract mismatch") as excinfo:
+        build_env(cfg, mode="test")
+
+    message = str(excinfo.value)
+    assert "data_controls.future_horizon=1" in message
+    assert "cfg.env.future_horizon=2" in message
+    assert "forecast_lstm.ipynb" in message
+
+
 def test_build_env_resets_runtime_split_state_without_shared_data(tmp_path):
     case_dir = make_case_dir(tmp_path, "cfg_split_runtime")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
