@@ -405,6 +405,21 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
                     "test_start_date": str(cfg.data.test_start_date),
                     "test_end_date": str(cfg.data.test_end_date),
                 },
+                "experiment_controls": {
+                    "reward_controls": {
+                        "w_soc_pen": float(cfg.reward.w_soc_pen),
+                        "w_voltage_pen": float(cfg.reward.w_voltage_pen),
+                        "w_line_pen": float(cfg.reward.w_line_pen),
+                        "w_trafo_pen": float(cfg.reward.w_trafo_pen),
+                        "export_subsidy_eur_per_kwh": float(cfg.reward.export_subsidy_eur_per_kwh),
+                        "import_price_markup_eur_per_kwh": float(cfg.reward.import_price_markup_eur_per_kwh),
+                        "storage_objective_mode": str(cfg.reward.storage_objective_mode),
+                        "storage_price_mode": str(cfg.reward.storage_price_mode),
+                        "storage_profit_weight": float(cfg.reward.storage_profit_weight),
+                        "local_action_penalty_mode": str(cfg.reward.local_action_penalty_mode),
+                        "local_action_penalty_weight": float(cfg.reward.local_action_penalty_weight),
+                    },
+                },
             },
         }
 
@@ -630,16 +645,26 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
         "w_voltage_pen": 0.0,
         "w_line_pen": 0.0,
         "w_trafo_pen": 0.0,
-        "export_subsidy_eur_per_kwh": 0.079,
-        "import_price_markup_eur_per_kwh": 0.2,
+        "export_subsidy_eur_per_kwh": 0.0,
+        "import_price_markup_eur_per_kwh": 0.0,
+        "storage_objective_mode": "max_storage_profit",
+        "storage_price_mode": "real_time_price",
+        "storage_profit_weight": 1.0,
+        "local_action_penalty_mode": "diagnostic_only",
+        "local_action_penalty_weight": 0.0,
     }
     assert safe_payload["experiment_controls"]["reward_controls"] == {
         "w_soc_pen": 2.0,
         "w_voltage_pen": 400.0,
         "w_line_pen": 0.0,
         "w_trafo_pen": 10.0,
-        "export_subsidy_eur_per_kwh": 0.079,
-        "import_price_markup_eur_per_kwh": 0.2,
+        "export_subsidy_eur_per_kwh": 0.0,
+        "import_price_markup_eur_per_kwh": 0.0,
+        "storage_objective_mode": "max_storage_profit",
+        "storage_price_mode": "real_time_price",
+        "storage_profit_weight": 1.0,
+        "local_action_penalty_mode": "diagnostic_only",
+        "local_action_penalty_weight": 0.0,
     }
     assert base_payload["checkpoint_controls"]["experiment_name"] == "train_base"
     assert safe_payload["checkpoint_controls"]["experiment_name"] == "train_base_safe"
@@ -1145,10 +1170,10 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
 
     assert perfect_rollout.meta["controller"] == "Local MPC (oracle_eval)"
     assert normal_rollout.meta["controller"] == "Local MPC (forecast_eval)"
-    assert perfect_rollout.meta["local_mpc_price_mode"] == "import_adjusted"
-    assert normal_rollout.meta["local_mpc_price_mode"] == "import_adjusted"
-    assert perfect_rollout.meta["local_mpc_objective_mode"] == "economic_only"
-    assert normal_rollout.meta["local_mpc_objective_mode"] == "economic_only"
+    assert perfect_rollout.meta["local_mpc_price_mode"] == "real_time_price"
+    assert normal_rollout.meta["local_mpc_price_mode"] == "real_time_price"
+    assert perfect_rollout.meta["local_mpc_objective_mode"] == "max_storage_profit"
+    assert normal_rollout.meta["local_mpc_objective_mode"] == "max_storage_profit"
     assert recorded_modes == ["perfect", "lstm"]
     assert recorded_subsidies == [0.079, 0.079, 0.079, 0.079]
     assert recorded_agent_indices == [0, 1, 0, 1]
@@ -1161,7 +1186,7 @@ def test_collect_local_mpc_rollout_preserves_interface_for_both_prediction_modes
         np.testing.assert_allclose(action_array[:, 1], np.array([0.16666663, -0.25], dtype=np.float32), atol=1e-5)
 
 
-def test_collect_local_mpc_rollout_rewrites_objective_to_economic_only(tmp_path, monkeypatch):
+def test_collect_local_mpc_rollout_declares_storage_profit_objective(tmp_path, monkeypatch):
     case_dir = make_case_dir(tmp_path, "grid_rollout_mpc_objective")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     _enable_normal_comparison_contract(cfg)
@@ -1216,7 +1241,7 @@ def test_collect_local_mpc_rollout_rewrites_objective_to_economic_only(tmp_path,
 
     rollout = collect_local_mpc_rollout(cfg, prediction_mode="normal", label="Local MPC (forecast_eval)")
 
-    assert rollout.meta["local_mpc_objective_mode"] == "economic_only"
+    assert rollout.meta["local_mpc_objective_mode"] == "max_storage_profit"
     assert float(rollout.step_df.loc[0, "objective_total"]) == pytest.approx(-2.0)
     assert float(rollout.agent_df.loc[0, "objective_total"]) == pytest.approx(-1.5)
     assert float(rollout.summary.loc[0, "objective_total"]) == pytest.approx(-1.5)
@@ -1381,6 +1406,11 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "import_price_pred": [0.31, 0.38],
                 "purchase_cost_total": [1.0, 1.1],
                 "export_subsidy_total": [0.1, 0.1],
+                "storage_purchase_cost_eur": [0.30, 0.40],
+                "storage_sale_revenue_eur": [0.50, 0.60],
+                "storage_total_profit_eur": [0.20, 0.20],
+                "system_other_cost_eur": [0.10, 0.20],
+                "total_eur": [0.10, 0.00],
                 "voltage_penalty_total": [0.0, 0.0],
                 "line_penalty_total": [0.0, 0.0],
                 "trafo_penalty_total": [0.0, 0.0],
@@ -1462,12 +1492,15 @@ def test_compare_rollout_metrics_returns_expected_columns():
     assert {
         "controller",
         "soc_mode",
-        "purchase_cost_total",
-        "purchase_cost_total_eur",
-        "export_subsidy_total",
-        "export_subsidy_total_eur",
-        "total_cost_eur",
-        "objective_total",
+        "storage_charge_cost_total_eur",
+        "storage_discharge_revenue_total_eur",
+        "storage_profit_total_eur",
+        "storage_objective_total_eur",
+        "storage_purchase_cost_eur",
+        "storage_sale_revenue_eur",
+        "storage_total_profit_eur",
+        "system_other_cost_eur",
+        "total_eur",
         "voltage_penalty_total",
         "trafo_penalty_total",
         "line_penalty_total",
@@ -1489,8 +1522,11 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "feeder_netload_ramp_max_kw",
         "returned_primary_objective_eur",
     }.issubset(metrics_df.columns)
+    assert "purchase_cost_total_eur" not in metrics_df.columns
+    assert "export_subsidy_total_eur" not in metrics_df.columns
+    assert "total_cost_eur" not in metrics_df.columns
     assert metrics_df.loc[metrics_df["controller"] == "Local MPC (forecast_eval)", "voltage_violation_steps"].item() == 2
-    assert metrics_df.loc[metrics_df["controller"] == "Local MPC (oracle_eval)", "total_cost_eur"].item() == pytest.approx(1.9)
+    assert metrics_df.loc[metrics_df["controller"] == "Local MPC (oracle_eval)", "total_eur"].item() == pytest.approx(0.1)
 
 
 def test_compare_rollout_metrics_derives_missing_import_price_from_wholesale_only():
@@ -1596,9 +1632,14 @@ def test_build_compare_tables_use_final_dispatch_costs():
     metrics_df = pd.DataFrame(
         {
             "controller": ["Global MISOCP", "MADRL"],
-            "purchase_cost_total_eur": [2.0, 1.5],
-            "export_subsidy_total_eur": [0.4, 0.2],
-            "total_cost_eur": [1.6, 1.3],
+            "storage_charge_cost_total_eur": [2.0, 1.5],
+            "storage_discharge_revenue_total_eur": [2.4, 1.9],
+            "storage_profit_total_eur": [0.4, 0.4],
+            "storage_purchase_cost_eur": [2.0, 1.5],
+            "storage_sale_revenue_eur": [2.4, 1.9],
+            "storage_total_profit_eur": [0.4, 0.4],
+            "system_other_cost_eur": [0.1, 0.2],
+            "total_eur": [0.3, 0.2],
             "voltage_violation_steps": [1, 0],
             "voltage_violation_bus_points": [2, 0],
             "voltage_step_delta_p95_pu": [0.01, 0.02],
@@ -1616,9 +1657,9 @@ def test_build_compare_tables_use_final_dispatch_costs():
 
     assert list(economic_df.columns) == [
         "controller",
-        "purchase_cost_total_eur",
-        "export_subsidy_total_eur",
-        "total_cost_eur",
+        "storage_discharge_revenue_total_eur",
+        "storage_charge_cost_total_eur",
+        "storage_profit_total_eur",
     ]
     assert list(safety_df.columns) == [
         "controller",
@@ -1904,6 +1945,12 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
             "seed": seed,
             "reward_controls": {
                 "export_subsidy_eur_per_kwh": subsidy,
+                "import_price_markup_eur_per_kwh": 0.2,
+                "storage_objective_mode": "max_storage_profit",
+                "storage_price_mode": "real_time_price",
+                "storage_profit_weight": 1.0,
+                "local_action_penalty_mode": "diagnostic_only",
+                "local_action_penalty_weight": 0.0,
                 "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},
@@ -1974,6 +2021,12 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
             "seed": 0,
             "reward_controls": {
                 "export_subsidy_eur_per_kwh": 0.079,
+                "import_price_markup_eur_per_kwh": 0.2,
+                "storage_objective_mode": "max_storage_profit",
+                "storage_price_mode": "real_time_price",
+                "storage_profit_weight": 1.0,
+                "local_action_penalty_mode": "diagnostic_only",
+                "local_action_penalty_weight": 0.0,
                 "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},

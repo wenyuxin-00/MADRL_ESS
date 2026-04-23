@@ -83,6 +83,15 @@ def _make_mock_result() -> SimpleNamespace:
         feeder_purchase_cost_eur=1.3,
         feeder_export_subsidy_eur=0.0,
         feeder_net_cost_eur=1.3,
+        storage_purchase_cost_eur=0.125,
+        storage_sale_revenue_eur=0.1,
+        storage_total_profit_eur=-0.025,
+        storage_charge_cost_eur=0.125,
+        storage_discharge_revenue_eur=0.1,
+        storage_profit_eur=-0.025,
+        storage_objective_eur=0.025,
+        system_other_cost_eur=1.275,
+        total_eur=-1.3,
         throughput_regularization_eur=0.01,
         throughput_regularization_weight=1e-4,
         physical_tiebreaker_eur=0.0015,
@@ -186,14 +195,13 @@ def test_build_full_horizon_step_df_returns_expected_columns_and_values():
         "pv_effective_kw",
         "battery_charge_kw",
         "battery_discharge_kw",
+        "storage_purchase_cost_eur_step",
+        "storage_sale_revenue_eur_step",
+        "storage_total_profit_eur_step",
+        "system_other_cost_eur_step",
+        "total_eur_step",
         "agent_import_kw_total",
         "agent_export_kw_total",
-        "agent_purchase_cost_eur_step",
-        "agent_export_subsidy_eur_step",
-        "agent_net_cost_eur_step",
-        "feeder_purchase_cost_eur_step",
-        "feeder_export_subsidy_eur_step",
-        "feeder_net_cost_eur_step",
         "grid_import_kw",
         "grid_export_kw",
         "agent_raw_net_load_kw",
@@ -228,9 +236,11 @@ def test_build_full_horizon_step_df_returns_expected_columns_and_values():
     assert step_df["agent_root_gap_kw"].tolist() == [7.0, 5.0]
     assert step_df["balance_residual_kw"].tolist() == [1.0, -1.0]
     assert step_df["root_net_exchange_kw"].tolist() == [18.0, 17.0]
-    assert step_df["agent_purchase_cost_eur_step"].sum() == pytest.approx(result.agent_purchase_cost_eur)
-    assert step_df["agent_export_subsidy_eur_step"].sum() == pytest.approx(result.agent_export_subsidy_eur)
-    assert step_df["agent_net_cost_eur_step"].sum() == pytest.approx(result.agent_net_cost_eur)
+    assert step_df["storage_purchase_cost_eur_step"].sum() == pytest.approx(result.storage_purchase_cost_eur)
+    assert step_df["storage_sale_revenue_eur_step"].sum() == pytest.approx(result.storage_sale_revenue_eur)
+    assert step_df["storage_total_profit_eur_step"].sum() == pytest.approx(result.storage_total_profit_eur)
+    assert step_df["system_other_cost_eur_step"].sum() == pytest.approx(result.system_other_cost_eur)
+    assert step_df["total_eur_step"].sum() == pytest.approx(result.total_eur)
     assert step_df["aggregate_stored_energy_kwh"].tolist() == [22.5, 22.0]
 
 
@@ -248,32 +258,16 @@ def test_validate_misocp_result_schema_rejects_stale_result_objects():
         build_full_horizon_step_df(problem, full_input, stale_result)
 
 
-def test_agent_and_feeder_costs_diverge_with_background_and_match_without_background():
+def test_system_other_cost_reconciles_storage_profit_with_total():
     problem = _make_mock_problem()
     full_input = _make_mock_full_input()
     result = _make_mock_result()
 
     step_df = build_full_horizon_step_df(problem, full_input, result)
-    assert float(step_df["feeder_purchase_cost_eur_step"].sum()) > float(step_df["agent_purchase_cost_eur_step"].sum())
-
-    zero_background_problem = _make_mock_problem()
-    zero_background_problem.network.p_base_mw = np.zeros_like(zero_background_problem.network.p_base_mw)
-    zero_background_result = _make_mock_result()
-    zero_background_result.root_import_mw = np.asarray(np.sum(zero_background_result.agent_import_mw, axis=0), dtype=np.float32)
-    zero_background_result.root_export_mw = np.asarray(np.sum(zero_background_result.agent_export_mw, axis=0), dtype=np.float32)
-    zero_background_result.root_p_kw = (
-        (zero_background_result.root_import_mw - zero_background_result.root_export_mw) * 1000.0
-    ).astype(np.float32)
-    zero_background_result.feeder_purchase_cost_eur = float(zero_background_result.agent_purchase_cost_eur)
-    zero_background_result.feeder_export_subsidy_eur = float(zero_background_result.agent_export_subsidy_eur)
-    zero_background_result.feeder_net_cost_eur = float(zero_background_result.agent_net_cost_eur)
-
-    zero_background_step_df = build_full_horizon_step_df(zero_background_problem, full_input, zero_background_result)
-    assert float(zero_background_step_df["feeder_purchase_cost_eur_step"].sum()) == pytest.approx(
-        float(zero_background_step_df["agent_purchase_cost_eur_step"].sum())
-    )
-    assert float(zero_background_step_df["feeder_net_cost_eur_step"].sum()) == pytest.approx(
-        float(zero_background_step_df["agent_net_cost_eur_step"].sum())
+    assert "agent_purchase_cost_eur_step" not in step_df.columns
+    assert "feeder_purchase_cost_eur_step" not in step_df.columns
+    assert float(step_df["total_eur_step"].sum()) == pytest.approx(
+        float(step_df["storage_total_profit_eur_step"].sum() - step_df["system_other_cost_eur_step"].sum())
     )
 
 
@@ -287,7 +281,12 @@ def test_solver_summary_helper_returns_expected_fields():
     assert solver_summary["sol_count"] == 1
     assert solver_summary["node_count"] == 12.0
     assert solver_summary["num_quadratic_constraints"] == result.model_size.num_quadratic_constraints
-    assert solver_summary["economics_scope"] == "agent_only"
+    assert solver_summary["economics_scope"] == "storage_only"
+    assert solver_summary["storage_purchase_cost_eur"] == pytest.approx(result.storage_purchase_cost_eur)
+    assert solver_summary["storage_sale_revenue_eur"] == pytest.approx(result.storage_sale_revenue_eur)
+    assert solver_summary["storage_total_profit_eur"] == pytest.approx(result.storage_total_profit_eur)
+    assert solver_summary["system_other_cost_eur"] == pytest.approx(result.system_other_cost_eur)
+    assert solver_summary["total_eur"] == pytest.approx(result.total_eur)
     assert solver_summary["physical_tiebreaker_weight"] == pytest.approx(1e-6)
     assert solver_summary["physical_tiebreaker_eur"] == pytest.approx(0.0015)
     assert solver_summary["stage1_primary_objective_eur"] == pytest.approx(0.885)

@@ -10,7 +10,7 @@ import torch
 from configs.profiles import compose_experiment_config,summarize_experiment
 from controllers import MADRLController
 from controllers.madrl.base_agent import get_agent_cls
-from controllers.madrl.safety_projector import is_safe_poc_algorithm
+from controllers.madrl.safety_projector import is_safe_poc_algorithm,resolve_local_action_penalty_settings
 from scripts.builder import build_env
 from scripts.builder import build_train_runner
 from scripts.checkpoints import build_training_run_paths,find_latest_training_run,resolve_checkpoint_to_load,slugify_checkpoint_token
@@ -40,11 +40,14 @@ def _apply_runtime_controls(cfg,runtime_controls:dict[str,Any]|None)->None:
 def _apply_reward_controls(cfg,reward_controls:dict[str,Any]|None)->None:
 	controls=dict(reward_controls or{});removed_reward_keys={'lambda_throughput':"Remove 'lambda_throughput'; it is no longer supported.",'w_action_pen':"Use 'w_soc_pen' instead of 'w_action_pen'."};removed_hits=sorted(set(controls).intersection(removed_reward_keys))
 	if removed_hits:details=' '.join(removed_reward_keys[key]for key in removed_hits);raise ValueError(f"Legacy reward_controls key(s) are no longer supported: {removed_hits}. {details}")
-	known_reward_keys={'export_subsidy_eur_per_kwh','import_price_markup_eur_per_kwh','w_soc_pen','w_voltage_pen','w_line_pen','w_trafo_pen'};unknown_keys=set(controls)-known_reward_keys
+	known_reward_keys={'export_subsidy_eur_per_kwh','import_price_markup_eur_per_kwh','storage_objective_mode','storage_price_mode','storage_profit_weight','local_action_penalty_mode','local_action_penalty_weight','w_soc_pen','w_voltage_pen','w_line_pen','w_trafo_pen'};unknown_keys=set(controls)-known_reward_keys
 	if unknown_keys:raise ValueError(f"Unknown reward_controls key(s): {sorted(unknown_keys)}. Supported keys: {sorted(known_reward_keys)}.")
 	if'w_soc_pen'in controls:cfg.reward.w_soc_pen=float(controls['w_soc_pen'])
-	for field_name in('export_subsidy_eur_per_kwh','import_price_markup_eur_per_kwh','w_voltage_pen','w_line_pen','w_trafo_pen'):
+	for field_name in('export_subsidy_eur_per_kwh','import_price_markup_eur_per_kwh','storage_profit_weight','local_action_penalty_weight','w_voltage_pen','w_line_pen','w_trafo_pen'):
 		if field_name in controls:setattr(cfg.reward,field_name,float(controls[field_name]))
+	for field_name in('storage_objective_mode','storage_price_mode','local_action_penalty_mode'):
+		if field_name in controls:setattr(cfg.reward,field_name,str(controls[field_name]))
+	resolve_local_action_penalty_settings(cfg.reward)
 def _apply_safety_controls(cfg,safety_controls:dict[str,Any]|None)->None:
 	controls=dict(safety_controls or{});numeric_fields='projection_iters','voltage_margin_pu','line_margin_pct','trafo_margin_pct','linearization_delta_kw'
 	for field_name in numeric_fields:

@@ -241,6 +241,7 @@ def _make_cached_rollout(
 
 def test_build_admm_mpc_window_data_shapes_and_import_price():
     cfg = _make_cfg(future_horizon=4)
+    cfg.reward.export_subsidy_eur_per_kwh = 0.5
     env = _make_env(future_horizon=4)
     raw_obs = env.obs_builder.build_raw(env)
 
@@ -256,6 +257,45 @@ def test_admm_window_data_has_no_terminal_soc_target():
     data = _make_solver_problem(horizon=6, n_agents=2)
 
     assert not hasattr(data, "energy_ref_kwh")
+
+
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
+def test_admm_storage_profit_objective_charges_when_real_time_price_is_negative():
+    env = _make_env(n_agents=1, future_horizon=1)
+    window_data = admm_mpc_nb.AdmmMpcWindowData(
+        import_price_eur_per_kwh=np.asarray([-0.10], dtype=np.float32),
+        load_seq=np.zeros((1, 1), dtype=np.float32),
+        pv_seq=np.zeros((1, 1), dtype=np.float32),
+        battery_capacity_kwh=np.asarray([4.0], dtype=np.float32),
+        p_max_kw=np.asarray([2.0], dtype=np.float32),
+        efficiency=1.0,
+        energy_init_kwh=np.asarray([2.0], dtype=np.float32),
+        energy_min_kwh=np.asarray([0.0], dtype=np.float32),
+        energy_max_kwh=np.asarray([4.0], dtype=np.float32),
+        export_subsidy_eur_per_kwh=0.5,
+        dt_hours=0.25,
+    )
+    surrogate_cache = admm_mpc_nb.AdmmMpcSurrogateCache(
+        trafo_limit_kw=100.0,
+        trafo_base_kw=0.0,
+        alpha_netload_window_kw=np.zeros((1, 1), dtype=np.float32),
+    )
+
+    result = admm_mpc_nb.run_admm_mpc_step(
+        env,
+        window_data,
+        surrogate_cache=surrogate_cache,
+        rho_init=1e-3,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation=None,
+        max_iters=1,
+        max_iters_first_step=1,
+        primal_tol=1e-9,
+        dual_tol=1e-9,
+    )
+
+    assert float(result.executed_action_array[0, 0]) > 0.9
 
 
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
@@ -433,16 +473,21 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
     assert rollout.meta["controller"] == admm_mpc_nb.ADMM_MPC_LSTM_LABEL
     assert rollout.meta["prediction_mode"] == "normal"
     assert rollout.meta["forecast_backend"] == "lstm"
-    assert rollout.meta["economics_scope"] == "agent_only"
+    assert rollout.meta["economics_scope"] == "storage_only"
+    assert rollout.meta["objective_mode"] == "max_storage_profit"
+    assert rollout.meta["admm_objective_mode"] == "max_storage_profit"
+    assert rollout.meta["admm_price_mode"] == "real_time_price"
     assert rollout.meta["admm_terminal_cost_mode"] == "none"
     assert bool(rollout.step_df.loc[0, "admm_converged"])
     assert int(rollout.step_df.loc[0, "admm_iterations"]) == 7
     assert float(rollout.step_df.loc[0, "wholesale_price_pred"]) == pytest.approx(0.3)
     assert float(rollout.step_df.loc[0, "import_price_pred"]) == pytest.approx(0.5)
     assert float(rollout.step_df.loc[0, "import_price"]) == pytest.approx(0.3)
-    assert rollout.step_df.loc[0, "objective_total"] == pytest.approx(
-        float(rollout.step_df.loc[0, "purchase_cost_total"] - rollout.step_df.loc[0, "export_subsidy_total"])
-    )
+    assert float(rollout.step_df.loc[0, "storage_purchase_cost_eur"]) == pytest.approx(0.6 * 0.25 * 0.3)
+    assert float(rollout.step_df.loc[0, "storage_sale_revenue_eur"]) == pytest.approx(0.0)
+    assert float(rollout.step_df.loc[0, "storage_total_profit_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
+    assert float(rollout.step_df.loc[0, "storage_profit_total_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
+    assert set(["storage_purchase_cost_eur", "storage_sale_revenue_eur", "storage_total_profit_eur"]).issubset(rollout.summary.columns)
 
 
 def test_admm_mpc_controller_keeps_progress_bar_enabled_for_notebooks(monkeypatch):

@@ -152,6 +152,28 @@ def test_global_misocp_problem_uses_only_grid_binaries_and_returns_solution(tmp_
         assert result.agent_net_cost_eur == pytest.approx(
             result.agent_purchase_cost_eur - result.agent_export_subsidy_eur
         )
+        expected_storage_charge_cost = float(
+            np.sum(1e3 * env.dt * problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]).reshape(1, -1) * result.battery_charge_mw)
+        )
+        expected_storage_discharge_revenue = float(
+            np.sum(1e3 * env.dt * problem.apply_import_price_markup(raw_obs["wholesale_price_seq"]).reshape(1, -1) * result.battery_discharge_mw)
+        )
+        assert result.storage_charge_cost_eur == pytest.approx(expected_storage_charge_cost)
+        assert result.storage_discharge_revenue_eur == pytest.approx(expected_storage_discharge_revenue)
+        assert result.storage_profit_eur == pytest.approx(
+            result.storage_discharge_revenue_eur - result.storage_charge_cost_eur
+        )
+        assert result.storage_purchase_cost_eur == pytest.approx(expected_storage_charge_cost)
+        assert result.storage_sale_revenue_eur == pytest.approx(expected_storage_discharge_revenue)
+        assert result.storage_total_profit_eur == pytest.approx(
+            result.storage_sale_revenue_eur - result.storage_purchase_cost_eur
+        )
+        assert result.total_eur == pytest.approx(result.storage_total_profit_eur - result.system_other_cost_eur)
+        assert result.storage_objective_eur == pytest.approx(-result.storage_profit_eur)
+        assert result.stage1_primary_objective_eur == pytest.approx(
+            result.storage_objective_eur + result.throughput_regularization_eur,
+            abs=1e-5,
+        )
         assert result.model_size.num_binary_vars == problem.horizon
         assert result.model_size.num_quadratic_constraints > 0
         assert result.throughput_regularization_weight == pytest.approx(1e-4)
@@ -198,56 +220,27 @@ def test_build_full_horizon_input_stitches_all_test_episodes(tmp_path):
         env.close()
 
 
-@pytest.mark.parametrize(
-    ("price", "subsidy", "g_value"),
-    [
-        (0.30, 0.079, 0.4),
-        (0.30, 0.079, -0.6),
-        (0.16, 0.079, 0.25),
-    ],
-)
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
-def test_agent_abs_grid_formulation_pins_abs_value_at_optimum(price, subsidy, g_value):
-    import gurobipy as gp
-    from gurobipy import GRB
-
-    model = gp.Model("agent_abs_grid_scalar")
-    model.Params.OutputFlag = 0
-    g_var = model.addVar(lb=-GRB.INFINITY, name="g")
-    abs_var = model.addVar(lb=0.0, name="abs_g")
-    model.addConstr(g_var == float(g_value))
-    model.addConstr(abs_var >= g_var)
-    model.addConstr(abs_var >= -g_var)
-    model.setObjective(
-        0.5 * (float(price) - float(subsidy)) * abs_var
-        + 0.5 * (float(price) + float(subsidy)) * g_var,
-        GRB.MINIMIZE,
-    )
-    model.optimize()
-
-    assert model.Status == int(GRB.OPTIMAL)
-    assert abs_var.X == pytest.approx(abs(float(g_value)), rel=1e-8, abs=1e-8)
-
-
-@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
-def test_agent_only_reformulation_rejects_prices_below_export_subsidy(tmp_path):
-    cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_price_guard")
+def test_storage_profit_objective_allows_prices_below_export_subsidy(tmp_path):
+    cfg = _make_global_mpc_cfg(tmp_path, "global_misocp_storage_profit_price_guard")
     env = build_env(cfg, mode="test")
     try:
         problem = GlobalMISOCPProblem.from_env(env, cfg)
         full_input = _mock_window_input(problem, horizon_steps=2)
-        with pytest.raises(ValueError, match="requires import prices to stay strictly above the export subsidy"):
-            problem.solve_full_horizon(
-                import_price_seq=np.asarray([0.05, 0.06], dtype=np.float32),
-                load_seq=full_input.load_seq,
-                pv_seq=full_input.pv_seq,
-                soc_init=full_input.soc_init,
-                export_subsidy=0.079,
-                timestamps=full_input.timestamps,
-                episode_offsets=full_input.episode_offsets,
-                episode_lengths=full_input.episode_lengths,
-                time_limit_sec=1.0,
-            )
+        result = problem.solve_full_horizon(
+            import_price_seq=np.asarray([0.05, 0.06], dtype=np.float32),
+            load_seq=full_input.load_seq,
+            pv_seq=full_input.pv_seq,
+            soc_init=full_input.soc_init,
+            export_subsidy=0.079,
+            timestamps=full_input.timestamps,
+            episode_offsets=full_input.episode_offsets,
+            episode_lengths=full_input.episode_lengths,
+            time_limit_sec=5.0,
+        )
+
+        assert result.has_solution
+        assert np.isfinite(result.storage_profit_eur)
     finally:
         env.close()
 

@@ -9,9 +9,9 @@ CANONICAL_AGENT_PROFILES = ["SFH12", "SFH18", "SFH20"]
 CANONICAL_AGENT_BUS_IDS = [12, 4, 2]
 CANONICAL_LOAD_SCALE = [20.0, 20.0, 20.0]
 CANONICAL_PV_SCALE = [1.0, 1.0, 1.0]
-CANONICAL_BATTERY_CAPACITY_KWH = [50.0, 50.0, 50.0]
-CANONICAL_TEST_START_DATE = "2020-05-01"
-CANONICAL_TEST_END_DATE = "2020-05-07"
+CANONICAL_BATTERY_CAPACITY_KWH = [100.0, 100.0, 100.0]
+CANONICAL_TEST_START_DATE = "2020-04-01"
+CANONICAL_TEST_END_DATE = "2020-04-15"
 COMPARE_SCHEME_ORDER = [
     "global_misocp",
     "local_mpc_perfect",
@@ -37,7 +37,7 @@ MADRL_NOTEBOOK_SPECS = {
         "algorithm": "MATD3",
         "env_name": "GridTrainBase",
         "experiment_name": "train_base",
-        "num_envs": 4,
+        "num_envs": 1,
         "reward": {
             "w_soc_pen": 1,
             "w_voltage_pen": 0.0,
@@ -101,12 +101,13 @@ def _default_device() -> torch.device:
 def _default_managed_signal_training_overrides() -> dict[str, dict[str, object]]:
     return {
         "wholesale_price": {
-            "hidden_size": 64,
+            "hidden_size": 128,
             "num_layers": 2,
             "dropout": 0.10,
             "batch_size": 1024,
-            "epochs": 20,
+            "epochs": 50,
             "lr": 1e-3,
+            "history_window": 96 * 2
         },
         "load": {
             "hidden_size": 64,
@@ -154,12 +155,12 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    train_episodes: int = 500
+    train_episodes: int = 100
     max_train_steps: int | None = None
     num_envs: int = 1
     vec_env_type: str = "dummy"
     parallel_episode_sampling: str = "unique_active"
-    batch_size: int = 1024
+    batch_size: int = 512
     buffer_size: int = int(1e6)
     update_interval: int = 1
     updates_per_step: int = 1
@@ -171,8 +172,7 @@ class TrainConfig:
     use_noise_decay: bool = True
     show_progress: bool = True
     # The bar advances per interaction step; postfix metrics refresh every N completed episodes.
-    progress_postfix_interval: int = 100
-    progress_episode_interval: int = 100
+    progress_episode_interval: int = 10
     progress_write_interval_seconds: float = 5.0
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
@@ -198,7 +198,7 @@ class EnvConfig:
     dt: float = 0.25
     soc_min: float = 0.05
     soc_max: float = 0.95
-    soc_target: float = 0.5
+    soc_target: float = 0.05
 
 
 @dataclass
@@ -240,7 +240,12 @@ class RewardConfig:
     w_soc_pen: float = 0.5
     # export_subsidy_eur_per_kwh: float = 0.079
     export_subsidy_eur_per_kwh: float = 0.0
-    import_price_markup_eur_per_kwh: float = 0.20
+    import_price_markup_eur_per_kwh: float = 0.0
+    storage_objective_mode: str = "max_storage_profit"
+    storage_price_mode: str = "real_time_price"
+    storage_profit_weight: float = 1.0
+    local_action_penalty_mode: str = "diagnostic_only"
+    local_action_penalty_weight: float = 0.0
     w_voltage_pen: float = 400.0
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0

@@ -63,12 +63,22 @@ def test_apply_reward_controls_supports_w_soc_pen_only(tmp_path):
         {
             "export_subsidy_eur_per_kwh": 0.081,
             "import_price_markup_eur_per_kwh": 0.205,
+            "storage_objective_mode": "max_storage_profit",
+            "storage_price_mode": "real_time_price",
+            "storage_profit_weight": 1.25,
+            "local_action_penalty_mode": "penalty",
+            "local_action_penalty_weight": 0.1,
             "w_soc_pen": 0.0,
         },
     )
 
     assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
     assert cfg.reward.import_price_markup_eur_per_kwh == pytest.approx(0.205)
+    assert cfg.reward.storage_objective_mode == "max_storage_profit"
+    assert cfg.reward.storage_price_mode == "real_time_price"
+    assert cfg.reward.storage_profit_weight == pytest.approx(1.25)
+    assert cfg.reward.local_action_penalty_mode == "penalty"
+    assert cfg.reward.local_action_penalty_weight == pytest.approx(0.1)
     assert cfg.reward.w_soc_pen == pytest.approx(0.0)
 
 
@@ -269,9 +279,15 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert len(reward_summary["episodes"]) == result["episodes_completed"]
     assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
     assert "components" in reward_summary
-    assert {"r_purchase_cost", "r_export_subsidy", "r_soc_pen", "r_safe_v", "r_safe_line", "r_safe_trafo"} == set(
-        reward_summary["components"]
-    )
+    assert {
+        "r_storage_discharge_revenue",
+        "r_storage_charge_cost",
+        "r_storage_profit",
+        "r_soc_pen",
+        "r_safe_v",
+        "r_safe_line",
+        "r_safe_trafo",
+    } == set(reward_summary["components"])
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]

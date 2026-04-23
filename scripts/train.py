@@ -6,7 +6,7 @@ import numpy as np,torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 from controllers.madrl.base_agent import get_agent_cls
-from controllers.madrl.safety_projector import action_info_to_numpy,compute_action_gap_metrics_torch,enforce_local_action_feasibility_torch,merge_action_info_into_step_info
+from controllers.madrl.safety_projector import action_info_to_numpy,compute_action_gap_metrics_torch,enforce_local_action_feasibility_torch,merge_action_info_into_step_info,require_strict_local_action_feasibility,resolve_local_action_penalty_settings
 from controllers.madrl.safety_projector import SAFE_POC_ALGO_NAME
 from controllers.madrl_controller import _override_soc_penalty_metrics
 from scripts.checkpoints import build_checkpoint_manifest,write_checkpoint_manifest
@@ -47,8 +47,9 @@ def select_action_batch_with_info(runner:Any,obs_np:dict)->tuple[np.ndarray,dict
 def apply_controller_action_postprocessing(runner:Any,reward:np.ndarray,info_list:list[dict[str,Any]],action_info:dict[str,np.ndarray]|None)->tuple[np.ndarray,list[dict[str,Any]]]:
 	reward_array=np.asarray(reward,dtype=np.float32)
 	if reward_array.ndim==2:reward_array=reward_array[...,None]
+	local_action_penalty_enabled,local_action_penalty_weight,local_action_penalty_mode=resolve_local_action_penalty_settings(runner.cfg)
 	processed_info_list:list[dict[str,Any]]=[]
-	for(env_idx,info)in enumerate(info_list):env_action_info=None if action_info is None else{key:np.asarray(value[env_idx],dtype=np.float32)for(key,value)in action_info.items()};merged_info,action_penalty=merge_action_info_into_step_info(info,env_action_info,soc_pen_weight=float(runner.cfg.reward.w_soc_pen),apply_action_penalty=runner.apply_action_penalty);reward_array[env_idx,:,0]-=np.asarray(action_penalty,dtype=np.float32);merged_info['reward']=np.asarray(reward_array[env_idx,:,0],dtype=np.float32);processed_info_list.append(merged_info)
+	for(env_idx,info)in enumerate(info_list):env_action_info=None if action_info is None else{key:np.asarray(value[env_idx],dtype=np.float32)for(key,value)in action_info.items()};require_strict_local_action_feasibility(env_action_info,mode=local_action_penalty_mode);merged_info,action_penalty=merge_action_info_into_step_info(info,env_action_info,soc_pen_weight=local_action_penalty_weight,apply_action_penalty=bool(runner.apply_action_penalty and local_action_penalty_enabled));reward_array[env_idx,:,0]-=np.asarray(action_penalty,dtype=np.float32);merged_info['reward']=np.asarray(reward_array[env_idx,:,0],dtype=np.float32);processed_info_list.append(merged_info)
 	return reward_array.astype(np.float32),processed_info_list
 def build_shared_update_ctx(runner:Any,batch:dict[str,Any])->dict[str,Any]:
 	next_obs=batch['next_obs']

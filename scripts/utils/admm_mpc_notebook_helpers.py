@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np,pandas as pd
 from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy
 from scripts.utils import grid_notebook_workflow as grid_nb
-from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY,canonicalize_step_price_frame,require_import_price_markup
+from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN,IMPORT_PRICE_MARKUP_KEY,canonicalize_step_price_frame,require_import_price_markup
 from scripts.utils.admm_mpc_solver import AdmmMpcStepResult,AdmmMpcSurrogateCache,AdmmMpcWindowData,_compute_default_rho,_day_episode_length,build_admm_mpc_surrogate_cache,build_admm_mpc_window_data,run_admm_mpc_step
 ADMM_MPC_LSTM_LABEL='ADMM MPC + LSTM Forecast'
 ADMM_MPC_PERFECT_LABEL='ADMM MPC + Perfect Forecast'
@@ -36,10 +36,42 @@ def collect_admm_mpc_rollout(cfg,*,prediction_mode:str='normal',label:str|None=N
 	resolved_mode=grid_nb.normalize_prediction_mode(prediction_mode);comparison_cfg=grid_nb.build_comparison_cfg(cfg,prediction_mode=resolved_mode);comparison_cfg.env.episode_limit=_day_episode_length(float(comparison_cfg.env.dt));resolved_label=str(label)if label is not None else ADMM_MPC_PERFECT_LABEL if resolved_mode==grid_nb.PERFECT_PREDICTION_MODE else ADMM_MPC_LSTM_LABEL
 	def _controller_builder(env):controller=_AdmmMpcController(env,comparison_cfg,rho_init=rho_init,rho_min=float(rho_min),rho_max=float(rho_max),rho_adaptation=rho_adaptation,max_iters=int(max_iters),max_iters_first_step=int(max_iters_first_step),primal_tol=float(primal_tol),dual_tol=float(dual_tol),show_progress=bool(show_progress));_controller_builder.controller=controller;return controller
 	rollout=grid_nb.collect_controller_rollout(comparison_cfg,label=resolved_label,controller_builder=_controller_builder,soc_mode='continuous');controller=getattr(_controller_builder,'controller',None)
-	try:augmented=_augment_rollout_with_diagnostics(rollout,controller.diagnostic_rows if controller is not None else[],forecast_backend=str(comparison_cfg.forecast.type));augmented.meta.update({'controller':resolved_label,'prediction_mode':resolved_mode,'economics_scope':'agent_only','soc_mode':'continuous','future_horizon':int(comparison_cfg.env.future_horizon)});return augmented
+	try:augmented=_augment_rollout_with_diagnostics(rollout,controller.diagnostic_rows if controller is not None else[],forecast_backend=str(comparison_cfg.forecast.type),dt_hours=float(comparison_cfg.env.dt));augmented.meta.update({'controller':resolved_label,'prediction_mode':resolved_mode,'economics_scope':'storage_only','objective_mode':'max_storage_profit','admm_objective_mode':'max_storage_profit','admm_price_mode':'real_time_price','admm_terminal_cost_mode':'none','soc_mode':'continuous','future_horizon':int(comparison_cfg.env.future_horizon),'dt_hours':float(comparison_cfg.env.dt)});return augmented
 	finally:
 		if controller is not None:controller.close()
-def _augment_rollout_with_diagnostics(rollout:grid_nb.RolloutResult,diagnostic_rows:list[dict[str,object]],*,forecast_backend:str)->grid_nb.RolloutResult:
+def _ensure_storage_profit_columns(step_df:pd.DataFrame,agent_df:pd.DataFrame,summary:pd.DataFrame,*,dt_hours:float)->tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+	step_df=step_df.copy();agent_df=agent_df.copy();summary=summary.copy()
+	if not step_df.empty and IMPORT_PRICE_COLUMN in step_df.columns and {'battery_charge_total','battery_discharge_total'}.issubset(step_df.columns):
+		if 'storage_purchase_cost_eur' not in step_df.columns:step_df['storage_purchase_cost_eur']=step_df['battery_charge_total'].astype(float)*float(dt_hours)*step_df[IMPORT_PRICE_COLUMN].astype(float)
+		if 'storage_sale_revenue_eur' not in step_df.columns:step_df['storage_sale_revenue_eur']=step_df['battery_discharge_total'].astype(float)*float(dt_hours)*step_df[IMPORT_PRICE_COLUMN].astype(float)
+	if not step_df.empty:
+		if {'storage_purchase_cost_eur','storage_sale_revenue_eur'}.issubset(step_df.columns)and'storage_total_profit_eur'not in step_df.columns:step_df['storage_total_profit_eur']=step_df['storage_sale_revenue_eur'].astype(float)-step_df['storage_purchase_cost_eur'].astype(float)
+		if 'storage_total_profit_eur'in step_df.columns and'storage_objective_eur'not in step_df.columns:step_df['storage_objective_eur']=-step_df['storage_total_profit_eur'].astype(float)
+		alias_pairs={'storage_charge_cost_total_eur':'storage_purchase_cost_eur','storage_discharge_revenue_total_eur':'storage_sale_revenue_eur','storage_profit_total_eur':'storage_total_profit_eur','storage_objective_total_eur':'storage_objective_eur','storage_purchase_cost_eur_step':'storage_purchase_cost_eur','storage_sale_revenue_eur_step':'storage_sale_revenue_eur','storage_total_profit_eur_step':'storage_total_profit_eur'}
+		for alias,source in alias_pairs.items():
+			if alias not in step_df.columns and source in step_df.columns:step_df[alias]=step_df[source].astype(float)
+	if not agent_df.empty and'e_bat'in agent_df.columns:
+		if IMPORT_PRICE_COLUMN not in agent_df.columns and not step_df.empty and IMPORT_PRICE_COLUMN in step_df.columns:
+			key_columns=[column for column in('episode_idx','step','global_step','timestamp')if column in agent_df.columns and column in step_df.columns]
+			if key_columns:
+				price_lookup=step_df.loc[:,key_columns+[IMPORT_PRICE_COLUMN]].drop_duplicates(key_columns)
+				agent_df=agent_df.merge(price_lookup,on=key_columns,how='left')
+		if IMPORT_PRICE_COLUMN in agent_df.columns:
+			battery_power=agent_df['e_bat'].astype(float);price=agent_df[IMPORT_PRICE_COLUMN].astype(float)
+			if 'storage_purchase_cost_eur' not in agent_df.columns:agent_df['storage_purchase_cost_eur']=battery_power.clip(lower=0.)*price*float(dt_hours)
+			if 'storage_sale_revenue_eur' not in agent_df.columns:agent_df['storage_sale_revenue_eur']=(-battery_power).clip(lower=0.)*price*float(dt_hours)
+	if not agent_df.empty:
+		if {'storage_purchase_cost_eur','storage_sale_revenue_eur'}.issubset(agent_df.columns)and'storage_total_profit_eur'not in agent_df.columns:agent_df['storage_total_profit_eur']=agent_df['storage_sale_revenue_eur'].astype(float)-agent_df['storage_purchase_cost_eur'].astype(float)
+		if 'storage_total_profit_eur'in agent_df.columns and'storage_objective_eur'not in agent_df.columns:agent_df['storage_objective_eur']=-agent_df['storage_total_profit_eur'].astype(float)
+		agent_alias_pairs={'storage_charge_cost_eur':'storage_purchase_cost_eur','storage_discharge_revenue_eur':'storage_sale_revenue_eur','storage_profit_eur':'storage_total_profit_eur'}
+		for alias,source in agent_alias_pairs.items():
+			if alias not in agent_df.columns and source in agent_df.columns:agent_df[alias]=agent_df[source].astype(float)
+	summary_columns=['purchase_cost','export_subsidy','objective_total','storage_purchase_cost_eur','storage_sale_revenue_eur','storage_total_profit_eur','storage_objective_eur','storage_charge_cost_eur','storage_discharge_revenue_eur','storage_profit_eur']
+	if not agent_df.empty and {'controller','agent_profile'}.issubset(agent_df.columns):
+		available=[column for column in summary_columns if column in agent_df.columns]
+		if available:summary=agent_df.groupby(['controller','agent_profile'],as_index=False)[available].sum()
+	return step_df,agent_df,summary
+def _augment_rollout_with_diagnostics(rollout:grid_nb.RolloutResult,diagnostic_rows:list[dict[str,object]],*,forecast_backend:str,dt_hours:float)->grid_nb.RolloutResult:
 	diagnostic_df=pd.DataFrame(diagnostic_rows);step_df=rollout.step_df.copy();agent_df=rollout.agent_df.copy();grid_df=rollout.grid_df.copy()
 	if'global_step'not in step_df.columns:step_df['global_step']=np.arange(len(step_df),dtype=np.int64)
 	step_index=step_df[['episode_idx','step','global_step']].drop_duplicates()
@@ -50,4 +82,7 @@ def _augment_rollout_with_diagnostics(rollout:grid_nb.RolloutResult,diagnostic_r
 		if column not in step_df.columns:step_df[column]=default_value
 	step_df['admm_converged']=step_df['admm_converged'].astype(bool)
 	if not step_df.empty:step_df=canonicalize_step_price_frame(step_df,markup_eur_per_kwh=require_import_price_markup(rollout.meta,context=f"Rollout '{rollout.meta.get('controller','ADMM MPC')}' metadata"),context=f"Rollout '{rollout.meta.get('controller','ADMM MPC')}' step_df",require_actual=True,require_prediction=False)
-	step_df['objective_total']=step_df['purchase_cost_total'].astype(float)-step_df['export_subsidy_total'].astype(float);meta=dict(rollout.meta);meta['forecast_backend']=str(forecast_backend);meta['admm_terminal_cost_mode']='none';return grid_nb.RolloutResult(step_df=step_df,agent_df=agent_df,grid_df=grid_df,summary=rollout.summary.copy(),meta=meta)
+	step_df,agent_df,summary=_ensure_storage_profit_columns(step_df,agent_df,rollout.summary,dt_hours=float(dt_hours));meta=dict(rollout.meta);meta.update({'forecast_backend':str(forecast_backend),'economics_scope':'storage_only','objective_mode':'max_storage_profit','admm_objective_mode':'max_storage_profit','admm_price_mode':'real_time_price','admm_terminal_cost_mode':'none','dt_hours':float(dt_hours)})
+	for target,source in(('storage_purchase_cost_eur','storage_purchase_cost_eur'),('storage_sale_revenue_eur','storage_sale_revenue_eur'),('storage_total_profit_eur','storage_total_profit_eur'),('storage_charge_cost_eur','storage_purchase_cost_eur'),('storage_discharge_revenue_eur','storage_sale_revenue_eur'),('storage_profit_eur','storage_total_profit_eur')):
+		if source in step_df.columns:meta[target]=float(step_df[source].sum())
+	return grid_nb.RolloutResult(step_df=step_df,agent_df=agent_df,grid_df=grid_df,summary=summary,meta=meta)

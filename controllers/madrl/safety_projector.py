@@ -9,10 +9,24 @@ SAFETY_LOCAL_FIELD_NAMES='soc_raw','load_raw','pv_raw','battery_capacity_kwh','p
 SAFETY_LOCAL_DIM=len(SAFETY_LOCAL_FIELD_NAMES)
 _SAFETY_EPS=1e-06
 _ACTION_TOL=1e-05
+LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE='diagnostic_only'
+LOCAL_ACTION_PENALTY_MODE='penalty'
+LOCAL_ACTION_STRICT_MODE='strict'
 def is_safe_poc_algorithm(cfg_or_name:Any)->bool:
 	if isinstance(cfg_or_name,str):name=cfg_or_name
 	else:algo_cfg=getattr(cfg_or_name,'algo',None);name=getattr(algo_cfg,'name','')
 	return str(name)==SAFE_POC_ALGO_NAME
+def resolve_local_action_penalty_settings(cfg_or_reward:Any)->tuple[bool,float,str]:
+	reward_cfg=getattr(cfg_or_reward,'reward',cfg_or_reward);mode=str(getattr(reward_cfg,'local_action_penalty_mode',LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE)).strip().lower();weight=float(getattr(reward_cfg,'local_action_penalty_weight',.0))
+	if weight<.0:raise ValueError(f"local_action_penalty_weight must be non-negative, got {weight}.")
+	if mode==LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE:return False,.0,LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE
+	if mode==LOCAL_ACTION_STRICT_MODE:return False,.0,LOCAL_ACTION_STRICT_MODE
+	if mode==LOCAL_ACTION_PENALTY_MODE:return weight>.0,weight,LOCAL_ACTION_PENALTY_MODE
+	raise ValueError(f"Unknown local_action_penalty_mode {mode!r}. Expected one of: {[LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE,LOCAL_ACTION_PENALTY_MODE,LOCAL_ACTION_STRICT_MODE]}.")
+def require_strict_local_action_feasibility(action_info:dict[str,np.ndarray]|None,*,mode:str,tol:float=_ACTION_TOL)->None:
+	if str(mode)!=LOCAL_ACTION_STRICT_MODE or action_info is None:return
+	gap=np.asarray(action_info.get('soc_penalty_unweighted',[]),dtype=np.float32).reshape(-1)
+	if gap.size and bool(np.any(gap>float(tol))):raise ValueError(f"local_action_penalty_mode='strict' found locally infeasible action gap max={float(np.max(gap)):.6f}. Expected actor/controller actions to satisfy the current SOC battery bounds before env.step.")
 def _row_norm_sq(rows:torch.Tensor)->torch.Tensor:
 	if rows.numel()==0:return torch.zeros((int(rows.shape[0]),),dtype=rows.dtype,device=rows.device)
 	return torch.clamp(torch.sum(rows*rows,dim=-1),min=_SAFETY_EPS)
