@@ -3,7 +3,7 @@ import numpy as np,pandas as pd
 from envs.observation.normalization import ObservationNormalizer
 _SAFETY_LOCAL_FIELDS=['soc_raw','load_raw','pv_raw','battery_capacity_kwh','p_max_kw']
 _LOCAL_DIMS={'time':2,'calendar_time':4,'wholesale_price':1,'load':1,'pv':1,'soc':1}
-_SEQUENCE_SCOPES={'wholesale_price':'shared','load':'per_agent','pv':'per_agent'}
+_SEQUENCE_SCOPES={'wholesale_price':'shared','wholesale_price_rank':'shared','load':'per_agent','pv':'per_agent'}
 _TS_FALLBACK=pd.Timestamp('2000-01-01 00:00:00+00:00')
 def _adjacency(n_agents:int,adjacency_type:str)->np.ndarray:
 	if adjacency_type=='identity':return np.eye(n_agents,dtype=np.float32)
@@ -15,6 +15,10 @@ def _pad_sequence(values,start:int,length:int)->np.ndarray:
 	array=np.asarray(values,dtype=np.float32);tail=array[int(start):int(start)+int(length)];pad_rows=int(length)-int(tail.shape[0])
 	if pad_rows>0:pad_width=((0,pad_rows),)+tuple((0,0)for _ in range(max(array.ndim-1,0)));tail=np.pad(tail,pad_width,mode='constant')
 	return tail.astype(np.float32,copy=False)if array.ndim==1 else tail.T.astype(np.float32,copy=False)
+def _rank_sequence(values:np.ndarray)->np.ndarray:
+	array=np.asarray(values,dtype=np.float32).reshape(-1);length=int(array.size)
+	if length<=1:return np.zeros((length,),dtype=np.float32)
+	order=np.argsort(array,kind='mergesort');ranks=np.empty((length,),dtype=np.float32);ranks[order]=np.arange(length,dtype=np.float32);return(ranks/np.float32(max(length-1,1))).astype(np.float32)
 def _signal_history(env,signal_name:str)->np.ndarray:signal=env.get_signal(signal_name);prefix=np.asarray(env.history_signals.get(signal_name),dtype=np.float32);return signal[:env.cur_step+1].copy()if prefix.size==0 else np.concatenate([prefix,signal[:env.cur_step+1]],axis=0).astype(np.float32,copy=False)
 class DefaultObservationBuilder:
 	def __init__(self,local_features:list[str],sequence_features:list[str],future_horizon:int,adjacency_type:str='identity',normalizer:ObservationNormalizer|None=None,precomputed:bool=False):
@@ -50,6 +54,7 @@ class DefaultObservationBuilder:
 			values=np.asarray(env._episode_precomputed[cache_key][env.cur_step],dtype=np.float32);expected_shape=(self.sequence_length,)if _SEQUENCE_SCOPES[name]=='shared'else(int(env.n),self.sequence_length)
 			if tuple(values.shape)!=expected_shape:raise ValueError(f"Precomputed observation horizon contract mismatch at DefaultObservationBuilder._sequence_feature(...): old shared-data object '{getattr(env,'_precomputed_data_dir',None)}' returned '{cache_key}' with shape {tuple(values.shape)}, but current cfg.env.future_horizon={self.future_horizon} and env.n={int(env.n)} require shape {expected_shape}. Expected shared-data generated with the current config. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun the consuming notebook or entrypoint.")
 			return values
+		if name=='wholesale_price_rank':return _rank_sequence(self._sequence_feature(env,'wholesale_price'))
 		if getattr(env,'forecaster',None)is None:return _pad_sequence(env.get_signal(name),env.cur_step,self.sequence_length)
 		history=_signal_history(env,name);timestamps=list(dict(getattr(env,'episode_meta',{})).get('timestamps')or[]);history_timestamps=[*env.history_timestamps,*[str(timestamp)for timestamp in timestamps[:max(0,int(env.cur_step)+1)]]];return np.asarray(env.forecaster.predict(history,self.sequence_length,signal_name=name,history_timestamps=history_timestamps),dtype=np.float32)
 	def _build(self,env,*,normalize:bool)->dict[str,np.ndarray]:

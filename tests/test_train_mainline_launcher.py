@@ -7,10 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from configs.profiles import compose_experiment_config, recommended_gpu_fast_num_envs
+from envs.rewards.NormalReward import NormalReward
 from scripts.mainline_madrl import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
+from scripts.train import apply_controller_action_postprocessing
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
@@ -52,37 +55,54 @@ def test_apply_runtime_controls_rejects_legacy_cache_keys(tmp_path, deprecated_k
         _apply_runtime_controls(cfg, {deprecated_key: value})
 
 
-def test_apply_reward_controls_supports_w_soc_pen_only(tmp_path):
+def test_apply_reward_controls_supports_step3_reward_fields(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
-
-    _apply_reward_controls(cfg, {"w_soc_pen": 5.0})
-    assert cfg.reward.w_soc_pen == pytest.approx(5.0)
 
     _apply_reward_controls(
         cfg,
         {
+            "action_boundary_penalty_weight": 0.12,
+            "soc_boundary_regularization_weight": 0.34,
+            "throughput_bonus_eur_per_kwh_max": 0.005,
+            "soc_boundary_epsilon": 0.03,
+            "soc_boundary_margin": 0.08,
+        },
+    )
+    assert cfg.reward.action_boundary_penalty_weight == pytest.approx(0.12)
+    assert cfg.reward.soc_boundary_regularization_weight == pytest.approx(0.34)
+    assert cfg.reward.throughput_bonus_eur_per_kwh_max == pytest.approx(0.005)
+    assert cfg.reward.soc_boundary_epsilon == pytest.approx(0.03)
+    assert cfg.reward.soc_boundary_margin == pytest.approx(0.08)
+
+    _apply_reward_controls(
+        cfg,
+        {
+            "action_boundary_penalty_weight": 0.5,
+            "soc_boundary_regularization_weight": 0.25,
+            "throughput_bonus_eur_per_kwh_max": 0.001,
+            "soc_boundary_epsilon": 0.01,
+            "soc_boundary_margin": 0.07,
             "export_subsidy_eur_per_kwh": 0.081,
             "import_price_markup_eur_per_kwh": 0.205,
             "storage_objective_mode": "max_storage_profit",
             "storage_price_mode": "real_time_price",
-            "storage_profit_weight": 1.25,
-            "local_action_penalty_mode": "penalty",
-            "local_action_penalty_weight": 0.1,
-            "w_soc_pen": 0.0,
+            "storage_profit_weight": 1.0,
         },
     )
 
+    assert cfg.reward.action_boundary_penalty_weight == pytest.approx(0.5)
+    assert cfg.reward.soc_boundary_regularization_weight == pytest.approx(0.25)
+    assert cfg.reward.throughput_bonus_eur_per_kwh_max == pytest.approx(0.001)
+    assert cfg.reward.soc_boundary_epsilon == pytest.approx(0.01)
+    assert cfg.reward.soc_boundary_margin == pytest.approx(0.07)
     assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
     assert cfg.reward.import_price_markup_eur_per_kwh == pytest.approx(0.205)
     assert cfg.reward.storage_objective_mode == "max_storage_profit"
     assert cfg.reward.storage_price_mode == "real_time_price"
-    assert cfg.reward.storage_profit_weight == pytest.approx(1.25)
-    assert cfg.reward.local_action_penalty_mode == "penalty"
-    assert cfg.reward.local_action_penalty_weight == pytest.approx(0.1)
-    assert cfg.reward.w_soc_pen == pytest.approx(0.0)
+    assert cfg.reward.storage_profit_weight == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("legacy_key", ["w_action_pen", "lambda_throughput"])
+@pytest.mark.parametrize("legacy_key", ["w_action_pen", "w_soc_pen", "lambda_throughput", "local_action_penalty_mode", "local_action_penalty_weight", "terminal_soc_value_weight", "action_feasibility_regularization_weight"])
 def test_apply_reward_controls_rejects_removed_legacy_keys(tmp_path, legacy_key):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
@@ -94,15 +114,44 @@ def test_apply_reward_controls_rejects_unknown_keys(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
     with pytest.raises(ValueError, match="Unknown reward_controls"):
-        _apply_reward_controls(cfg, {"w_soc_pen": 5.0, "bogus_key": 1.0})
+        _apply_reward_controls(cfg, {"action_boundary_penalty_weight": 0.1, "bogus_key": 1.0})
+
+
+def test_apply_controller_action_postprocessing_keeps_reward_and_merges_action_info(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+    runner = SimpleNamespace(env_evaluate=SimpleNamespace(reward_fn=NormalReward(cfg)))
+    reward = np.array([[[1.0], [2.0], [3.0]]], dtype=np.float32)
+    base_reward = reward[0, :, 0].copy()
+    info_list = [
+        {
+            "madrl_r_action_penalty": np.zeros(3, dtype=np.float32),
+            "madrl_r_total_internal": base_reward.copy(),
+        }
+    ]
+    action_info = {"soc_penalty_unweighted": np.array([[0.0, 0.5, 1.0]], dtype=np.float32)}
+
+    processed_reward, processed_info = apply_controller_action_postprocessing(
+        runner,
+        reward,
+        info_list,
+        action_info,
+    )
+
+    np.testing.assert_allclose(processed_reward[0, :, 0], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["reward"], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["madrl_r_action_penalty"], 0.0, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["madrl_r_total_internal"], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["soc_penalty_unweighted"], action_info["soc_penalty_unweighted"][0], rtol=1e-6)
 
 
 def test_apply_train_controls_sets_progress_episode_interval(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
-    _apply_train_controls(cfg, {"progress_episode_interval": 7})
+    _apply_train_controls(cfg, {"progress_episode_interval": 7, "train_window_days": 3, "window_stride_days": 2})
 
     assert cfg.train.progress_episode_interval == 7
+    assert cfg.env.train_window_days == 3
+    assert cfg.env.window_stride_days == 2
 
 
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
@@ -125,6 +174,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         seed=0,
         require_cuda=False,
     )
+    shared_cfg.env.train_window_days = 1
+    shared_cfg.env.window_stride_days = 1
     apply_notebook_experiment_settings(
         shared_cfg,
         prediction_mode="perfect",
@@ -150,8 +201,12 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
             "shared_data_signature": str(shared_data.signature_hash),
         },
         "reward_controls": {
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "soc_boundary_epsilon": 0.02,
+            "soc_boundary_margin": 0.02,
             "export_subsidy_eur_per_kwh": 0.079,
-            "w_soc_pen": 0.0,
             "w_voltage_pen": 0.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 0.0,
@@ -175,6 +230,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
+        "train_init_soc_low": 0.2,
+        "train_init_soc_high": 0.8,
         "soc_min": 0.05,
         "soc_max": 0.95,
         "soc_target": 0.5,
@@ -198,6 +255,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
+        "train_window_days": 1,
+        "window_stride_days": 1,
     }
     checkpoint_controls = {
         "experiment_name": "grid_mainline",
@@ -251,11 +310,11 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert completed.returncode == 0, completed.stderr or completed.stdout
     combined_output = f"{completed.stdout}\n{completed.stderr}"
     assert "Training:" in combined_output
-    assert "0/96" in combined_output
     assert "avg_reward=" in combined_output
     for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
         assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert f"0/{int(result['perf_summary']['target_total_steps'])}" in combined_output
     reward_summary_path = Path(result["reward_summary_path"])
     reward_summary = json.loads(reward_summary_path.read_text(encoding="utf-8"))
     assert result["algorithm"] == "MATD3"
@@ -280,15 +339,23 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
     assert "components" in reward_summary
     assert {
-        "r_storage_discharge_revenue",
-        "r_storage_charge_cost",
-        "r_storage_profit",
-        "r_soc_pen",
-        "r_safe_v",
-        "r_safe_line",
-        "r_safe_trafo",
+        "madrl_r_inc",
+        "madrl_r_action_penalty",
+        "madrl_r_soc_regularization",
+        "madrl_r_throughput_bonus",
+        "madrl_r_safe_v",
+        "madrl_r_safe_line",
+        "madrl_r_safe_trafo",
+        "madrl_r_safe_total",
+        "madrl_r_total_internal",
     } == set(reward_summary["components"])
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
+    assert "terminal_soc_value_weight" not in result["experiment_controls"]["reward_controls"]
+    assert "training_contract_signature" in result
+    assert "training_contract" in result
+    assert "action_mapping_contract" not in result["training_contract"]
+    assert result["training_contract"]["action_boundary_penalty_weight"] == pytest.approx(0.05)
+    assert result["checkpoint_info"]["training_contract_signature"] == result["training_contract_signature"]
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]
@@ -321,8 +388,12 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "device_request": "cpu",
         "require_cuda": False,
         "reward_controls": {
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "soc_boundary_epsilon": 0.02,
+            "soc_boundary_margin": 0.02,
             "export_subsidy_eur_per_kwh": 0.079,
-            "w_soc_pen": 0.0,
         },
         "safety_controls": {
             "enabled": True,
@@ -351,6 +422,8 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
+        "train_init_soc_low": 0.2,
+        "train_init_soc_high": 0.8,
         "soc_min": 0.05,
         "soc_max": 0.95,
         "soc_target": 0.5,
@@ -373,6 +446,8 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
+        "train_window_days": 1,
+        "window_stride_days": 1,
     }
     checkpoint_controls = {
         "experiment_name": "grid_mainline_safe_poc",
@@ -442,6 +517,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
 
     assert result["algorithm"] == "MATD3_SAFE_POC"
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
+    assert "terminal_soc_value_weight" not in result["experiment_controls"]["reward_controls"]
     assert result["safety_controls"]["enabled"] is True
     assert result["safety_summary"]["enabled"] is True
     assert result["safety_summary"]["projection_batches"] > 0
@@ -457,5 +533,6 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     assert result["perf_summary"]["projection_time_s"] >= 0.0
     assert "target_projection_time_s" in result["perf_summary"]
     assert "actor_projection_time_s" in result["perf_summary"]
-    assert "r_soc_pen" in reward_summary["components"]
+    assert "madrl_r_soc_regularization" in reward_summary["components"]
+    assert "r_terminal_soc_value" not in reward_summary["components"]
     assert Path(result["model_root"]).parts[-4:-1] == ("MATD3_SAFE_POC", "perfect", "grid_mainline_safe_poc")

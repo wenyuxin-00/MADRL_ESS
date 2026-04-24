@@ -380,6 +380,7 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
                     "pv_curtail_total": 0.1,
                     "grid_import_total": 2.2,
                     "grid_export_total": 0.0,
+                    "battery_power_kw": 0.6,
                     "battery_charge_total": 0.6,
                     "battery_discharge_total": 0.0,
                     "purchase_cost_total": 0.33,
@@ -483,11 +484,11 @@ def test_collect_admm_mpc_rollout_sets_meta_and_step_diagnostics(monkeypatch):
     assert float(rollout.step_df.loc[0, "wholesale_price_pred"]) == pytest.approx(0.3)
     assert float(rollout.step_df.loc[0, "import_price_pred"]) == pytest.approx(0.5)
     assert float(rollout.step_df.loc[0, "import_price"]) == pytest.approx(0.3)
-    assert float(rollout.step_df.loc[0, "storage_purchase_cost_eur"]) == pytest.approx(0.6 * 0.25 * 0.3)
-    assert float(rollout.step_df.loc[0, "storage_sale_revenue_eur"]) == pytest.approx(0.0)
-    assert float(rollout.step_df.loc[0, "storage_total_profit_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
-    assert float(rollout.step_df.loc[0, "storage_profit_total_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
-    assert set(["storage_purchase_cost_eur", "storage_sale_revenue_eur", "storage_total_profit_eur"]).issubset(rollout.summary.columns)
+    assert float(rollout.step_df.loc[0, "storage_charge_cost_eur"]) == pytest.approx(0.6 * 0.25 * 0.3)
+    assert float(rollout.step_df.loc[0, "storage_discharge_revenue_eur"]) == pytest.approx(0.0)
+    assert float(rollout.step_df.loc[0, "storage_profit_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
+    assert float(rollout.meta["storage_profit_total_eur"]) == pytest.approx(-0.6 * 0.25 * 0.3)
+    assert set(["storage_charge_cost_eur", "storage_discharge_revenue_eur", "storage_profit_eur"]).issubset(rollout.summary.columns)
 
 
 def test_admm_mpc_controller_keeps_progress_bar_enabled_for_notebooks(monkeypatch):
@@ -782,6 +783,7 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                 "pv_curtail_total": [0.2, 0.15],
                 "grid_import_total": [1.6, 1.7],
                 "grid_export_total": [0.0, 0.0],
+                "battery_power_kw": [0.3, 0.25],
                 "battery_charge_total": [0.3, 0.25],
                 "battery_discharge_total": [0.0, 0.0],
                 "purchase_cost_total": [0.48, 0.68],
@@ -862,10 +864,11 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                 "v_max_pu": 1.05,
                 "prediction_mode": "normal",
                 "forecast_backend": str(local_cfg.forecast.type),
-                "trafo_limit_kw": 10.0,
-                "import_price_markup_eur_per_kwh": 0.2,
-            },
-        )
+                    "trafo_limit_kw": 10.0,
+                    "import_price_markup_eur_per_kwh": 0.2,
+                    "dt_hours": 0.25,
+                },
+            )
 
     monkeypatch.setattr(grid_nb, "collect_controller_rollout", _fake_collect_controller_rollout)
 

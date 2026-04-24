@@ -11,11 +11,14 @@ def test_experiment_config_defaults_align_with_madrl_notebooks() -> None:
     assert list(cfg.grid.agent_bus_ids) == [12, 4, 2]
     assert int(cfg.data.train_year) == 2019
     assert int(cfg.data.test_year) == 2020
-    assert cfg.data.test_start_date == "2020-06-01"
-    assert cfg.data.test_end_date == "2020-06-07"
+    assert cfg.data.test_start_date == "2020-04-01"
+    assert cfg.data.test_end_date == "2020-04-15"
     assert int(cfg.env.num_agents) == 3
     assert int(cfg.env.episode_limit) == 96
-    assert int(cfg.env.future_horizon) == 24
+    assert int(cfg.env.train_window_days) == 7
+    assert int(cfg.env.window_stride_days) == 1
+    assert int(cfg.env.resolved_train_episode_limit()) == 96 * 7
+    assert int(cfg.env.future_horizon) == 48
 
 
 def test_data_config_resolved_scale_defaults_follow_global_values() -> None:
@@ -47,12 +50,12 @@ def test_apply_notebook_experiment_settings_uses_cfg_defaults_when_optional_valu
 
     assert list(cfg.data.agent_profiles) == ["SFH12", "SFH18", "SFH20"]
     assert list(cfg.grid.agent_bus_ids) == [12, 4, 2]
-    assert cfg.data.test_start_date == "2020-06-01"
-    assert cfg.data.test_end_date == "2020-06-07"
+    assert cfg.data.test_start_date == "2020-04-01"
+    assert cfg.data.test_end_date == "2020-04-15"
     assert list(cfg.data.load_scale) == [float(value) for value in ExperimentConfig().data.load_scale]
     assert list(cfg.data.pv_scale) == [float(value) for value in ExperimentConfig().data.pv_scale]
     assert controls["agent_bus_ids"] == [12, 4, 2]
     assert controls["load_scale"] == [float(value) for value in ExperimentConfig().data.load_scale]
     assert controls["pv_scale"] == [float(value) for value in ExperimentConfig().data.pv_scale]
-    assert controls["test_start_date"] == "2020-06-01"
-    assert controls["test_end_date"] == "2020-06-07"
+    assert controls["test_start_date"] == "2020-04-01"
+    assert controls["test_end_date"] == "2020-04-15"

@@ -1,8 +1,13 @@
 from datetime import datetime
+import json
 from pathlib import Path
+
+import pytest
 
 from scripts.checkpoints import (
     LATEST_CHECKPOINT_MANIFEST,
+    TRAINING_CONTRACT_KEY,
+    TRAINING_CONTRACT_SIGNATURE_KEY,
     build_checkpoint_manifest,
     build_training_run_label,
     build_training_run_paths,
@@ -12,6 +17,38 @@ from scripts.checkpoints import (
     write_checkpoint_manifest,
 )
 from tests.support.helpers import make_case_dir
+
+TEST_TRAINING_CONTRACT = {
+    "reward_contract": "madrl_incremental_storage_reward_v1",
+    "rollout_soc_contract": "continuous_soc_v1",
+    "train_window_days": 7,
+    "window_stride_days": 1,
+    "train_episode_limit": 672,
+    "test_episode_limit": 96,
+    "shared_data_schema_version": 7,
+    "shared_data_signature": None,
+    "observation_feature_set": {
+        "local": ["calendar_time", "soc"],
+        "sequence": ["wholesale_price"],
+        "adjacency_type": "identity",
+    },
+    "observation_normalization_signature": None,
+    "storage_objective_mode": "max_storage_profit",
+    "storage_price_mode": "real_time_price",
+    "storage_profit_weight": 1.0,
+    "action_boundary_penalty_weight": 0.05,
+    "soc_boundary_regularization_weight": 0.005,
+    "throughput_bonus_eur_per_kwh_max": 0.002,
+    "soc_boundary_epsilon": 0.02,
+    "soc_boundary_margin": 0.02,
+    "export_subsidy_eur_per_kwh": 0.0,
+    "import_price_markup_eur_per_kwh": 0.0,
+    "w_voltage_pen": 400.0,
+    "w_line_pen": 0.0,
+    "w_trafo_pen": 10.0,
+    "train_init_soc_low": 0.2,
+    "train_init_soc_high": 0.8,
+}
 
 
 def _touch_checkpoint_pair(algo_dir: Path, episode_tag: int) -> None:
@@ -23,6 +60,21 @@ def _write_train_result(run_root: Path) -> None:
     meta_dir = run_root / "_meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     (meta_dir / "train_result.json").write_text("{}", encoding="utf-8")
+
+
+def _write_manifest(model_dir: Path, algorithm: str, episode_tag: int, *, total_steps: int = 128) -> dict:
+    algo_dir = model_dir / algorithm
+    manifest = build_checkpoint_manifest(
+        algorithm=algorithm,
+        saved_episode_tag=episode_tag,
+        episodes_completed=episode_tag,
+        total_steps=total_steps,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract=TEST_TRAINING_CONTRACT,
+    )
+    return write_checkpoint_manifest(algo_dir, manifest)
 
 
 def test_checkpoint_manifest_round_trip(tmp_path):
@@ -40,6 +92,7 @@ def test_checkpoint_manifest_round_trip(tmp_path):
         num_envs=4,
         episode_limit=32,
         save_dir=algo_dir,
+        training_contract=TEST_TRAINING_CONTRACT,
     )
     write_checkpoint_manifest(algo_dir, manifest)
 
@@ -50,9 +103,82 @@ def test_checkpoint_manifest_round_trip(tmp_path):
     assert resolved["saved_episode_tag"] == 7
     assert resolved["episodes_completed"] == 9
     assert resolved["total_steps"] == 128
+    assert resolved[TRAINING_CONTRACT_KEY] == TEST_TRAINING_CONTRACT
+    assert resolved[TRAINING_CONTRACT_SIGNATURE_KEY] == manifest[TRAINING_CONTRACT_SIGNATURE_KEY]
 
 
-def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
+def test_checkpoint_manifest_rejects_terminal_soc_value_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_terminal_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract={**TEST_TRAINING_CONTRACT, "terminal_soc_value_weight": 0.1},
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="terminal_soc_value_weight"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_action_feasibility_regularization_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_action_feasibility_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract={
+            **TEST_TRAINING_CONTRACT,
+            "action_feasibility_regularization_weight": 0.05,
+        },
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="action_feasibility_regularization_weight"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_missing_action_boundary_penalty_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_missing_action_boundary_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    legacy_contract = dict(TEST_TRAINING_CONTRACT)
+    legacy_contract.pop("action_boundary_penalty_weight")
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract=legacy_contract,
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="action_boundary_penalty_weight"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_resolve_checkpoint_requires_manifest_contract(tmp_path):
     case_dir = make_case_dir(tmp_path, "checkpoint_scan")
     model_dir = case_dir / "saved_models"
     algo_dir = model_dir / "MATD3"
@@ -61,8 +187,8 @@ def test_resolve_checkpoint_falls_back_to_scan_without_manifest(tmp_path):
     _touch_checkpoint_pair(algo_dir, episode_tag=5)
 
     assert infer_latest_checkpoint_tag(model_dir, "MATD3") == 5
-    resolved = resolve_checkpoint_to_load(model_dir, "MATD3")
-    assert resolved["saved_episode_tag"] == 5
+    with pytest.raises(FileNotFoundError, match="Latest checkpoint manifest"):
+        resolve_checkpoint_to_load(model_dir, "MATD3")
 
 
 def test_build_training_run_label_uses_expected_tokens():
@@ -78,7 +204,7 @@ def test_build_training_run_label_uses_expected_tokens():
     assert label == "matd3_perfect_grid_mainline_ep100_20260325_101500"
 
 
-def test_find_latest_training_run_discovers_newest_run(tmp_path):
+def test_find_latest_training_run_discovers_newest_run_without_scanning_older_legacy_runs(tmp_path):
     checkpoint_root = tmp_path / "checkpoints"
     older = build_training_run_paths(
         checkpoint_root,
@@ -106,6 +232,24 @@ def test_find_latest_training_run_discovers_newest_run(tmp_path):
     newer_algo_dir.mkdir(parents=True, exist_ok=True)
     _touch_checkpoint_pair(older_algo_dir, episode_tag=50)
     _touch_checkpoint_pair(newer_algo_dir, episode_tag=100)
+    legacy_manifest = {
+        "algorithm": "MATD3",
+        "saved_episode_tag": 50,
+        "episodes_completed": 50,
+        "total_steps": 4800,
+        "num_envs": 1,
+        "episode_limit": 96,
+        "save_dir": str(older_algo_dir),
+    }
+    (older_algo_dir / LATEST_CHECKPOINT_MANIFEST).write_text(
+        json.dumps(legacy_manifest),
+        encoding="utf-8",
+    )
+    (older_algo_dir / "checkpoint_ep_50.json").write_text(
+        json.dumps(legacy_manifest),
+        encoding="utf-8",
+    )
+    _write_manifest(newer_root, "MATD3", 100)
     _write_train_result(older_root)
     _write_train_result(newer_root)
 
@@ -119,7 +263,7 @@ def test_find_latest_training_run_discovers_newest_run(tmp_path):
     assert resolved == Path(newer["model_root"])
 
 
-def test_find_latest_training_run_skips_incomplete_newest_run(tmp_path):
+def test_find_latest_training_run_rejects_incomplete_newest_run(tmp_path):
     checkpoint_root = tmp_path / "checkpoints"
     complete = build_training_run_paths(
         checkpoint_root,
@@ -145,15 +289,15 @@ def test_find_latest_training_run_skips_incomplete_newest_run(tmp_path):
     complete_algo_dir.mkdir(parents=True, exist_ok=True)
     incomplete_root.mkdir(parents=True, exist_ok=True)
     _touch_checkpoint_pair(complete_algo_dir, episode_tag=150)
+    _write_manifest(complete_root, "MATD3", 150)
     _write_train_result(complete_root)
     (incomplete_root / "_meta").mkdir(parents=True, exist_ok=True)
     (incomplete_root / "_meta" / "train.log").write_text("partial run", encoding="utf-8")
 
-    resolved = find_latest_training_run(
-        checkpoint_root,
-        algorithm="MATD3",
-        prediction_mode="normal",
-        experiment_name="train_base",
-    )
-
-    assert resolved == complete_root
+    with pytest.raises(FileNotFoundError, match="Latest training run is incomplete"):
+        find_latest_training_run(
+            checkpoint_root,
+            algorithm="MATD3",
+            prediction_mode="normal",
+            experiment_name="train_base",
+        )

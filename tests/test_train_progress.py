@@ -10,16 +10,22 @@ class DummyTqdm:
         self.total = kwargs.get("total")
         self.unit = kwargs.get("unit")
         self.disable = kwargs.get("disable", False)
+        self.n = 0
         self.update_calls: list[int] = []
         self.postfix_calls = 0
         DummyTqdm.instances.append(self)
 
     def update(self, value=1):
-        self.update_calls.append(int(value))
+        value = int(value)
+        self.update_calls.append(value)
+        self.n += value
 
-    def set_postfix(self, payload):
+    def set_postfix(self, payload, **_kwargs):
         self.postfix_calls += 1
         self.last_postfix = dict(payload)
+
+    def refresh(self):
+        return None
 
     def close(self):
         return None
@@ -48,7 +54,7 @@ def test_train_runner_batches_progress_updates_by_episode_interval(monkeypatch, 
     progress = DummyTqdm.instances[-1]
     assert progress.total == 12
     assert progress.unit == "step"
-    assert progress.update_calls == [1] * 12
+    assert progress.update_calls == [3, 3, 3, 3]
     assert progress.postfix_calls == 2
     assert "eta" in progress.last_postfix
 
@@ -80,9 +86,36 @@ def test_train_runner_emits_final_progress_for_partial_episode_batch(monkeypatch
     progress = DummyTqdm.instances[-1]
     assert progress.total == 5
     assert progress.unit == "step"
-    assert progress.update_calls == [1] * 5
+    assert progress.update_calls == [4, 1]
     assert progress.postfix_calls == 1
     assert "eta" in progress.last_postfix
+
+
+def test_train_runner_uses_vector_env_episode_length_for_training_budget(monkeypatch, tmp_path):
+    case_dir = make_case_dir(tmp_path, "train_progress_window_budget")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.env.train_window_days = 2
+    cfg.train.train_episodes = 3
+    cfg.train.max_train_steps = None
+    cfg.train.num_envs = 1
+    cfg.train.progress_episode_interval = 1
+    cfg.train.show_progress = True
+    cfg.train.use_noise_decay = False
+
+    DummyTqdm.instances.clear()
+    monkeypatch.setattr(train_module, "tqdm", DummyTqdm)
+
+    runner = build_train_runner(cfg, seed=0, env_name="ProgressWindowBudgetTest", number=1)
+    try:
+        runner.run()
+    finally:
+        runner.close()
+
+    progress = DummyTqdm.instances[-1]
+    assert progress.total == 18
+    assert progress.update_calls == [6, 6, 6]
+    assert runner.perf_summary["target_total_steps"] == 18
+    assert runner.episodes_completed == 3
 
 
 def test_train_runner_does_not_fabricate_postfix_without_completed_episode(monkeypatch, tmp_path):
@@ -107,7 +140,7 @@ def test_train_runner_does_not_fabricate_postfix_without_completed_episode(monke
     progress = DummyTqdm.instances[-1]
     assert progress.total == 5
     assert progress.unit == "step"
-    assert progress.update_calls == [1] * 5
+    assert progress.update_calls == [5]
     assert progress.postfix_calls == 0
 
 
@@ -133,8 +166,8 @@ def test_train_runner_updates_progress_before_postfix_threshold_with_parallel_en
         runner.close()
 
     progress = DummyTqdm.instances[-1]
-    assert progress.total == 6
+    assert progress.total == 24
     assert progress.unit == "step"
-    assert progress.update_calls == [1] * 6
+    assert progress.update_calls == [12, 12]
     assert progress.postfix_calls == 1
     assert "eta" in progress.last_postfix

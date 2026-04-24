@@ -81,6 +81,8 @@ def _load_code_cells(path: Path) -> list[str]:
 
 def _expand_cfg_to_multiday(cfg, *, evaluation_days: int = 5) -> None:
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.env.future_horizon = 1
     cfg.train.max_train_steps = cfg.train.train_episodes * cfg.env.episode_limit
     write_prosumer_processed_dataset(
@@ -205,7 +207,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     )
 
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["wholesale_price", "load", "pv"]
+    assert cfg.obs.sequence_features == ["wholesale_price", "wholesale_price_rank", "load", "pv"]
     assert cfg.env.future_horizon == 24
     assert cfg.forecast.type == "lstm"
     assert cfg.data.test_start_date == "2019-01-01"
@@ -371,6 +373,8 @@ def test_resolve_madrl_notebook_training_builds_external_launch_payloads(tmp_pat
     assert captured["project_root"] == case_dir.resolve()
     assert captured["train_controls"]["show_progress"] is True
     assert captured["train_controls"]["progress_episode_interval"] == int(cfg.train.progress_episode_interval)
+    assert captured["train_controls"]["train_window_days"] == int(cfg.env.train_window_days)
+    assert captured["train_controls"]["window_stride_days"] == int(cfg.env.window_stride_days)
     assert captured["experiment_controls"]["runtime_controls"]["shared_data_dir"] == str((case_dir / "shared_data").resolve())
     assert captured["experiment_controls"]["runtime_controls"]["shared_data_signature"] == "sig-123"
     assert resolved["model_root"].endswith("run_a")
@@ -386,6 +390,10 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
     (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
     cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
     cfg.runtime.shared_data_signature = "sig-456"
+    stored_test_start_date = "2020-04-01"
+    stored_test_end_date = "2020-04-05"
+    cfg.data.test_start_date = "2020-06-01"
+    cfg.data.test_end_date = "2020-06-03"
     spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
 
     def _fake_load_madrl_training_result(**kwargs):
@@ -402,12 +410,16 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
                     "load_scale": list(cfg.data.load_scale),
                     "pv_scale": list(cfg.data.pv_scale),
                     "future_horizon": int(cfg.env.future_horizon),
-                    "test_start_date": str(cfg.data.test_start_date),
-                    "test_end_date": str(cfg.data.test_end_date),
+                    "test_start_date": stored_test_start_date,
+                    "test_end_date": stored_test_end_date,
                 },
                 "experiment_controls": {
                     "reward_controls": {
-                        "w_soc_pen": float(cfg.reward.w_soc_pen),
+                        "action_boundary_penalty_weight": float(cfg.reward.action_boundary_penalty_weight),
+                        "soc_boundary_regularization_weight": float(cfg.reward.soc_boundary_regularization_weight),
+                        "throughput_bonus_eur_per_kwh_max": float(cfg.reward.throughput_bonus_eur_per_kwh_max),
+                        "soc_boundary_epsilon": float(cfg.reward.soc_boundary_epsilon),
+                        "soc_boundary_margin": float(cfg.reward.soc_boundary_margin),
                         "w_voltage_pen": float(cfg.reward.w_voltage_pen),
                         "w_line_pen": float(cfg.reward.w_line_pen),
                         "w_trafo_pen": float(cfg.reward.w_trafo_pen),
@@ -416,9 +428,11 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
                         "storage_objective_mode": str(cfg.reward.storage_objective_mode),
                         "storage_price_mode": str(cfg.reward.storage_price_mode),
                         "storage_profit_weight": float(cfg.reward.storage_profit_weight),
-                        "local_action_penalty_mode": str(cfg.reward.local_action_penalty_mode),
-                        "local_action_penalty_weight": float(cfg.reward.local_action_penalty_weight),
                     },
+                },
+                "train_controls": {
+                    "train_window_days": int(cfg.env.train_window_days),
+                    "window_stride_days": int(cfg.env.window_stride_days),
                 },
             },
         }
@@ -477,8 +491,72 @@ def test_resolve_madrl_notebook_training_rejects_mismatched_saved_run(tmp_path, 
             root=case_dir,
             notebook_path="notebooks/madrl/train_base.ipynb",
         )
-    assert cfg.forecast.signal_training_overrides["wholesale_price"]["hidden_size"] == 64
+    assert cfg.forecast.signal_training_overrides["wholesale_price"]["hidden_size"] == 128
     assert cfg.forecast.signal_training_overrides["load"]["hidden_size"] == 64
+
+
+def test_resolve_madrl_notebook_training_rejects_mismatched_window_contract(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_window_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.env.train_window_days = 7
+    (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
+    cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
+    cfg.runtime.shared_data_signature = "sig-window"
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+
+    monkeypatch.setattr(
+        mainline_madrl,
+        "load_madrl_training_result",
+        lambda **kwargs: {
+            "model_root": str(case_dir / "models" / "run_window"),
+            "result_json_path": str(case_dir / "models" / "run_window" / "_meta" / "train_result.json"),
+            "result": {
+                "prediction_mode": "normal",
+                "shared_data_signature": "sig-window",
+                "data_controls": {
+                    "agent_profiles": list(cfg.data.agent_profiles),
+                    "agent_bus_ids": list(cfg.grid.agent_bus_ids),
+                    "load_scale": list(cfg.data.load_scale),
+                    "pv_scale": list(cfg.data.pv_scale),
+                    "future_horizon": int(cfg.env.future_horizon),
+                    "test_start_date": str(cfg.data.test_start_date),
+                    "test_end_date": str(cfg.data.test_end_date),
+                },
+                "experiment_controls": {
+                    "reward_controls": {
+                        "action_boundary_penalty_weight": float(cfg.reward.action_boundary_penalty_weight),
+                        "soc_boundary_regularization_weight": float(cfg.reward.soc_boundary_regularization_weight),
+                        "throughput_bonus_eur_per_kwh_max": float(cfg.reward.throughput_bonus_eur_per_kwh_max),
+                        "soc_boundary_epsilon": float(cfg.reward.soc_boundary_epsilon),
+                        "soc_boundary_margin": float(cfg.reward.soc_boundary_margin),
+                        "w_voltage_pen": float(cfg.reward.w_voltage_pen),
+                        "w_line_pen": float(cfg.reward.w_line_pen),
+                        "w_trafo_pen": float(cfg.reward.w_trafo_pen),
+                        "export_subsidy_eur_per_kwh": float(cfg.reward.export_subsidy_eur_per_kwh),
+                        "import_price_markup_eur_per_kwh": float(cfg.reward.import_price_markup_eur_per_kwh),
+                        "storage_objective_mode": str(cfg.reward.storage_objective_mode),
+                        "storage_price_mode": str(cfg.reward.storage_price_mode),
+                        "storage_profit_weight": float(cfg.reward.storage_profit_weight),
+                    },
+                },
+                "train_controls": {
+                    "train_window_days": 1,
+                    "window_stride_days": int(cfg.env.window_stride_days),
+                },
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="train_controls\\.train_window_days"):
+        resolve_madrl_notebook_training(
+            cfg,
+            spec=spec,
+            force_retrain_madrl=False,
+            root=case_dir,
+            notebook_path="notebooks/madrl/train_base.ipynb",
+        )
 
 
 def test_bootstrap_madrl_notebook_shared_data_reads_record_and_updates_cfg(tmp_path):
@@ -606,7 +684,11 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
     base_cfg = make_smoke_config(case_dir / "base_case", algorithm="MATD3")
     base_cfg.runtime.shared_data_dir = str(shared_data_dir)
     base_cfg.runtime.shared_data_signature = "sig-aligned"
-    base_cfg.reward.w_soc_pen = 0.5
+    base_cfg.reward.action_boundary_penalty_weight = 0.5
+    base_cfg.reward.soc_boundary_regularization_weight = 0.25
+    base_cfg.reward.throughput_bonus_eur_per_kwh_max = 0.002
+    base_cfg.reward.soc_boundary_epsilon = 0.01
+    base_cfg.reward.soc_boundary_margin = 0.07
     base_cfg.reward.w_voltage_pen = 0.0
     base_cfg.reward.w_line_pen = 0.0
     base_cfg.reward.w_trafo_pen = 0.0
@@ -614,7 +696,11 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
     safe_cfg = make_smoke_config(case_dir / "safe_case", algorithm="MATD3")
     safe_cfg.runtime.shared_data_dir = str(shared_data_dir)
     safe_cfg.runtime.shared_data_signature = "sig-aligned"
-    safe_cfg.reward.w_soc_pen = 2.0
+    safe_cfg.reward.action_boundary_penalty_weight = 2.0
+    safe_cfg.reward.soc_boundary_regularization_weight = 0.75
+    safe_cfg.reward.throughput_bonus_eur_per_kwh_max = 0.001
+    safe_cfg.reward.soc_boundary_epsilon = 0.03
+    safe_cfg.reward.soc_boundary_margin = 0.08
     safe_cfg.reward.w_voltage_pen = 400.0
     safe_cfg.reward.w_line_pen = 0.0
     safe_cfg.reward.w_trafo_pen = 10.0
@@ -641,7 +727,11 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
     assert base_payload["battery_controls"] == safe_payload["battery_controls"]
     assert base_payload["experiment_controls"]["runtime_controls"] == safe_payload["experiment_controls"]["runtime_controls"]
     assert base_payload["experiment_controls"]["reward_controls"] == {
-        "w_soc_pen": 0.5,
+        "action_boundary_penalty_weight": 0.5,
+        "soc_boundary_regularization_weight": 0.25,
+        "throughput_bonus_eur_per_kwh_max": 0.002,
+        "soc_boundary_epsilon": 0.01,
+        "soc_boundary_margin": 0.07,
         "w_voltage_pen": 0.0,
         "w_line_pen": 0.0,
         "w_trafo_pen": 0.0,
@@ -650,11 +740,13 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
         "storage_objective_mode": "max_storage_profit",
         "storage_price_mode": "real_time_price",
         "storage_profit_weight": 1.0,
-        "local_action_penalty_mode": "diagnostic_only",
-        "local_action_penalty_weight": 0.0,
     }
     assert safe_payload["experiment_controls"]["reward_controls"] == {
-        "w_soc_pen": 2.0,
+        "action_boundary_penalty_weight": 2.0,
+        "soc_boundary_regularization_weight": 0.75,
+        "throughput_bonus_eur_per_kwh_max": 0.001,
+        "soc_boundary_epsilon": 0.03,
+        "soc_boundary_margin": 0.08,
         "w_voltage_pen": 400.0,
         "w_line_pen": 0.0,
         "w_trafo_pen": 10.0,
@@ -663,8 +755,6 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
         "storage_objective_mode": "max_storage_profit",
         "storage_price_mode": "real_time_price",
         "storage_profit_weight": 1.0,
-        "local_action_penalty_mode": "diagnostic_only",
-        "local_action_penalty_weight": 0.0,
     }
     assert base_payload["checkpoint_controls"]["experiment_name"] == "train_base"
     assert safe_payload["checkpoint_controls"]["experiment_name"] == "train_base_safe"
@@ -703,8 +793,8 @@ def test_forecast_test_notebook_is_read_only_lstm_diagnostic():
     assert "wholesale_price_seq.npy" in joined_source
     assert "load_seq.npy" in joined_source
     assert "pv_seq.npy" in joined_source
-    assert "history_date = '2020-06-01'" in joined_source
-    assert "forecast_steps = 24" in joined_source
+    assert "history_date = str(config_snapshot['test_start_date'])" in joined_source
+    assert "forecast_steps = int(config_snapshot['future_horizon'])" in joined_source
     assert "generated_lstm" in joined_source
     assert "shared_data" in joined_source
     assert "train_signal_lstm" not in joined_source
@@ -1406,9 +1496,11 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "import_price_pred": [0.31, 0.38],
                 "purchase_cost_total": [1.0, 1.1],
                 "export_subsidy_total": [0.1, 0.1],
-                "storage_purchase_cost_eur": [0.30, 0.40],
-                "storage_sale_revenue_eur": [0.50, 0.60],
-                "storage_total_profit_eur": [0.20, 0.20],
+                "battery_power_kw": [1.0, -1.0],
+                "storage_charge_cost_eur": [0.30, 0.0],
+                "storage_discharge_revenue_eur": [0.0, 0.40],
+                "storage_profit_eur": [-0.30, 0.40],
+                "storage_objective_eur": [0.30, -0.40],
                 "system_other_cost_eur": [0.10, 0.20],
                 "total_eur": [0.10, 0.00],
                 "voltage_penalty_total": [0.0, 0.0],
@@ -1473,6 +1565,7 @@ def test_compare_rollout_metrics_returns_expected_columns():
                 "v_max_pu": 1.05,
                 "trafo_loading_limit_pct": 100.0,
                 "import_price_markup_eur_per_kwh": 0.2,
+                "dt_hours": 1.0,
                 "high_budget_refinement_warn": controller == "Local MPC (forecast_eval)",
                 "returned_primary_objective_eur": 1.9,
             },
@@ -1496,9 +1589,6 @@ def test_compare_rollout_metrics_returns_expected_columns():
         "storage_discharge_revenue_total_eur",
         "storage_profit_total_eur",
         "storage_objective_total_eur",
-        "storage_purchase_cost_eur",
-        "storage_sale_revenue_eur",
-        "storage_total_profit_eur",
         "system_other_cost_eur",
         "total_eur",
         "voltage_penalty_total",
@@ -1538,6 +1628,7 @@ def test_compare_rollout_metrics_derives_missing_import_price_from_wholesale_onl
                 "wholesale_price_pred": [0.12, 0.19],
                 "purchase_cost_total": [1.0, 1.1],
                 "export_subsidy_total": [0.1, 0.1],
+                "battery_power_kw": [1.0, -1.0],
                 "objective_total": [0.9, 1.0],
                 "feeder_post_action_net_load_kw": [1.0, 1.2],
                 "trafo_loading_pct_max": [60.0, 65.0],
@@ -1579,6 +1670,7 @@ def test_compare_rollout_metrics_derives_missing_import_price_from_wholesale_onl
             "v_max_pu": 1.05,
             "trafo_loading_limit_pct": 100.0,
             "import_price_markup_eur_per_kwh": 0.2,
+            "dt_hours": 1.0,
         },
     )
 
@@ -1597,6 +1689,7 @@ def test_save_and_load_rollout_record_materializes_import_price_from_wholesale(t
                 "step": [0, 1],
                 "wholesale_price": [0.10, 0.20],
                 "wholesale_price_pred": [0.12, 0.19],
+                "battery_power_kw": [0.0, 0.0],
             }
         ),
         agent_df=pd.DataFrame(),
@@ -1609,6 +1702,7 @@ def test_save_and_load_rollout_record_materializes_import_price_from_wholesale(t
             "v_min_pu": 0.95,
             "v_max_pu": 1.05,
             "import_price_markup_eur_per_kwh": 0.2,
+            "dt_hours": 1.0,
         },
     )
 
@@ -1635,9 +1729,6 @@ def test_build_compare_tables_use_final_dispatch_costs():
             "storage_charge_cost_total_eur": [2.0, 1.5],
             "storage_discharge_revenue_total_eur": [2.4, 1.9],
             "storage_profit_total_eur": [0.4, 0.4],
-            "storage_purchase_cost_eur": [2.0, 1.5],
-            "storage_sale_revenue_eur": [2.4, 1.9],
-            "storage_total_profit_eur": [0.4, 0.4],
             "system_other_cost_eur": [0.1, 0.2],
             "total_eur": [0.3, 0.2],
             "voltage_violation_steps": [1, 0],
@@ -1944,14 +2035,16 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
         experiment_controls = {
             "seed": seed,
             "reward_controls": {
+                "action_boundary_penalty_weight": 0.05,
+                "soc_boundary_regularization_weight": 0.005,
+                "throughput_bonus_eur_per_kwh_max": 0.002,
+                "soc_boundary_epsilon": 0.02,
+                "soc_boundary_margin": 0.02,
                 "export_subsidy_eur_per_kwh": subsidy,
                 "import_price_markup_eur_per_kwh": 0.2,
                 "storage_objective_mode": "max_storage_profit",
                 "storage_price_mode": "real_time_price",
                 "storage_profit_weight": 1.0,
-                "local_action_penalty_mode": "diagnostic_only",
-                "local_action_penalty_weight": 0.0,
-                "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},
             "model_controls": {"hidden_dim": 256},
@@ -1986,7 +2079,10 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
             "noise_std_min": 0.05,
         }
         payloads = {
-            "train_result.json": {"model_root": str(run_dir)},
+            "train_result.json": {
+                "model_root": str(run_dir),
+                "training_contract": {},
+            },
             "experiment_controls.json": experiment_controls,
             "data_controls.json": data_controls,
             "battery_controls.json": battery_controls,
@@ -2013,21 +2109,23 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
         )
 
 
-def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
-    def _write_bundle(run_dir):
+def test_validate_compare_model_bundles_accepts_matching_triplet_with_different_test_windows(tmp_path):
+    def _write_bundle(run_dir, *, test_start_date, test_end_date):
         meta_dir = run_dir / "_meta"
         meta_dir.mkdir(parents=True, exist_ok=True)
         shared_experiment = {
             "seed": 0,
             "reward_controls": {
+                "action_boundary_penalty_weight": 0.05,
+                "soc_boundary_regularization_weight": 0.005,
+                "throughput_bonus_eur_per_kwh_max": 0.002,
+                "soc_boundary_epsilon": 0.02,
+                "soc_boundary_margin": 0.02,
                 "export_subsidy_eur_per_kwh": 0.079,
                 "import_price_markup_eur_per_kwh": 0.2,
                 "storage_objective_mode": "max_storage_profit",
                 "storage_price_mode": "real_time_price",
                 "storage_profit_weight": 1.0,
-                "local_action_penalty_mode": "diagnostic_only",
-                "local_action_penalty_weight": 0.0,
-                "w_soc_pen": 0.0,
             },
             "forecast_controls": {"history_window": 96},
             "model_controls": {"hidden_dim": 256},
@@ -2041,8 +2139,8 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
             "future_horizon": 24,
             "train_year": 2019,
             "test_year": 2020,
-            "test_start_date": 20200101,
-            "test_end_date": 20200103,
+            "test_start_date": int(test_start_date),
+            "test_end_date": int(test_end_date),
         }
         shared_battery = {"battery_capacity": [5.0, 6.0], "max_charge_rate": 0.5}
         shared_train = {
@@ -2062,7 +2160,10 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
             "noise_std_min": 0.05,
         }
         payloads = {
-            "train_result.json": {"model_root": str(run_dir)},
+            "train_result.json": {
+                "model_root": str(run_dir),
+                "training_contract": {},
+            },
             "experiment_controls.json": shared_experiment,
             "data_controls.json": shared_data,
             "battery_controls.json": shared_battery,
@@ -2073,24 +2174,32 @@ def test_validate_compare_model_bundles_accepts_matching_triplet(tmp_path):
             (meta_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
 
     model_roots = {}
-    for name in ("train_base", "train_base_safe", "train_projection_safe"):
+    for name, test_start_date, test_end_date in (
+        ("train_base", 20200101, 20200103),
+        ("train_base_safe", 20200401, 20200415),
+        ("train_projection_safe", 20200601, 20200610),
+    ):
         run_dir = tmp_path / name
-        _write_bundle(run_dir)
+        _write_bundle(run_dir, test_start_date=test_start_date, test_end_date=test_end_date)
         model_roots[name] = run_dir
 
     bundles = validate_compare_model_bundles(model_roots)
     assert set(bundles) == set(model_roots)
 
 
-def test_validate_compare_model_bundles_rejects_removed_legacy_reward_keys(tmp_path):
+@pytest.mark.parametrize("legacy_reward_key", ["w_action_pen", "action_feasibility_regularization_weight"])
+def test_validate_compare_model_bundles_rejects_removed_legacy_reward_keys(tmp_path, legacy_reward_key):
     meta_dir = (tmp_path / "train_base" / "_meta")
     meta_dir.mkdir(parents=True, exist_ok=True)
     payloads = {
-        "train_result.json": {"model_root": str((tmp_path / "train_base").resolve())},
+        "train_result.json": {
+            "model_root": str((tmp_path / "train_base").resolve()),
+            "training_contract": {},
+        },
         "experiment_controls.json": {
             "seed": 0,
             "reward_controls": {
-                "w_action_pen": 2.0,
+                legacy_reward_key: 2.0,
             },
             "forecast_controls": {"history_window": 96},
             "model_controls": {"hidden_dim": 256},
@@ -2129,7 +2238,7 @@ def test_validate_compare_model_bundles_rejects_removed_legacy_reward_keys(tmp_p
     for filename, payload in payloads.items():
         (meta_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="w_action_pen"):
+    with pytest.raises(ValueError, match=legacy_reward_key):
         validate_compare_model_bundles(
             {
                 "train_base": tmp_path / "train_base",

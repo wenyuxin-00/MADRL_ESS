@@ -219,6 +219,8 @@ def test_prosumer_dataset_filters_explicit_date_range_and_build_dataset_uses_it(
     cfg.data.train_end_date = "2019-01-06"
     cfg.env.num_agents = 2
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.grid.agent_bus_ids = [10, 6]
 
     built = build_dataset(cfg, mode="train")
@@ -274,6 +276,8 @@ def test_prosumer_dataset_validates_inputs_and_build_dataset_lengths(tmp_path):
     cfg.data.pv_scale = [1.0, 1.0]
     cfg.env.num_agents = 2
     cfg.env.episode_limit = 4
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.grid.agent_bus_ids = [10, 6]
 
     with pytest.raises(ValueError, match="agent_profiles length should equal n_agents"):
@@ -309,7 +313,12 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
         assert len(truncated) == cfg.env.num_agents
-        assert set(info) == {"episode_done", *[str(meta.key) for meta in env.reward_fn.component_meta]}
+        assert set(info) == {
+            "episode_done",
+            "madrl_throughput_bonus_weight",
+            "madrl_throughput_kwh",
+            *[str(meta.key) for meta in env.reward_fn.component_meta],
+        }
     finally:
         env.close()
 

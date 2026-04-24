@@ -18,7 +18,8 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         obs, _ = env.reset(episode_idx=0)
         action_n = [np.zeros((cfg.runtime.action_dim,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, _ = env.step(action_n)
-        done = np.logical_or(np.asarray(terminated), np.asarray(truncated)).astype(np.float32)
+        terminated_array = np.asarray(terminated, dtype=np.float32)
+        truncated_array = np.asarray(truncated, dtype=np.float32)
 
         batched_obs = stack_nested([obs, obs])
         batched_next_obs = stack_nested([next_obs, next_obs])
@@ -27,8 +28,12 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
             [np.asarray(reward, dtype=np.float32).reshape(cfg.env.num_agents, 1)] * 2,
             axis=0,
         )
-        batched_done = np.stack(
-            [done.reshape(cfg.env.num_agents, 1)] * 2,
+        batched_terminated = np.stack(
+            [terminated_array.reshape(cfg.env.num_agents, 1)] * 2,
+            axis=0,
+        )
+        batched_truncated = np.stack(
+            [truncated_array.reshape(cfg.env.num_agents, 1)] * 2,
             axis=0,
         )
 
@@ -38,13 +43,14 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
             batched_action,
             batched_reward,
             batched_next_obs,
-            batched_done,
+            batched_terminated,
+            batched_truncated,
         )
 
         batch = buffer.sample()
         expected_local_dim = env.observation_schema["local"][1]
 
-        assert set(batch.keys()) == {"obs", "action", "reward", "next_obs", "done"}
+        assert set(batch.keys()) == {"obs", "action", "reward", "next_obs", "terminated", "truncated"}
         assert batch["obs"]["local"].shape == (
             cfg.train.batch_size,
             cfg.env.num_agents,
@@ -52,6 +58,8 @@ def test_replay_buffer_stores_and_samples_canonical_batch(tmp_path):
         )
         assert batch["action"].shape == (cfg.train.batch_size, cfg.env.num_agents, cfg.runtime.action_dim)
         assert batch["reward"].shape == (cfg.train.batch_size, cfg.env.num_agents, 1)
+        assert batch["terminated"].shape == (cfg.train.batch_size, cfg.env.num_agents, 1)
+        assert batch["truncated"].shape == (cfg.train.batch_size, cfg.env.num_agents, 1)
 
         torch_batch = to_torch_batch(batch, cfg.runtime.device)
         assert isinstance(torch_batch["obs"]["local"], torch.Tensor)

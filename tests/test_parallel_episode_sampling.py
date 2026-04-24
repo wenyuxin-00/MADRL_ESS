@@ -93,6 +93,8 @@ def test_dummy_vec_env_unique_active_reset_assigns_distinct_episode_indices(tmp_
 
         assert len(episode_indices) == 4
         assert len(set(episode_indices)) == 4
+        assert vec_env.num_available_episodes == vec_env.envs[0].num_available_episodes
+        assert vec_env.episode_length == vec_env.envs[0].episode_length
         assert vec_env._next_wave_indices is not None
         assert len(vec_env._next_wave_indices) == 4
         assert len(set(vec_env._next_wave_indices)) == 4

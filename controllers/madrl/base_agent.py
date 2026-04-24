@@ -42,21 +42,21 @@ class BaseAgent(ABC):
 class MADDPG(BaseAgent):
 	def __init__(self,cfg:object,agent_id:int)->None:self._init_shared_modules(cfg,agent_id)
 	def train_on_batch(self,batch:dict,agent_n:list,shared_ctx:dict|None=None)->None:
-		obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];done=batch['done']
+		obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];terminated=batch['terminated']
 		with torch.no_grad():
 			next_action=None if shared_ctx is None else shared_ctx.get('target_actor_actions_clean')
 			if next_action is None:next_action=torch.stack([agent._actor_target_call(next_obs)for agent in agent_n],dim=1)
-			target_q=reward[:,self.agent_id]+self.gamma*(1-done[:,self.agent_id])*self._critic_target_call(next_obs,next_action)
+			target_q=reward[:,self.agent_id]+self.gamma*(1-terminated[:,self.agent_id])*self._critic_target_call(next_obs,next_action)
 		current_q=self._critic_call(obs,action);critic_loss=F.mse_loss(current_q.float(),target_q.float());self._optimizer_step(self.critic_optimizer,critic_loss,self.critic.parameters());new_action=action.clone();new_action[:,self.agent_id]=self._actor_call(obs);actor_loss=-self._critic_call(obs,new_action).float().mean();self._optimizer_step(self.actor_optimizer,actor_loss,self.actor.parameters());self._soft_update()
 class MATD3(BaseAgent):
 	def __init__(self,cfg:object,agent_id:int)->None:self._init_shared_modules(cfg,agent_id);self.policy_noise=float(cfg.algo.policy_noise);self.noise_clip=float(cfg.algo.noise_clip);self.policy_update_freq=int(cfg.algo.policy_update_freq);self.actor_pointer=0
 	def _smoothed_target_actions(self,clean_next_action:torch.Tensor)->torch.Tensor:noise=(torch.randn_like(clean_next_action)*self.policy_noise).clamp(-self.noise_clip,self.noise_clip);return(clean_next_action+noise).clamp(-self.max_action,self.max_action)
 	def train_on_batch(self,batch:dict,agent_n:list,shared_ctx:dict|None=None)->None:
-		self.actor_pointer+=1;obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];done=batch['done']
+		self.actor_pointer+=1;obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];terminated=batch['terminated']
 		with torch.no_grad():
 			clean_next_action=None if shared_ctx is None else shared_ctx.get('target_actor_actions_clean')
 			if clean_next_action is None:clean_next_action=torch.stack([agent._actor_target_call(next_obs)for agent in agent_n],dim=1)
-			next_action=self._smoothed_target_actions(clean_next_action);q1_next,q2_next=self._critic_target_call(next_obs,next_action);target_q=reward[:,self.agent_id]+self.gamma*(1-done[:,self.agent_id])*torch.min(q1_next,q2_next)
+			next_action=self._smoothed_target_actions(clean_next_action);q1_next,q2_next=self._critic_target_call(next_obs,next_action);target_q=reward[:,self.agent_id]+self.gamma*(1-terminated[:,self.agent_id])*torch.min(q1_next,q2_next)
 		current_q1,current_q2=self._critic_call(obs,action);target_q_fp32=target_q.float();critic_loss=F.mse_loss(current_q1.float(),target_q_fp32)+F.mse_loss(current_q2.float(),target_q_fp32);self._optimizer_step(self.critic_optimizer,critic_loss,self.critic.parameters())
 		if self.actor_pointer%self.policy_update_freq!=0:return
 		new_action=action.clone();new_action[:,self.agent_id]=self._actor_call(obs);q1_policy,_=self._critic_call(obs,new_action);actor_loss=-q1_policy.float().mean();self._optimizer_step(self.actor_optimizer,actor_loss,self.actor.parameters());self._soft_update()
@@ -83,8 +83,8 @@ class MATD3SafePOC(MATD3):
 		if shared_ctx is not None:shared_ctx['projected_policy_actions_all']=projected_policy_actions
 		return projected_policy_actions
 	def train_on_batch(self,batch:dict,agent_n:list,shared_ctx:dict|None=None)->None:
-		self.actor_pointer+=1;obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];done=batch['done']
-		with torch.no_grad():projected_next_action=self._get_projected_target_actions(next_obs,agent_n,shared_ctx);q1_next,q2_next=self._critic_target_call(next_obs,projected_next_action);target_q=reward[:,self.agent_id]+self.gamma*(1-done[:,self.agent_id])*torch.min(q1_next,q2_next)
+		self.actor_pointer+=1;obs=batch['obs'];action=batch['action'];reward=batch['reward'];next_obs=batch['next_obs'];terminated=batch['terminated']
+		with torch.no_grad():projected_next_action=self._get_projected_target_actions(next_obs,agent_n,shared_ctx);q1_next,q2_next=self._critic_target_call(next_obs,projected_next_action);target_q=reward[:,self.agent_id]+self.gamma*(1-terminated[:,self.agent_id])*torch.min(q1_next,q2_next)
 		current_q1,current_q2=self._critic_call(obs,action);target_q_fp32=target_q.float();critic_loss=F.mse_loss(current_q1.float(),target_q_fp32)+F.mse_loss(current_q2.float(),target_q_fp32);self._optimizer_step(self.critic_optimizer,critic_loss,self.critic.parameters())
 		if self.actor_pointer%self.policy_update_freq!=0:return
 		projected_policy_actions=self._get_projected_policy_actions(obs,action,agent_n,shared_ctx);q1_policy,_=self._critic_call(obs,projected_policy_actions[self.agent_id]);actor_loss=-q1_policy.float().mean()

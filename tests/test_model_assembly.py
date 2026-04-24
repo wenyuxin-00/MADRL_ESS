@@ -131,7 +131,7 @@ def test_local_feasibility_clamps_round_trip_residual_before_validation():
     assert residual_info["soc_penalty_unweighted"][0, 0].item() > 0.0
 
 
-def test_madrl_controller_projection_path_preserves_raw_request_and_uses_projection_residual():
+def test_madrl_controller_projection_path_uses_projected_action_as_request():
     cfg = SimpleNamespace(env=SimpleNamespace(efficiency=0.95, dt=1.0, soc_min=0.05, soc_max=0.95))
     dummy_agents = [
         SimpleNamespace(cfg=cfg, device=torch.device("cpu")),
@@ -163,7 +163,6 @@ def test_madrl_controller_projection_path_preserves_raw_request_and_uses_project
 
     executed_actions, action_info = controller._postprocess_joint_actions(obs, raw_actions)
 
-    assert controller.apply_action_penalty is True
     validate_executed_actions_numpy(
         obs["safety_local"],
         np.stack(executed_actions, axis=0),
@@ -173,13 +172,43 @@ def test_madrl_controller_projection_path_preserves_raw_request_and_uses_project
         soc_max=0.95,
     )
     assert action_info is not None
+    assert action_info["battery_action_req"][0] == pytest.approx(-4.0e-5, rel=1e-2, abs=1e-6)
+    assert action_info["battery_action_exec"][0] == pytest.approx(0.0, abs=1e-7)
+    assert action_info["battery_power_req_kw"][0] == pytest.approx(-1.0e-4, rel=1e-2, abs=1e-6)
+    assert action_info["battery_power_exec_kw"][0] == pytest.approx(0.0, abs=1e-7)
+    assert action_info["controller_action_gap"][0] == pytest.approx(4.0e-5, rel=1e-2, abs=1e-6)
+    assert action_info["soc_penalty_unweighted"][0] == pytest.approx(4.0e-5, rel=1e-2, abs=1e-6)
+
+
+def test_madrl_controller_base_path_hard_clamps_raw_action():
+    cfg = SimpleNamespace(env=SimpleNamespace(efficiency=0.95, dt=1.0, soc_min=0.05, soc_max=0.95))
+    dummy_agents = [
+        SimpleNamespace(cfg=cfg, device=torch.device("cpu")),
+        SimpleNamespace(cfg=cfg, device=torch.device("cpu")),
+    ]
+    controller = MADRLController(dummy_agents, projector=None)
+    obs = {
+        "local": np.zeros((2, 1), dtype=np.float32),
+        "safety_local": build_safety_local_numpy(
+            soc=np.asarray([0.05, 0.50], dtype=np.float32),
+            load_raw=np.asarray([1.0, 1.2], dtype=np.float32),
+            pv_raw=np.asarray([0.0, 0.0], dtype=np.float32),
+            battery_capacity_kwh=np.asarray([5.0, 6.0], dtype=np.float32),
+            p_max_kw=np.asarray([2.5, 3.0], dtype=np.float32),
+        ),
+    }
+    raw_actions = [
+        np.asarray([-1.0, 0.2], dtype=np.float32),
+        np.asarray([0.25, -0.2], dtype=np.float32),
+    ]
+
+    executed_actions, action_info = controller._postprocess_joint_actions(obs, raw_actions)
+
+    assert action_info is not None
     assert action_info["battery_action_req"][0] == pytest.approx(-1.0)
     assert action_info["battery_action_exec"][0] == pytest.approx(0.0, abs=1e-7)
     assert action_info["battery_power_req_kw"][0] == pytest.approx(-2.5)
     assert action_info["battery_power_exec_kw"][0] == pytest.approx(0.0, abs=1e-7)
-    assert action_info["controller_action_gap"][0] > 0.9
-    assert action_info["soc_penalty_unweighted"][0] == pytest.approx(4.0e-5, rel=1e-2, abs=1e-6)
-    assert action_info["action_penalty_unweighted"][0] == pytest.approx(
-        action_info["soc_penalty_unweighted"][0],
-        abs=1e-8,
-    )
+    assert action_info["controller_action_gap"][0] == pytest.approx(1.0)
+    assert action_info["soc_penalty_unweighted"][0] == pytest.approx(1.0)
+    np.testing.assert_allclose(executed_actions[0], np.asarray([0.0, 0.2], dtype=np.float32), atol=1e-7)

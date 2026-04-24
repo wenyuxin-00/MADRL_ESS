@@ -74,6 +74,8 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
     )
     cfg.env.num_agents = n_agents
     cfg.env.episode_limit = episode_limit
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.obs.local_features = ["calendar_time", "soc"]
     cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
     cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
@@ -91,17 +93,12 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
 
 def _ensure_case_data(*, n_agents: int, total_steps: int) -> Path:
     data_dir = Path(__file__).resolve().parent / ".tmp" / "grid_env_case" / "data"
-    prosumer_dir = data_dir / "processed" / "prosumer"
-    prosumer_dir.mkdir(parents=True, exist_ok=True)
-
-    household_csv = prosumer_dir / "household.csv"
-    if not household_csv.exists():
-        write_prosumer_processed_dataset(
-            data_dir,
-            agent_profiles=["SFH12", "SFH14", "SFH16"][:n_agents],
-            train_steps=total_steps,
-            test_steps=total_steps,
-        )
+    write_prosumer_processed_dataset(
+        data_dir,
+        agent_profiles=["SFH12", "SFH14", "SFH16"][:n_agents],
+        train_steps=total_steps,
+        test_steps=max(total_steps, 96 * 110),
+    )
     return data_dir
 
 
@@ -364,7 +361,7 @@ def test_reward_tracks_local_voltage_differences(grid_env) -> None:
     actions = _zero_actions()
     _, reward_list, _, _, info = grid_env.step(actions)
     assert not np.allclose(info["v_violation"], info["v_violation"][0])
-    assert info["r_safe_v"][0] > info["r_safe_v"][2]
+    assert info["madrl_r_safe_v"][0] > info["madrl_r_safe_v"][2]
     assert np.any(np.asarray(reward_list, dtype=np.float32) != reward_list[1])
 
 
@@ -372,7 +369,11 @@ def test_trafo_penalty_is_shared(grid_env) -> None:
     grid_env.reset()
     actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
-    assert info["r_safe_trafo"][0] == info["r_safe_trafo"][1] == info["r_safe_trafo"][2]
+    assert (
+        info["madrl_r_safe_trafo"][0]
+        == info["madrl_r_safe_trafo"][1]
+        == info["madrl_r_safe_trafo"][2]
+    )
 
 
 def test_grid_fields_shapes(grid_env) -> None:
@@ -404,7 +405,12 @@ def test_compact_info_omits_large_arrays() -> None:
     actions = _zero_actions()
     _, _, _, _, info = env.step(actions)
 
-    assert set(info) == {"episode_done", *[str(meta.key) for meta in reward_fn.component_meta]}
+    assert set(info) == {
+        "episode_done",
+        "madrl_throughput_bonus_weight",
+        "madrl_throughput_kwh",
+        *[str(meta.key) for meta in reward_fn.component_meta],
+    }
     env.close()
 
 

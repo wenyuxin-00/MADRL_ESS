@@ -55,6 +55,7 @@ def _subproc_worker(address,authkey:bytes,cfg,mode:str,worker_rank:int,seed:int|
 			if cmd=='step':
 				obs,reward,terminated,truncated,info=env.step(payload);info=dict(info)
 				if _episode_done(info,terminated,truncated):
+					if np.any(np.asarray(truncated,dtype=bool)):info['bootstrap_obs']=obs
 					if next_episode_idx is None:raise RuntimeError("SubprocVecEnv worker reached episode end without a primed next_episode_idx in parallel_episode_sampling='unique_active' mode.")
 					obs,info['reset_info']=_reset_env(env,episode_idx=next_episode_idx);next_episode_idx=None;info['episode_done']=True
 				else:info['episode_done']=False
@@ -67,6 +68,7 @@ def _subproc_worker(address,authkey:bytes,cfg,mode:str,worker_rank:int,seed:int|
 class DummyVecEnv:
 	def __init__(self,num_envs,env_fn_or_cls,cfg=None,mode:str='train',seed:int|None=None,parallel_episode_sampling:str='unique_active'):
 		self.num_envs=int(num_envs);self.parallel_episode_sampling=validate_parallel_episode_sampling_mode(parallel_episode_sampling);self.envs=[env_fn_or_cls()if cfg is None else env_fn_or_cls(cfg,mode=mode)for _ in range(self.num_envs)];self.num_agents=int(self.envs[0].n if cfg is None else cfg.env.num_agents);runtime_seed=getattr(getattr(self.envs[0],'cfg',None),'runtime',None);runtime_seed=getattr(runtime_seed,'seed',None);self.base_seed=int(seed)if seed is not None else None if runtime_seed is None else int(runtime_seed);self._seeded_envs=[False]*self.num_envs;(self._next_wave_indices):list[int]=[];self._episode_sampler=ParallelEpisodeSampler(num_available_episodes=int(getattr(self.envs[0],'num_available_episodes',0)),base_seed=self.base_seed,num_envs=self.num_envs);first=self.envs[0]
+		self.num_available_episodes=int(getattr(first,'num_available_episodes',0));self.episode_length=int(getattr(first,'episode_length',0))
 		for env in self.envs[1:]:
 			if int(getattr(env,'num_available_episodes',0))!=int(getattr(first,'num_available_episodes',0)):raise RuntimeError("DummyVecEnv requires matching num_available_episodes across envs in parallel_episode_sampling='unique_active' mode.")
 			if int(getattr(env,'episode_length',0))!=int(getattr(first,'episode_length',0)):raise RuntimeError("DummyVecEnv requires matching episode_length across envs in parallel_episode_sampling='unique_active' mode.")
@@ -80,7 +82,9 @@ class DummyVecEnv:
 		for(obs,reward,terminated,truncated,info)in outputs:obs_list.append(obs);reward_list.append(np.asarray(reward,dtype=np.float32).reshape(self.num_agents,1));terminated_list.append(np.asarray(terminated,dtype=np.float32).reshape(self.num_agents,1));truncated_list.append(np.asarray(truncated,dtype=np.float32).reshape(self.num_agents,1));info=dict(info);info_list.append(info);done_flags.append(_episode_done(info,terminated,truncated))
 		validate_wave_done_flags(done_flags,env_name='DummyVecEnv')
 		if any(done_flags):
-			for(env_idx,env)in enumerate(self.envs):obs_list[env_idx],info_list[env_idx]['reset_info']=_reset_env(env,episode_idx=self._next_wave_indices[env_idx]);info_list[env_idx]['episode_done']=True
+			for(env_idx,env)in enumerate(self.envs):
+				if np.any(np.asarray(truncated_list[env_idx],dtype=bool)):info_list[env_idx]['bootstrap_obs']=obs_list[env_idx]
+				obs_list[env_idx],info_list[env_idx]['reset_info']=_reset_env(env,episode_idx=self._next_wave_indices[env_idx]);info_list[env_idx]['episode_done']=True
 			self._prime_next_wave()
 		else:
 			for info in info_list:info['episode_done']=False

@@ -27,6 +27,8 @@ def _make_prosumer_cfg(tmp_path) -> ExperimentConfig:
     cfg.data.pv_reference = "south"
     cfg.env.num_agents = len(agent_profiles)
     cfg.env.episode_limit = 4
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.env.future_horizon = 2
     cfg.obs.local_features = ["time", "soc"]
     cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]

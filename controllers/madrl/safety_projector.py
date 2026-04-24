@@ -9,24 +9,14 @@ SAFETY_LOCAL_FIELD_NAMES='soc_raw','load_raw','pv_raw','battery_capacity_kwh','p
 SAFETY_LOCAL_DIM=len(SAFETY_LOCAL_FIELD_NAMES)
 _SAFETY_EPS=1e-06
 _ACTION_TOL=1e-05
-LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE='diagnostic_only'
-LOCAL_ACTION_PENALTY_MODE='penalty'
-LOCAL_ACTION_STRICT_MODE='strict'
+REMOVED_STEP_INFO_FIELDS=frozenset({'r_action_pen','r_soc_pen'})
 def is_safe_poc_algorithm(cfg_or_name:Any)->bool:
 	if isinstance(cfg_or_name,str):name=cfg_or_name
 	else:algo_cfg=getattr(cfg_or_name,'algo',None);name=getattr(algo_cfg,'name','')
 	return str(name)==SAFE_POC_ALGO_NAME
-def resolve_local_action_penalty_settings(cfg_or_reward:Any)->tuple[bool,float,str]:
-	reward_cfg=getattr(cfg_or_reward,'reward',cfg_or_reward);mode=str(getattr(reward_cfg,'local_action_penalty_mode',LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE)).strip().lower();weight=float(getattr(reward_cfg,'local_action_penalty_weight',.0))
-	if weight<.0:raise ValueError(f"local_action_penalty_weight must be non-negative, got {weight}.")
-	if mode==LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE:return False,.0,LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE
-	if mode==LOCAL_ACTION_STRICT_MODE:return False,.0,LOCAL_ACTION_STRICT_MODE
-	if mode==LOCAL_ACTION_PENALTY_MODE:return weight>.0,weight,LOCAL_ACTION_PENALTY_MODE
-	raise ValueError(f"Unknown local_action_penalty_mode {mode!r}. Expected one of: {[LOCAL_ACTION_PENALTY_DIAGNOSTIC_MODE,LOCAL_ACTION_PENALTY_MODE,LOCAL_ACTION_STRICT_MODE]}.")
-def require_strict_local_action_feasibility(action_info:dict[str,np.ndarray]|None,*,mode:str,tol:float=_ACTION_TOL)->None:
-	if str(mode)!=LOCAL_ACTION_STRICT_MODE or action_info is None:return
-	gap=np.asarray(action_info.get('soc_penalty_unweighted',[]),dtype=np.float32).reshape(-1)
-	if gap.size and bool(np.any(gap>float(tol))):raise ValueError(f"local_action_penalty_mode='strict' found locally infeasible action gap max={float(np.max(gap)):.6f}. Expected actor/controller actions to satisfy the current SOC battery bounds before env.step.")
+def reject_removed_step_info_fields(info:dict[str,Any],*,entrypoint:str)->None:
+	removed=sorted(REMOVED_STEP_INFO_FIELDS.intersection(str(key)for key in dict(info).keys()))
+	if removed:raise KeyError(f"{entrypoint} received old step info field(s) {removed}. r_action_pen / r_soc_pen were removed in fixMADRL section 5.3. Old rollout parquet or checkpoint-derived step info is no longer reusable; re-run notebooks/madrl/train_base.ipynb.")
 def _row_norm_sq(rows:torch.Tensor)->torch.Tensor:
 	if rows.numel()==0:return torch.zeros((int(rows.shape[0]),),dtype=rows.dtype,device=rows.device)
 	return torch.clamp(torch.sum(rows*rows,dim=-1),min=_SAFETY_EPS)
@@ -50,23 +40,24 @@ def _local_bounds_torch(safety_local:torch.Tensor,*,efficiency:float,dt_hours:fl
 def compute_action_gap_metrics_numpy(safety_local:np.ndarray,requested_actions:np.ndarray|list[np.ndarray],executed_actions:np.ndarray|list[np.ndarray])->dict[str,np.ndarray]:
 	requested,squeezed=_canonicalize_actions_numpy(requested_actions);executed,_=_canonicalize_actions_numpy(executed_actions);safety_local=np.asarray(safety_local,dtype=np.float32)
 	if safety_local.shape[0]!=requested.shape[0]:raise ValueError(f"safety_local and action arrays should share the same agent dimension, got {safety_local.shape} vs {requested.shape}.")
-	p_max_kw=np.maximum(safety_local[:,4],_SAFETY_EPS);pv_raw_kw=np.maximum(safety_local[:,2],.0);battery_action_req,battery_action_exec=requested[:,0].astype(np.float32),executed[:,0].astype(np.float32);pv_action_exec=executed[:,1].astype(np.float32);battery_power_req_kw=(battery_action_req*p_max_kw).astype(np.float32);battery_power_exec_kw=(battery_action_exec*p_max_kw).astype(np.float32);pv_effective_req_kw=(.5*(requested[:,1].astype(np.float32)+1.)*pv_raw_kw).astype(np.float32);pv_effective_exec_kw=(.5*(pv_action_exec+1.)*pv_raw_kw).astype(np.float32);metrics={'battery_action_req':battery_action_req,'battery_action_exec':battery_action_exec,'controller_action_gap':np.linalg.norm(requested-executed,axis=-1).astype(np.float32),'battery_power_req_kw':battery_power_req_kw,'battery_power_exec_kw':battery_power_exec_kw,'pv_action_exec':pv_action_exec,'pv_effective_req_kw':pv_effective_req_kw,'pv_effective_exec_kw':pv_effective_exec_kw,'pv_curtail_req_kw':(pv_raw_kw-pv_effective_req_kw).astype(np.float32),'pv_curtail_exec_kw':(pv_raw_kw-pv_effective_exec_kw).astype(np.float32),'soc_penalty_unweighted':(np.abs(battery_power_req_kw-battery_power_exec_kw)/(p_max_kw+_SAFETY_EPS)).astype(np.float32)};metrics['action_penalty_unweighted']=metrics['soc_penalty_unweighted'];return{key:np.asarray(value[0],dtype=np.float32)for(key,value)in metrics.items()}if squeezed else metrics
+	p_max_kw=np.maximum(safety_local[:,4],_SAFETY_EPS);pv_raw_kw=np.maximum(safety_local[:,2],.0);battery_action_req,battery_action_exec=requested[:,0].astype(np.float32),executed[:,0].astype(np.float32);pv_action_exec=executed[:,1].astype(np.float32);battery_power_req_kw=(battery_action_req*p_max_kw).astype(np.float32);battery_power_exec_kw=(battery_action_exec*p_max_kw).astype(np.float32);pv_effective_req_kw=(.5*(requested[:,1].astype(np.float32)+1.)*pv_raw_kw).astype(np.float32);pv_effective_exec_kw=(.5*(pv_action_exec+1.)*pv_raw_kw).astype(np.float32);metrics={'battery_action_req':battery_action_req,'battery_action_exec':battery_action_exec,'controller_action_gap':np.linalg.norm(requested-executed,axis=-1).astype(np.float32),'battery_power_req_kw':battery_power_req_kw,'battery_power_exec_kw':battery_power_exec_kw,'pv_action_exec':pv_action_exec,'pv_effective_req_kw':pv_effective_req_kw,'pv_effective_exec_kw':pv_effective_exec_kw,'pv_curtail_req_kw':(pv_raw_kw-pv_effective_req_kw).astype(np.float32),'pv_curtail_exec_kw':(pv_raw_kw-pv_effective_exec_kw).astype(np.float32),'soc_penalty_unweighted':(np.abs(battery_power_req_kw-battery_power_exec_kw)/(p_max_kw+_SAFETY_EPS)).astype(np.float32)};return{key:np.asarray(value[0],dtype=np.float32)for(key,value)in metrics.items()}if squeezed else metrics
 def compute_action_gap_metrics_torch(safety_local:torch.Tensor,requested_actions:torch.Tensor,executed_actions:torch.Tensor)->dict[str,torch.Tensor]:
 	requested,squeezed=_canonicalize_actions_torch(requested_actions);executed,_=_canonicalize_actions_torch(executed_actions)
 	if int(safety_local.shape[0])!=int(requested.shape[0]):raise ValueError(f"safety_local batch dimension should match requested_actions batch dimension, got {tuple(safety_local.shape)} vs {tuple(requested.shape)}.")
-	p_max_kw=torch.clamp(safety_local[...,4],min=_SAFETY_EPS);pv_raw_kw=torch.clamp(safety_local[...,2],min=.0);battery_power_req_kw=requested[...,0]*p_max_kw;battery_power_exec_kw=executed[...,0]*p_max_kw;pv_action_exec=executed[...,1];pv_effective_req_kw=.5*(requested[...,1]+1.)*pv_raw_kw;pv_effective_exec_kw=.5*(pv_action_exec+1.)*pv_raw_kw;metrics={'battery_action_req':requested[...,0],'battery_action_exec':executed[...,0],'controller_action_gap':torch.linalg.norm(requested-executed,dim=-1),'battery_power_req_kw':battery_power_req_kw,'battery_power_exec_kw':battery_power_exec_kw,'pv_action_exec':pv_action_exec,'pv_effective_req_kw':pv_effective_req_kw,'pv_effective_exec_kw':pv_effective_exec_kw,'pv_curtail_req_kw':pv_raw_kw-pv_effective_req_kw,'pv_curtail_exec_kw':pv_raw_kw-pv_effective_exec_kw,'soc_penalty_unweighted':(battery_power_req_kw-battery_power_exec_kw).abs()/torch.clamp(p_max_kw,min=_SAFETY_EPS)};metrics['action_penalty_unweighted']=metrics['soc_penalty_unweighted'];return{key:value.squeeze(0)for(key,value)in metrics.items()}if squeezed else metrics
+	p_max_kw=torch.clamp(safety_local[...,4],min=_SAFETY_EPS);pv_raw_kw=torch.clamp(safety_local[...,2],min=.0);battery_power_req_kw=requested[...,0]*p_max_kw;battery_power_exec_kw=executed[...,0]*p_max_kw;pv_action_exec=executed[...,1];pv_effective_req_kw=.5*(requested[...,1]+1.)*pv_raw_kw;pv_effective_exec_kw=.5*(pv_action_exec+1.)*pv_raw_kw;metrics={'battery_action_req':requested[...,0],'battery_action_exec':executed[...,0],'controller_action_gap':torch.linalg.norm(requested-executed,dim=-1),'battery_power_req_kw':battery_power_req_kw,'battery_power_exec_kw':battery_power_exec_kw,'pv_action_exec':pv_action_exec,'pv_effective_req_kw':pv_effective_req_kw,'pv_effective_exec_kw':pv_effective_exec_kw,'pv_curtail_req_kw':pv_raw_kw-pv_effective_req_kw,'pv_curtail_exec_kw':pv_raw_kw-pv_effective_exec_kw,'soc_penalty_unweighted':(battery_power_req_kw-battery_power_exec_kw).abs()/torch.clamp(p_max_kw,min=_SAFETY_EPS)};return{key:value.squeeze(0)for(key,value)in metrics.items()}if squeezed else metrics
 def enforce_local_action_feasibility_torch(safety_local:torch.Tensor,raw_actions:torch.Tensor,*,efficiency:float,dt_hours:float,soc_min:float,soc_max:float)->tuple[torch.Tensor,dict[str,torch.Tensor]]:requested_actions,squeezed=_canonicalize_actions_torch(raw_actions);battery_lower_kw,battery_upper_kw,p_max_kw,_=_local_bounds_torch(safety_local,efficiency=efficiency,dt_hours=dt_hours,soc_min=soc_min,soc_max=soc_max);executed_actions=torch.stack([torch.clamp(requested_actions[...,0]*p_max_kw,min=battery_lower_kw,max=battery_upper_kw)/torch.clamp(p_max_kw,min=_SAFETY_EPS),torch.clamp(requested_actions[...,1],min=-1.,max=1.)],dim=-1);metrics=compute_action_gap_metrics_torch(safety_local,requested_actions,executed_actions);return(executed_actions.squeeze(0),metrics)if squeezed else(executed_actions,metrics)
 def action_info_to_numpy(action_info:dict[str,torch.Tensor]|None)->dict[str,np.ndarray]|None:
 	if action_info is None:return
 	return{key:value.detach().to(dtype=torch.float32).cpu().numpy()if isinstance(value,torch.Tensor)else np.asarray(value,dtype=np.float32)for(key,value)in action_info.items()}
-def merge_action_info_into_step_info(info:dict[str,Any],action_info:dict[str,np.ndarray]|None,*,soc_pen_weight:float=.0,action_pen_weight:float|None=None,apply_action_penalty:bool=False)->tuple[dict[str,Any],np.ndarray]:
-	if action_pen_weight is not None and soc_pen_weight==.0:soc_pen_weight=float(action_pen_weight)
+def merge_action_info_into_step_info(info:dict[str,Any],action_info:dict[str,np.ndarray]|None)->dict[str,Any]:
+	reject_removed_step_info_fields(info,entrypoint='merge_action_info_into_step_info')
 	updated=dict(info)
-	if action_info is None:existing_penalty=np.asarray(updated.get('r_soc_pen',updated.get('r_action_pen',np.zeros_like(np.asarray(updated.get('e_bat',[]),dtype=np.float32)))),dtype=np.float32);return updated,existing_penalty
+	if action_info is None:return updated
+	reject_removed_step_info_fields(action_info,entrypoint='merge_action_info_into_step_info(action_info)')
 	updated.update({key:np.asarray(value,dtype=np.float32)for(key,value)in action_info.items()})
 	for(source_key,target_key)in{'battery_power_req_kw':'e_bat_req','battery_power_exec_kw':'e_bat','pv_effective_req_kw':'pv_effective_req','pv_effective_exec_kw':'pv_effective','pv_curtail_req_kw':'pv_curtail_req','pv_curtail_exec_kw':'pv_curtail','pv_action_exec':'pv_action'}.items():
 		if source_key in action_info:updated[target_key]=np.asarray(action_info[source_key],dtype=np.float32)
-	n_agents=int(np.asarray(updated.get('e_bat',np.zeros(0,dtype=np.float32))).reshape(-1).shape[0]);penalty=(float(soc_pen_weight)*np.asarray(action_info['soc_penalty_unweighted'],dtype=np.float32)).astype(np.float32)if apply_action_penalty else np.zeros((n_agents,),dtype=np.float32);updated['r_soc_pen']=updated['r_action_pen']=penalty;return updated,penalty
+	return updated
 def validate_executed_actions_numpy(safety_local:np.ndarray,actions:np.ndarray|list[np.ndarray],*,efficiency:float,dt_hours:float,soc_min:float,soc_max:float)->None:
 	action_array,_=_canonicalize_actions_numpy(actions,require_full_action_dim=True)
 	if np.any(~np.isfinite(action_array)):raise ValueError('Environment received non-finite action values.')

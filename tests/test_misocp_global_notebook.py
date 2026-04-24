@@ -83,9 +83,6 @@ def _make_mock_result() -> SimpleNamespace:
         feeder_purchase_cost_eur=1.3,
         feeder_export_subsidy_eur=0.0,
         feeder_net_cost_eur=1.3,
-        storage_purchase_cost_eur=0.125,
-        storage_sale_revenue_eur=0.1,
-        storage_total_profit_eur=-0.025,
         storage_charge_cost_eur=0.125,
         storage_discharge_revenue_eur=0.1,
         storage_profit_eur=-0.025,
@@ -193,13 +190,15 @@ def test_build_full_horizon_step_df_returns_expected_columns_and_values():
         "pv_raw_kw",
         "pv_curtail_kw",
         "pv_effective_kw",
+        "battery_power_kw",
         "battery_charge_kw",
         "battery_discharge_kw",
-        "storage_purchase_cost_eur_step",
-        "storage_sale_revenue_eur_step",
-        "storage_total_profit_eur_step",
-        "system_other_cost_eur_step",
-        "total_eur_step",
+        "storage_charge_cost_eur",
+        "storage_discharge_revenue_eur",
+        "storage_profit_eur",
+        "storage_objective_eur",
+        "system_other_cost_eur",
+        "total_eur",
         "agent_import_kw_total",
         "agent_export_kw_total",
         "grid_import_kw",
@@ -236,11 +235,11 @@ def test_build_full_horizon_step_df_returns_expected_columns_and_values():
     assert step_df["agent_root_gap_kw"].tolist() == [7.0, 5.0]
     assert step_df["balance_residual_kw"].tolist() == [1.0, -1.0]
     assert step_df["root_net_exchange_kw"].tolist() == [18.0, 17.0]
-    assert step_df["storage_purchase_cost_eur_step"].sum() == pytest.approx(result.storage_purchase_cost_eur)
-    assert step_df["storage_sale_revenue_eur_step"].sum() == pytest.approx(result.storage_sale_revenue_eur)
-    assert step_df["storage_total_profit_eur_step"].sum() == pytest.approx(result.storage_total_profit_eur)
-    assert step_df["system_other_cost_eur_step"].sum() == pytest.approx(result.system_other_cost_eur)
-    assert step_df["total_eur_step"].sum() == pytest.approx(result.total_eur)
+    assert step_df["storage_charge_cost_eur"].sum() == pytest.approx(result.storage_charge_cost_eur)
+    assert step_df["storage_discharge_revenue_eur"].sum() == pytest.approx(result.storage_discharge_revenue_eur)
+    assert step_df["storage_profit_eur"].sum() == pytest.approx(result.storage_profit_eur)
+    assert step_df["system_other_cost_eur"].sum() == pytest.approx(result.system_other_cost_eur)
+    assert step_df["total_eur"].sum() == pytest.approx(result.total_eur)
     assert step_df["aggregate_stored_energy_kwh"].tolist() == [22.5, 22.0]
 
 
@@ -266,8 +265,8 @@ def test_system_other_cost_reconciles_storage_profit_with_total():
     step_df = build_full_horizon_step_df(problem, full_input, result)
     assert "agent_purchase_cost_eur_step" not in step_df.columns
     assert "feeder_purchase_cost_eur_step" not in step_df.columns
-    assert float(step_df["total_eur_step"].sum()) == pytest.approx(
-        float(step_df["storage_total_profit_eur_step"].sum() - step_df["system_other_cost_eur_step"].sum())
+    assert float(step_df["total_eur"].sum()) == pytest.approx(
+        float(step_df["storage_profit_eur"].sum() - step_df["system_other_cost_eur"].sum())
     )
 
 
@@ -282,9 +281,9 @@ def test_solver_summary_helper_returns_expected_fields():
     assert solver_summary["node_count"] == 12.0
     assert solver_summary["num_quadratic_constraints"] == result.model_size.num_quadratic_constraints
     assert solver_summary["economics_scope"] == "storage_only"
-    assert solver_summary["storage_purchase_cost_eur"] == pytest.approx(result.storage_purchase_cost_eur)
-    assert solver_summary["storage_sale_revenue_eur"] == pytest.approx(result.storage_sale_revenue_eur)
-    assert solver_summary["storage_total_profit_eur"] == pytest.approx(result.storage_total_profit_eur)
+    assert solver_summary["storage_charge_cost_total_eur"] == pytest.approx(result.storage_charge_cost_eur)
+    assert solver_summary["storage_discharge_revenue_total_eur"] == pytest.approx(result.storage_discharge_revenue_eur)
+    assert solver_summary["storage_profit_total_eur"] == pytest.approx(result.storage_profit_eur)
     assert solver_summary["system_other_cost_eur"] == pytest.approx(result.system_other_cost_eur)
     assert solver_summary["total_eur"] == pytest.approx(result.total_eur)
     assert solver_summary["physical_tiebreaker_weight"] == pytest.approx(1e-6)

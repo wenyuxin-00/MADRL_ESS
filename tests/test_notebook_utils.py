@@ -1,4 +1,5 @@
 from scripts.mainline_madrl import resolve_madrl_model_root
+from scripts.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
 
 
 def test_resolve_madrl_model_root_supports_auto_discovery_and_algo_dir(tmp_path):
@@ -10,6 +11,47 @@ def test_resolve_madrl_model_root_supports_auto_discovery_and_algo_dir(tmp_path)
     (run_root / "_meta" / "train_result.json").write_text("{}", encoding="utf-8")
     (algo_dir / "actor_agent_0_ep_10.pth").write_bytes(b"actor")
     (algo_dir / "critic_agent_0_ep_10.pth").write_bytes(b"critic")
+    manifest = build_checkpoint_manifest(
+        algorithm="MATD3",
+        saved_episode_tag=10,
+        episodes_completed=10,
+        total_steps=96,
+        num_envs=1,
+        episode_limit=96,
+        save_dir=algo_dir,
+        training_contract={
+            "reward_contract": "madrl_incremental_storage_reward_v1",
+            "rollout_soc_contract": "continuous_soc_v1",
+            "train_window_days": 7,
+            "window_stride_days": 1,
+            "train_episode_limit": 672,
+            "test_episode_limit": 96,
+            "shared_data_schema_version": 7,
+            "shared_data_signature": None,
+            "observation_feature_set": {
+                "local": ["calendar_time", "soc"],
+                "sequence": ["wholesale_price"],
+                "adjacency_type": "identity",
+            },
+            "observation_normalization_signature": None,
+            "storage_objective_mode": "max_storage_profit",
+            "storage_price_mode": "real_time_price",
+            "storage_profit_weight": 1.0,
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "soc_boundary_epsilon": 0.02,
+            "soc_boundary_margin": 0.02,
+            "export_subsidy_eur_per_kwh": 0.0,
+            "import_price_markup_eur_per_kwh": 0.0,
+            "w_voltage_pen": 400.0,
+            "w_line_pen": 0.0,
+            "w_trafo_pen": 10.0,
+            "train_init_soc_low": 0.2,
+            "train_init_soc_high": 0.8,
+        },
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
 
     discovered = resolve_madrl_model_root(
         algorithm="MATD3",

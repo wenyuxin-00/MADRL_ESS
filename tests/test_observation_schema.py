@@ -18,7 +18,14 @@ def test_dataset_returns_canonical_signals_schema(tmp_path):
 
     episode = dataset.get_episode(0)
 
-    assert set(episode.keys()) == {"signals", "meta", "history_signals", "history_length", "history_timestamps"}
+    assert set(episode.keys()) == {
+        "signals",
+        "meta",
+        "history_signals",
+        "history_length",
+        "history_timestamps",
+        "bootstrap_signals",
+    }
     assert {"wholesale_price", "load", "pv"}.issubset(set(episode["signals"].keys()))
     assert episode["signals"]["wholesale_price"].shape == (cfg.env.episode_limit,)
     assert episode["signals"]["load"].shape == (cfg.env.episode_limit, cfg.env.num_agents)
@@ -33,15 +40,17 @@ def test_env_returns_structured_observation_schema(tmp_path):
     obs, reset_info = env.reset(episode_idx=0)
     expected_local_dim = env.observation_schema["local"][1]
 
-    assert set(obs.keys()) == {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency", "safety_local"}
+    assert set(obs.keys()) == {"local", "wholesale_price_seq", "wholesale_price_rank_seq", "load_seq", "pv_seq", "adjacency", "safety_local"}
     assert obs["local"].shape == (cfg.env.num_agents, expected_local_dim)
     assert obs["wholesale_price_seq"].shape == (cfg.env.future_horizon + 1,)
+    assert obs["wholesale_price_rank_seq"].shape == (cfg.env.future_horizon + 1,)
     assert obs["load_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
     assert obs["pv_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
     assert obs["adjacency"].shape == (cfg.env.num_agents, cfg.env.num_agents)
     assert obs["safety_local"].shape == (cfg.env.num_agents, 5)
     assert env.observation_layout["safety_local"]["scope"] == "per_agent"
     assert env.observation_layout["wholesale_price_seq"]["scope"] == "shared"
+    assert env.observation_layout["wholesale_price_rank_seq"]["scope"] == "shared"
     assert env.observation_layout["load_seq"]["scope"] == "per_agent"
     assert env.observation_layout["pv_seq"]["scope"] == "per_agent"
     assert "episode_idx" in reset_info
@@ -81,6 +90,7 @@ def test_dummy_vec_env_stacks_structured_observations(tmp_path):
         expected_local_dim = vec_env.envs[0].observation_schema["local"][1]
         assert obs["local"].shape == (2, cfg.env.num_agents, expected_local_dim)
         assert obs["wholesale_price_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert obs["safety_local"].shape == (2, cfg.env.num_agents, 5)
         assert len(reset_infos) == 2
@@ -88,6 +98,7 @@ def test_dummy_vec_env_stacks_structured_observations(tmp_path):
         action_list = [np.zeros((2, 2), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, info_list = vec_env.step(action_list)
 
+        assert next_obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert next_obs["load_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert next_obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert reward.shape == (2, cfg.env.num_agents, 1)
@@ -108,6 +119,7 @@ def test_subproc_vec_env_stacks_structured_observations(tmp_path):
         assert obs["local"].shape[:2] == (2, cfg.env.num_agents)
         assert obs["local"].shape[-1] > 0
         assert obs["wholesale_price_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert obs["safety_local"].shape == (2, cfg.env.num_agents, 5)
         assert len(reset_infos) == 2
@@ -115,6 +127,7 @@ def test_subproc_vec_env_stacks_structured_observations(tmp_path):
         action_list = [np.zeros((2, 2), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, info_list = vec_env.step(action_list)
 
+        assert next_obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert next_obs["load_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert next_obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert reward.shape == (2, cfg.env.num_agents, 1)

@@ -23,7 +23,7 @@ def test_key_notebooks_are_utf8_without_bom() -> None:
     notebook_paths = [
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_base.ipynb",
-        repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
+        repo_root / "notebooks" / "madrl" / "compare.ipynb",
     ]
     offenders = [path for path in notebook_paths if path.read_bytes().startswith(b"\xef\xbb\xbf")]
     assert offenders == []
@@ -34,7 +34,7 @@ def test_key_notebooks_do_not_contain_placeholder_text() -> None:
     notebook_paths = [
         repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb",
         repo_root / "notebooks" / "madrl" / "train_base.ipynb",
-        repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb",
+        repo_root / "notebooks" / "madrl" / "compare.ipynb",
     ]
     for path in notebook_paths:
         text = path.read_text(encoding="utf-8")
@@ -46,7 +46,7 @@ def test_notebook_defaults_stay_portable() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     forecast_text = _load_notebook_text(repo_root / "notebooks" / "forecast" / "forecast_lstm.ipynb")
     madrl_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "train_base.ipynb")
-    grid_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "grid_network_analysis.ipynb")
+    grid_text = _load_notebook_text(repo_root / "notebooks" / "madrl" / "compare.ipynb")
 
     required_forecast_tokens = [
         "force_retrain_forecast = False",
@@ -70,8 +70,8 @@ def test_notebook_defaults_stay_portable() -> None:
 
     required_madrl_tokens = [
         "force_retrain_madrl = False",
-        "load_madrl_training_result",
-        "run_external_train_mainline",
+        "bootstrap_madrl_notebook_shared_data",
+        "resolve_madrl_notebook_training",
         "save_rollout_record(",
     ]
     forbidden_madrl_tokens = [

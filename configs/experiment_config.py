@@ -37,9 +37,11 @@ MADRL_NOTEBOOK_SPECS = {
         "algorithm": "MATD3",
         "env_name": "GridTrainBase",
         "experiment_name": "train_base",
-        "num_envs": 1,
+        "num_envs": 4,
         "reward": {
-            "w_soc_pen": 1,
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
             "w_voltage_pen": 0.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 0.0,
@@ -53,7 +55,9 @@ MADRL_NOTEBOOK_SPECS = {
         "experiment_name": "train_base_safe",
         "num_envs": 4,
         "reward": {
-            "w_soc_pen": 1,
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
             "w_voltage_pen": 400.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 10.0,
@@ -67,7 +71,9 @@ MADRL_NOTEBOOK_SPECS = {
         "experiment_name": "train_projection_safe",
         "num_envs": 4,
         "reward": {
-            "w_soc_pen": 1,
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
             "w_voltage_pen": 400.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 10.0,
@@ -155,15 +161,15 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    train_episodes: int = 100
+    train_episodes: int = 300
     max_train_steps: int | None = None
-    num_envs: int = 1
+    num_envs: int = 4
     vec_env_type: str = "dummy"
     parallel_episode_sampling: str = "unique_active"
     batch_size: int = 512
     buffer_size: int = int(1e6)
     update_interval: int = 1
-    updates_per_step: int = 1
+    updates_per_step: int = 2
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
     noise_std_init: float = 0.4
@@ -190,22 +196,35 @@ class TrainConfig:
 class EnvConfig:
     num_agents: int = len(CANONICAL_AGENT_PROFILES)
     episode_limit: int = 96
-    future_horizon: int = 24
+    train_window_days: int = 7
+    window_stride_days: int = 1
+    future_horizon: int = 48
     battery_capacity: float | list[float] = field(default_factory=lambda: list(CANONICAL_BATTERY_CAPACITY_KWH))
     max_charge_rate: float = 0.5
     efficiency: float = 0.95
     init_soc: float = 0.5
+    train_init_soc_low: float = 0.20
+    train_init_soc_high: float = 0.80
     dt: float = 0.25
     soc_min: float = 0.05
     soc_max: float = 0.95
     soc_target: float = 0.05
+
+    def resolved_train_episode_limit(self) -> int:
+        return int(self.episode_limit) * int(self.train_window_days)
+
+    def resolved_test_episode_limit(self) -> int:
+        return int(self.episode_limit)
+
+    def resolved_window_stride_steps(self) -> int:
+        return int(self.episode_limit) * int(self.window_stride_days)
 
 
 @dataclass
 class ForecastConfig:
     type: str = "perfect"
     target_signals: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
-    history_window: int = 96 * 1
+    history_window: int = 96 * 2
     load_model_mode: str = "per_agent"
     load_time_feature_mode: str = "hour_week_year"
     pv_time_feature_mode: str = "hour_week_year"
@@ -237,15 +256,16 @@ class MpcConfig:
 
 @dataclass
 class RewardConfig:
-    w_soc_pen: float = 0.5
-    # export_subsidy_eur_per_kwh: float = 0.079
+    action_boundary_penalty_weight: float = 0.05
+    soc_boundary_regularization_weight: float = 0.005
+    throughput_bonus_eur_per_kwh_max: float = 0.002
+    soc_boundary_epsilon: float = 0.02
+    soc_boundary_margin: float = 0.02
     export_subsidy_eur_per_kwh: float = 0.0
     import_price_markup_eur_per_kwh: float = 0.0
     storage_objective_mode: str = "max_storage_profit"
     storage_price_mode: str = "real_time_price"
     storage_profit_weight: float = 1.0
-    local_action_penalty_mode: str = "diagnostic_only"
-    local_action_penalty_weight: float = 0.0
     w_voltage_pen: float = 400.0
     w_line_pen: float = 0.0
     w_trafo_pen: float = 10.0
@@ -254,7 +274,7 @@ class RewardConfig:
 @dataclass
 class ObsConfig:
     local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
-    sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price", "load", "pv"])
+    sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price", "wholesale_price_rank", "load", "pv"])
     adjacency_type: str = "identity"
     normalization_enabled: bool = True
     wholesale_price_normalization: str = "robust_tanh"

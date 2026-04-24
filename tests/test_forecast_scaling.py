@@ -648,6 +648,7 @@ def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> N
     cfg.forecast.lstm_num_layers = 2
     cfg.forecast.lstm_dropout = 0.1
     cfg.forecast.auto_train_missing = False
+    cfg.forecast.signal_training_overrides = {}
 
     train_signal_lstm(cfg, "wholesale_price", show_progress=False)
 
@@ -673,6 +674,7 @@ def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> N
     assert "pv" in inventory_before["mismatched_signals"]
 
     cfg.forecast.lstm_num_layers = 1
+    cfg.forecast.signal_training_overrides = {"wholesale_price": {"num_layers": 2}}
     train_signal_lstm(cfg, "pv", show_progress=False)
 
     inventory_after = _collect_lstm_artifact_inventory(cfg)
@@ -693,6 +695,7 @@ def test_ensure_lstm_artifacts_is_preflight_only_when_auto_train_missing_is_fals
     cfg.forecast.lstm_num_layers = 2
     cfg.forecast.lstm_dropout = 0.1
     cfg.forecast.auto_train_missing = False
+    cfg.forecast.signal_training_overrides = {}
 
     train_signal_lstm(cfg, "wholesale_price", show_progress=False)
 

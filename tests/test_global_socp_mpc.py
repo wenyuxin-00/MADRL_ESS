@@ -163,12 +163,10 @@ def test_global_misocp_problem_uses_only_grid_binaries_and_returns_solution(tmp_
         assert result.storage_profit_eur == pytest.approx(
             result.storage_discharge_revenue_eur - result.storage_charge_cost_eur
         )
-        assert result.storage_purchase_cost_eur == pytest.approx(expected_storage_charge_cost)
-        assert result.storage_sale_revenue_eur == pytest.approx(expected_storage_discharge_revenue)
-        assert result.storage_total_profit_eur == pytest.approx(
-            result.storage_sale_revenue_eur - result.storage_purchase_cost_eur
-        )
-        assert result.total_eur == pytest.approx(result.storage_total_profit_eur - result.system_other_cost_eur)
+        assert not hasattr(result, "storage_purchase_cost_eur")
+        assert not hasattr(result, "storage_sale_revenue_eur")
+        assert not hasattr(result, "storage_total_profit_eur")
+        assert result.total_eur == pytest.approx(result.storage_profit_eur - result.system_other_cost_eur)
         assert result.storage_objective_eur == pytest.approx(-result.storage_profit_eur)
         assert result.stage1_primary_objective_eur == pytest.approx(
             result.storage_objective_eur + result.throughput_regularization_eur,

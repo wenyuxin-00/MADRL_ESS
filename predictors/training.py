@@ -105,7 +105,7 @@ def _prosumer_value_columns(agent_profiles:Sequence[str],signal_name:str)->tuple
 def _resolve_prosumer_signal_source(cfg,data_dir:Path,signal_name:str)->SignalCsvSource|None:
 	known_components={f"load_{comp}"for comp in cfg.data.load_components}
 	if signal_name not in{WHOLESALE_PRICE_SIGNAL,'load','pv'}and signal_name not in known_components:return
-	agent_profiles=[str(profile)for profile in cfg.data.agent_profiles];base_signal='load'if signal_name in known_components else signal_name;value_columns=_prosumer_value_columns(agent_profiles,base_signal);return SignalCsvSource(signal_name=signal_name,value_columns=value_columns,column_indices=tuple(range(len(value_columns))),dataset_kwargs={'train':_resolve_prosumer_dataset_kwargs(cfg,data_dir,'train'),'test':_resolve_prosumer_dataset_kwargs(cfg,data_dir,'test')})
+	agent_profiles=[str(profile)for profile in cfg.data.agent_profiles];base_signal='load'if signal_name in known_components else signal_name;value_columns=_prosumer_value_columns(agent_profiles,base_signal);return SignalCsvSource(source_kind='prosumer',signal_name=signal_name,value_columns=value_columns,column_indices=tuple(range(len(value_columns))),dataset_kwargs={'train':_resolve_prosumer_dataset_kwargs(cfg,data_dir,'train'),'test':_resolve_prosumer_dataset_kwargs(cfg,data_dir,'test')})
 def _load_prosumer_signal_frame_from_source(source:SignalCsvSource,signal_name:str,*,split:str)->tuple[pd.DataFrame,tuple[str,...]]:
 	dataset_kwargs=dict((source.dataset_kwargs or{}).get(split)or{})
 	if not dataset_kwargs:raise ValueError(f"Prosumer signal source is missing dataset kwargs for split='{split}'.")
@@ -118,7 +118,7 @@ def select_signal_source_columns(source:SignalCsvSource,column_indices:Sequence[
 	selected_indices=tuple(int(index)for index in column_indices)
 	if not selected_indices:raise ValueError('select_signal_source_columns requires at least one column index.')
 	if any(index<0 or index>=len(source.value_columns)for index in selected_indices):raise IndexError(f"Requested column_indices={selected_indices} for source columns={source.value_columns}.")
-	return SignalCsvSource(signal_name=source.signal_name,value_columns=tuple(source.value_columns[index]for index in selected_indices),column_indices=selected_indices,dataset_kwargs=copy.deepcopy(source.dataset_kwargs))
+	return SignalCsvSource(source_kind=getattr(source,'source_kind',None),signal_name=source.signal_name,value_columns=tuple(source.value_columns[index]for index in selected_indices),column_indices=selected_indices,dataset_kwargs=copy.deepcopy(source.dataset_kwargs))
 def _load_signal_segment_frames_from_source(source:SignalCsvSource,signal_name:str,*,split:str,drop_warmup:bool=False)->tuple[pd.DataFrame,list[pd.DataFrame],tuple[str,...]]:
 	frame,value_columns=_load_prosumer_signal_frame_from_source(source,signal_name,split=split)
 	if drop_warmup and'is_warmup'in frame.columns:frame=frame.loc[~frame['is_warmup'].astype(bool)].copy()

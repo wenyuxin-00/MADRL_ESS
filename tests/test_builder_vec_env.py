@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from envs.subproc_vec_env import SubprocVecEnv
@@ -9,6 +11,8 @@ from tests.support.helpers import make_case_dir, make_smoke_config, write_prosum
 def _make_multiday_cfg(tmp_path, *, evaluation_days: int = 5):
     cfg = make_smoke_config(tmp_path, algorithm="MADDPG")
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.env.future_horizon = 1
     cfg.train.max_train_steps = cfg.train.train_episodes * cfg.env.episode_limit
     write_prosumer_processed_dataset(
@@ -81,6 +85,23 @@ def test_build_env_rejects_shared_data_future_horizon_mismatch(tmp_path):
     assert "data_controls.future_horizon=1" in message
     assert "cfg.env.future_horizon=2" in message
     assert "forecast_lstm.ipynb" in message
+
+
+def test_build_env_rejects_old_shared_data_schema_6(tmp_path):
+    case_dir = make_case_dir(tmp_path, "shared_data_env_schema_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
+    root_manifest_path = shared_data.shared_data_dir / "manifest.json"
+    test_manifest_path = shared_data.shared_data_dir / "test" / "manifest.json"
+    for manifest_path in (root_manifest_path, test_manifest_path):
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["schema_version"] = 6
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
+
+    with pytest.raises(ValueError, match="schema_version=6"):
+        build_env(cfg, mode="test")
 
 
 def test_build_env_resets_runtime_split_state_without_shared_data(tmp_path):
