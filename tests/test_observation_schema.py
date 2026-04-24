@@ -40,21 +40,57 @@ def test_env_returns_structured_observation_schema(tmp_path):
     obs, reset_info = env.reset(episode_idx=0)
     expected_local_dim = env.observation_schema["local"][1]
 
-    assert set(obs.keys()) == {"local", "wholesale_price_seq", "wholesale_price_rank_seq", "load_seq", "pv_seq", "adjacency", "safety_local"}
+    assert set(obs.keys()) == {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency", "safety_local"}
     assert obs["local"].shape == (cfg.env.num_agents, expected_local_dim)
-    assert obs["wholesale_price_seq"].shape == (cfg.env.future_horizon + 1,)
-    assert obs["wholesale_price_rank_seq"].shape == (cfg.env.future_horizon + 1,)
+    assert obs["wholesale_price_relative_seq"].shape == (cfg.env.future_horizon + 1,)
+    assert obs["wholesale_price_spread_seq"].shape == (cfg.env.future_horizon + 1,)
     assert obs["load_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
     assert obs["pv_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
     assert obs["adjacency"].shape == (cfg.env.num_agents, cfg.env.num_agents)
     assert obs["safety_local"].shape == (cfg.env.num_agents, 5)
     assert env.observation_layout["safety_local"]["scope"] == "per_agent"
-    assert env.observation_layout["wholesale_price_seq"]["scope"] == "shared"
-    assert env.observation_layout["wholesale_price_rank_seq"]["scope"] == "shared"
+    assert env.observation_layout["wholesale_price_relative_seq"]["scope"] == "shared"
+    assert env.observation_layout["wholesale_price_spread_seq"]["scope"] == "shared"
     assert env.observation_layout["load_seq"]["scope"] == "per_agent"
     assert env.observation_layout["pv_seq"]["scope"] == "per_agent"
     assert "episode_idx" in reset_info
     env.close()
+
+
+def test_window_relative_price_features_are_computed_from_current_horizon():
+    builder = DefaultObservationBuilder(
+        local_features=[],
+        sequence_features=["wholesale_price_relative", "wholesale_price_spread"],
+        future_horizon=2,
+        price_spread_scale_eur_per_kwh=0.20,
+    )
+    env = SimpleNamespace(
+        cur_step=0,
+        forecaster=None,
+        get_signal=lambda name: np.asarray([0.20, 0.10, 0.30], dtype=np.float32),
+    )
+
+    relative = builder._sequence_feature(env, "wholesale_price_relative")
+    spread = builder._sequence_feature(env, "wholesale_price_spread")
+
+    np.testing.assert_allclose(relative, np.asarray([0.0, -1.0, 1.0], dtype=np.float32), atol=1e-6)
+    np.testing.assert_allclose(spread, np.ones((3,), dtype=np.float32), atol=1e-6)
+
+
+def test_flat_window_relative_price_feature_is_zero():
+    builder = DefaultObservationBuilder(
+        local_features=[],
+        sequence_features=["wholesale_price_relative", "wholesale_price_spread"],
+        future_horizon=2,
+    )
+    env = SimpleNamespace(
+        cur_step=0,
+        forecaster=None,
+        get_signal=lambda name: np.asarray([0.12, 0.12, 0.12], dtype=np.float32),
+    )
+
+    assert np.allclose(builder._sequence_feature(env, "wholesale_price_relative"), np.zeros((3,), dtype=np.float32))
+    assert np.allclose(builder._sequence_feature(env, "wholesale_price_spread"), np.zeros((3,), dtype=np.float32))
 
 
 def test_precomputed_sequence_feature_rejects_horizon_mismatch():
@@ -89,8 +125,8 @@ def test_dummy_vec_env_stacks_structured_observations(tmp_path):
         obs, reset_infos = vec_env.reset()
         expected_local_dim = vec_env.envs[0].observation_schema["local"][1]
         assert obs["local"].shape == (2, cfg.env.num_agents, expected_local_dim)
-        assert obs["wholesale_price_seq"].shape == (2, cfg.env.future_horizon + 1)
-        assert obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_relative_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_spread_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert obs["safety_local"].shape == (2, cfg.env.num_agents, 5)
         assert len(reset_infos) == 2
@@ -98,7 +134,8 @@ def test_dummy_vec_env_stacks_structured_observations(tmp_path):
         action_list = [np.zeros((2, 2), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, info_list = vec_env.step(action_list)
 
-        assert next_obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert next_obs["wholesale_price_relative_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert next_obs["wholesale_price_spread_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert next_obs["load_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert next_obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert reward.shape == (2, cfg.env.num_agents, 1)
@@ -118,8 +155,8 @@ def test_subproc_vec_env_stacks_structured_observations(tmp_path):
         obs, reset_infos = vec_env.reset()
         assert obs["local"].shape[:2] == (2, cfg.env.num_agents)
         assert obs["local"].shape[-1] > 0
-        assert obs["wholesale_price_seq"].shape == (2, cfg.env.future_horizon + 1)
-        assert obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_relative_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert obs["wholesale_price_spread_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert obs["safety_local"].shape == (2, cfg.env.num_agents, 5)
         assert len(reset_infos) == 2
@@ -127,7 +164,8 @@ def test_subproc_vec_env_stacks_structured_observations(tmp_path):
         action_list = [np.zeros((2, 2), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         next_obs, reward, terminated, truncated, info_list = vec_env.step(action_list)
 
-        assert next_obs["wholesale_price_rank_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert next_obs["wholesale_price_relative_seq"].shape == (2, cfg.env.future_horizon + 1)
+        assert next_obs["wholesale_price_spread_seq"].shape == (2, cfg.env.future_horizon + 1)
         assert next_obs["load_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert next_obs["pv_seq"].shape == (2, cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert reward.shape == (2, cfg.env.num_agents, 1)

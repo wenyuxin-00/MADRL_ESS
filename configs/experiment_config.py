@@ -37,7 +37,18 @@ MADRL_NOTEBOOK_SPECS = {
         "algorithm": "MATD3",
         "env_name": "GridTrainBase",
         "experiment_name": "train_base",
+        "prediction_mode": "perfect",
         "num_envs": 4,
+        "battery": {
+            "battery_capacity": list(CANONICAL_BATTERY_CAPACITY_KWH),
+            "max_charge_rate": 0.5,
+            "init_soc": 0.05,
+            "train_init_soc_low": 0.05,
+            "train_init_soc_high": 0.05,
+            "soc_min": 0.05,
+            "soc_max": 0.95,
+            "soc_target": 0.5,
+        },
         "reward": {
             "action_boundary_penalty_weight": 0.05,
             "soc_boundary_regularization_weight": 0.005,
@@ -161,24 +172,30 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    train_episodes: int = 300
+    train_episodes: int = 50
     max_train_steps: int | None = None
-    num_envs: int = 4
+    num_envs: int = 2
     vec_env_type: str = "dummy"
     parallel_episode_sampling: str = "unique_active"
     batch_size: int = 512
-    buffer_size: int = int(1e6)
+    buffer_size: int = int(1e5)
     update_interval: int = 1
-    updates_per_step: int = 2
+    updates_per_step: int = 1
+    learning_starts_transitions: int | None = None
+    actor_learning_starts_transitions: int | None = None
+    n_step_return: int = 96
+    feasible_random_exploration_start: float = 0.50
+    feasible_random_exploration_end: float = 0.05
+    feasible_random_exploration_decay_steps: int = 50_000
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
     noise_std_init: float = 0.4
     noise_std_min: float = 0.2
     noise_decay_steps: float = 3e5
     use_noise_decay: bool = True
-    show_progress: bool = True
+    show_progress: bool = False
     # The bar advances per interaction step; postfix metrics refresh every N completed episodes.
-    progress_episode_interval: int = 10
+    progress_episode_interval: int = 1
     progress_write_interval_seconds: float = 5.0
 
     def resolved_max_train_steps(self, episode_limit: int) -> int:
@@ -191,6 +208,26 @@ class TrainConfig:
             return 0.0
         return float((self.noise_std_init - self.noise_std_min) / self.noise_decay_steps)
 
+    def resolved_learning_starts_transitions(self, train_episode_limit: int) -> int:
+        if self.learning_starts_transitions is not None:
+            return max(0, int(self.learning_starts_transitions))
+        return max(int(train_episode_limit) * int(self.num_envs) * 2, int(self.batch_size))
+
+    def resolved_actor_learning_starts_transitions(self, train_episode_limit: int) -> int:
+        critic_start = self.resolved_learning_starts_transitions(train_episode_limit)
+        if self.actor_learning_starts_transitions is not None:
+            return max(critic_start, int(self.actor_learning_starts_transitions))
+        return max(critic_start, int(train_episode_limit) * int(self.num_envs) * 3)
+
+    def resolved_feasible_random_exploration(self, total_steps: int) -> float:
+        start = float(self.feasible_random_exploration_start)
+        end = float(self.feasible_random_exploration_end)
+        decay_steps = int(self.feasible_random_exploration_decay_steps)
+        if decay_steps <= 0:
+            return end
+        fraction = min(max(float(total_steps) / float(decay_steps), 0.0), 1.0)
+        return float(start + (end - start) * fraction)
+
 
 @dataclass
 class EnvConfig:
@@ -200,7 +237,7 @@ class EnvConfig:
     window_stride_days: int = 1
     future_horizon: int = 48
     battery_capacity: float | list[float] = field(default_factory=lambda: list(CANONICAL_BATTERY_CAPACITY_KWH))
-    max_charge_rate: float = 0.5
+    max_charge_rate: float = 0.1
     efficiency: float = 0.95
     init_soc: float = 0.5
     train_init_soc_low: float = 0.20
@@ -208,7 +245,7 @@ class EnvConfig:
     dt: float = 0.25
     soc_min: float = 0.05
     soc_max: float = 0.95
-    soc_target: float = 0.05
+    soc_target: float = 0.5
 
     def resolved_train_episode_limit(self) -> int:
         return int(self.episode_limit) * int(self.train_window_days)
@@ -274,7 +311,7 @@ class RewardConfig:
 @dataclass
 class ObsConfig:
     local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
-    sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price", "wholesale_price_rank", "load", "pv"])
+    sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"])
     adjacency_type: str = "identity"
     normalization_enabled: bool = True
     wholesale_price_normalization: str = "robust_tanh"
@@ -284,6 +321,7 @@ class ObsConfig:
     normalization_clip_low_quantile: float = 0.01
     normalization_clip_high_quantile: float = 0.99
     wholesale_price_tanh_scale: float = 2.0
+    wholesale_price_spread_scale_eur_per_kwh: float = 0.20
     load_tanh_scale: float = 3.0
     pv_tanh_scale: float = 2.0
 

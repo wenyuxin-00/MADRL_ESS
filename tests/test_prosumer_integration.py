@@ -68,7 +68,7 @@ def test_build_env_smoke_uses_processed_prosumer_dataset(tmp_path):
 
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["agent_profiles"] == ["SFH12", "SFH14"]
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
     finally:

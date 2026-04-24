@@ -6,7 +6,10 @@ import torch
 
 from controllers.madrl.safety_projector import (
     build_safety_local_numpy,
+    compute_action_gap_metrics_torch,
     enforce_local_action_feasibility_torch,
+    map_actor_output_to_soc_feasible_action_torch,
+    sample_feasible_random_battery_action_torch,
     validate_executed_actions_numpy,
 )
 from controllers.madrl.base_agent import get_agent_cls
@@ -131,6 +134,72 @@ def test_local_feasibility_clamps_round_trip_residual_before_validation():
     assert residual_info["soc_penalty_unweighted"][0, 0].item() > 0.0
 
 
+def test_actor_output_maps_to_soc_feasible_action_range():
+    safety_local_np = build_safety_local_numpy(
+        soc=np.asarray([0.05, 0.95, 0.50, 0.14], dtype=np.float32),
+        load_raw=np.ones(4, dtype=np.float32),
+        pv_raw=np.zeros(4, dtype=np.float32),
+        battery_capacity_kwh=np.asarray([5.0, 5.0, 20.0, 5.0], dtype=np.float32),
+        p_max_kw=np.asarray([2.5, 2.5, 2.5, 2.5], dtype=np.float32),
+    )
+    safety_local_t = torch.as_tensor(safety_local_np, dtype=torch.float32).unsqueeze(0)
+    raw_action_t = torch.tensor(
+        [[[-1.0, 0.2], [1.0, -0.2], [0.5, 0.0], [-1.0, 0.4]]],
+        dtype=torch.float32,
+    )
+
+    mapped_t, mapping_info = map_actor_output_to_soc_feasible_action_torch(
+        safety_local_t,
+        raw_action_t,
+        efficiency=0.95,
+        dt_hours=1.0,
+        soc_min=0.05,
+        soc_max=0.95,
+    )
+    gap_info = compute_action_gap_metrics_torch(safety_local_t, mapped_t, mapped_t)
+
+    assert mapped_t[0, 0, 0].item() == pytest.approx(0.0, abs=1e-7)
+    assert mapped_t[0, 1, 0].item() == pytest.approx(0.0, abs=1e-7)
+    assert mapped_t[0, 2, 0].item() == pytest.approx(0.5, abs=1e-6)
+    assert mapped_t[0, 3, 0].item() == pytest.approx(-0.171, rel=1e-3)
+    np.testing.assert_allclose(mapped_t[0, :, 1].cpu().numpy(), raw_action_t[0, :, 1].cpu().numpy(), atol=1e-7)
+    assert mapping_info["actor_action_mapping_gap"][0, 0].item() > 0.0
+    assert torch.allclose(gap_info["soc_penalty_unweighted"], torch.zeros_like(gap_info["soc_penalty_unweighted"]))
+
+
+def test_feasible_random_exploration_samples_inside_soc_bounds():
+    safety_local_np = build_safety_local_numpy(
+        soc=np.asarray([0.05, 0.95, 0.50], dtype=np.float32),
+        load_raw=np.ones(3, dtype=np.float32),
+        pv_raw=np.zeros(3, dtype=np.float32),
+        battery_capacity_kwh=np.asarray([5.0, 5.0, 20.0], dtype=np.float32),
+        p_max_kw=np.asarray([2.5, 2.5, 2.5], dtype=np.float32),
+    )
+    safety_local_t = torch.as_tensor(safety_local_np, dtype=torch.float32).unsqueeze(0)
+    reference_action_t = torch.zeros((1, 3, 2), dtype=torch.float32)
+
+    sampled_t, info = sample_feasible_random_battery_action_torch(
+        safety_local_t,
+        reference_action_t,
+        efficiency=0.95,
+        dt_hours=1.0,
+        soc_min=0.05,
+        soc_max=0.95,
+    )
+    gap_info = compute_action_gap_metrics_torch(safety_local_t, sampled_t, sampled_t)
+
+    assert sampled_t[0, 0, 0].item() >= -1e-7
+    assert sampled_t[0, 1, 0].item() <= 1e-7
+    assert torch.all(sampled_t[..., 0] <= 1.0)
+    assert torch.all(sampled_t[..., 0] >= -1.0)
+    assert torch.allclose(gap_info["soc_penalty_unweighted"], torch.zeros_like(gap_info["soc_penalty_unweighted"]))
+    assert set(info) == {
+        "feasible_random_battery_action",
+        "feasible_random_battery_power_kw",
+        "feasible_random_unit_sample",
+    }
+
+
 def test_madrl_controller_projection_path_uses_projected_action_as_request():
     cfg = SimpleNamespace(env=SimpleNamespace(efficiency=0.95, dt=1.0, soc_min=0.05, soc_max=0.95))
     dummy_agents = [
@@ -205,10 +274,11 @@ def test_madrl_controller_base_path_hard_clamps_raw_action():
     executed_actions, action_info = controller._postprocess_joint_actions(obs, raw_actions)
 
     assert action_info is not None
-    assert action_info["battery_action_req"][0] == pytest.approx(-1.0)
+    assert action_info["battery_action_req"][0] == pytest.approx(0.0, abs=1e-7)
     assert action_info["battery_action_exec"][0] == pytest.approx(0.0, abs=1e-7)
-    assert action_info["battery_power_req_kw"][0] == pytest.approx(-2.5)
+    assert action_info["battery_power_req_kw"][0] == pytest.approx(0.0, abs=1e-7)
     assert action_info["battery_power_exec_kw"][0] == pytest.approx(0.0, abs=1e-7)
-    assert action_info["controller_action_gap"][0] == pytest.approx(1.0)
-    assert action_info["soc_penalty_unweighted"][0] == pytest.approx(1.0)
+    assert action_info["controller_action_gap"][0] == pytest.approx(0.0, abs=1e-7)
+    assert action_info["soc_penalty_unweighted"][0] == pytest.approx(0.0, abs=1e-7)
+    assert action_info["actor_action_mapping_gap"][0] == pytest.approx(1.0)
     np.testing.assert_allclose(executed_actions[0], np.asarray([0.0, 0.2], dtype=np.float32), atol=1e-7)

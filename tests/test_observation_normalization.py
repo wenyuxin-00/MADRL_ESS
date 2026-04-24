@@ -10,6 +10,7 @@ from tests.support.helpers import make_case_dir, make_smoke_config
 def test_observation_builder_returns_normalized_obs_and_raw_view(tmp_path):
     case_dir = make_case_dir(tmp_path, "obs_normalized_vs_raw")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
     env = build_env(cfg, mode="test")
 
     try:
@@ -34,6 +35,7 @@ def test_observation_builder_returns_normalized_obs_and_raw_view(tmp_path):
 def test_test_observation_uses_train_year_price_stats(tmp_path):
     case_dir = make_case_dir(tmp_path, "obs_train_frozen_price_stats")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
 
     price_path = case_dir / "data" / "processed" / "prosumer" / "price.csv"
     frame = pd.read_csv(price_path)

@@ -12,10 +12,11 @@ import pytest
 
 from configs.profiles import compose_experiment_config, recommended_gpu_fast_num_envs
 from envs.rewards.NormalReward import NormalReward
+from scripts.checkpoints import ACTOR_ACTION_MAPPING_CONTRACT, TRAINING_HEALTH_CONTRACT
 from scripts.mainline_madrl import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
 from scripts.train import apply_controller_action_postprocessing
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
-from predictors.shared_data import ensure_madrl_shared_data
+from predictors.shared_data import PRICE_OBSERVATION_CONTRACT, SHARED_DATA_SCHEMA_VERSION, ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
@@ -147,11 +148,32 @@ def test_apply_controller_action_postprocessing_keeps_reward_and_merges_action_i
 def test_apply_train_controls_sets_progress_episode_interval(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
-    _apply_train_controls(cfg, {"progress_episode_interval": 7, "train_window_days": 3, "window_stride_days": 2})
+    _apply_train_controls(
+        cfg,
+        {
+            "progress_episode_interval": 7,
+            "train_window_days": 3,
+            "window_stride_days": 2,
+            "learning_starts_transitions": 11,
+            "actor_learning_starts_transitions": 17,
+            "n_step_return": 5,
+            "feasible_random_exploration_start": 0.4,
+            "feasible_random_exploration_end": 0.1,
+            "feasible_random_exploration_decay_steps": 99,
+            "discount_gamma": 0.997,
+        },
+    )
 
     assert cfg.train.progress_episode_interval == 7
     assert cfg.env.train_window_days == 3
     assert cfg.env.window_stride_days == 2
+    assert cfg.train.learning_starts_transitions == 11
+    assert cfg.train.actor_learning_starts_transitions == 17
+    assert cfg.train.n_step_return == 5
+    assert cfg.train.feasible_random_exploration_start == pytest.approx(0.4)
+    assert cfg.train.feasible_random_exploration_end == pytest.approx(0.1)
+    assert cfg.train.feasible_random_exploration_decay_steps == 99
+    assert cfg.algo.gamma == pytest.approx(0.997)
 
 
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
@@ -248,6 +270,13 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "buffer_size": 32,
         "update_interval": 1,
         "updates_per_step": 1,
+        "learning_starts_transitions": 0,
+        "actor_learning_starts_transitions": 0,
+        "n_step_return": 1,
+        "feasible_random_exploration_start": 0.0,
+        "feasible_random_exploration_end": 0.0,
+        "feasible_random_exploration_decay_steps": 1,
+        "discount_gamma": 0.9995,
         "policy_update_freq": 2,
         "use_noise_decay": True,
         "show_progress": True,
@@ -354,7 +383,24 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert "training_contract_signature" in result
     assert "training_contract" in result
     assert "action_mapping_contract" not in result["training_contract"]
+    assert result["training_contract"]["actor_action_mapping_contract"] == ACTOR_ACTION_MAPPING_CONTRACT
+    assert result["training_contract"]["training_health_contract"] == TRAINING_HEALTH_CONTRACT
+    assert result["training_contract"]["price_observation_contract"] == PRICE_OBSERVATION_CONTRACT
+    assert result["training_contract"]["shared_data_schema_version"] == SHARED_DATA_SCHEMA_VERSION
+    assert result["training_contract"]["discount_gamma"] == pytest.approx(0.9995)
     assert result["training_contract"]["action_boundary_penalty_weight"] == pytest.approx(0.05)
+    assert result["training_contract"]["learning_starts_transitions"] == 0
+    assert result["training_contract"]["actor_learning_starts_transitions"] == 0
+    assert result["training_contract"]["n_step_return"] == 1
+    assert result["training_contract"]["feasible_random_exploration_start"] == pytest.approx(0.0)
+    assert result["training_contract"]["observation_feature_set"]["sequence"] == [
+        "wholesale_price_relative",
+        "wholesale_price_spread",
+        "load",
+        "pv",
+    ]
+    assert "training_health" in result
+    assert "training_health" in reward_summary
     assert result["checkpoint_info"]["training_contract_signature"] == result["training_contract_signature"]
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
@@ -440,6 +486,13 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "buffer_size": 32,
         "update_interval": 1,
         "updates_per_step": 1,
+        "learning_starts_transitions": 0,
+        "actor_learning_starts_transitions": 0,
+        "n_step_return": 1,
+        "feasible_random_exploration_start": 0.0,
+        "feasible_random_exploration_end": 0.0,
+        "feasible_random_exploration_decay_steps": 1,
+        "discount_gamma": 0.9995,
         "policy_update_freq": 2,
         "use_noise_decay": False,
         "show_progress": False,

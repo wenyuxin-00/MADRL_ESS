@@ -6,9 +6,12 @@ import json
 import pytest
 
 from predictors.shared_data import (
+    PRICE_OBSERVATION_CONTRACT,
     SHARED_DATA_CACHE_LAYOUT,
     SHARED_DATA_SCHEMA_VERSION,
     WHOLESALE_PRICE_RANK_SEQ_FIELD,
+    WHOLESALE_PRICE_RELATIVE_SEQ_FIELD,
+    WHOLESALE_PRICE_SPREAD_SEQ_FIELD,
     build_shared_data_status_summary,
     ensure_madrl_shared_data,
     select_shared_data_episode_indices,
@@ -76,8 +79,13 @@ def test_ensure_madrl_shared_data_reuses_existing_directory(tmp_path) -> None:
     assert first.shared_data_dir == second.shared_data_dir
     assert first.manifest["schema_version"] == SHARED_DATA_SCHEMA_VERSION
     assert first.manifest["cache_layout"] == SHARED_DATA_CACHE_LAYOUT
+    assert first.manifest["price_observation_contract"] == PRICE_OBSERVATION_CONTRACT
     assert WHOLESALE_PRICE_RANK_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
     assert WHOLESALE_PRICE_RANK_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
+    assert WHOLESALE_PRICE_RELATIVE_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
+    assert WHOLESALE_PRICE_RELATIVE_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
+    assert WHOLESALE_PRICE_SPREAD_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
+    assert WHOLESALE_PRICE_SPREAD_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
 
 
 def test_ensure_madrl_shared_data_cross_year_keeps_signature_when_test_window_changes(tmp_path) -> None:
@@ -180,6 +188,7 @@ def test_ensure_madrl_shared_data_accepts_shared_artifact_meta_without_agent_ind
             "schema_version": SHARED_DATA_SCHEMA_VERSION,
             "cache_layout": SHARED_DATA_CACHE_LAYOUT,
             "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+            "price_observation_contract": PRICE_OBSERVATION_CONTRACT,
             "split": split,
             "num_episodes": 0,
             "episode_length": int(cfg.env.episode_limit),
@@ -187,7 +196,11 @@ def test_ensure_madrl_shared_data_accepts_shared_artifact_meta_without_agent_ind
             "sequence_length": int(cfg.env.future_horizon) + 1,
             "split_controls": {"split": split},
             "episodes": [],
-            "files": {WHOLESALE_PRICE_RANK_SEQ_FIELD: f"{WHOLESALE_PRICE_RANK_SEQ_FIELD}.npy"},
+            "files": {
+                WHOLESALE_PRICE_RANK_SEQ_FIELD: f"{WHOLESALE_PRICE_RANK_SEQ_FIELD}.npy",
+                WHOLESALE_PRICE_RELATIVE_SEQ_FIELD: f"{WHOLESALE_PRICE_RELATIVE_SEQ_FIELD}.npy",
+                WHOLESALE_PRICE_SPREAD_SEQ_FIELD: f"{WHOLESALE_PRICE_SPREAD_SEQ_FIELD}.npy",
+            },
         }
         (split_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return manifest

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np,torch
-from controllers.madrl.safety_projector import action_info_to_numpy,compute_action_gap_metrics_torch,enforce_local_action_feasibility_torch
+from controllers.madrl.safety_projector import action_info_to_numpy,compute_action_gap_metrics_torch,enforce_local_action_feasibility_torch,map_actor_output_to_soc_feasible_action_torch
 from scripts.utils.torch_runtime import add_batch_dim,to_torch_nested
 def _override_soc_penalty_metrics(action_info:dict[str,torch.Tensor]|None,penalty_source_info:dict[str,torch.Tensor]|None)->dict[str,torch.Tensor]|None:
 	if action_info is None:return penalty_source_info
@@ -9,6 +9,11 @@ def _override_soc_penalty_metrics(action_info:dict[str,torch.Tensor]|None,penalt
 	for key in('soc_penalty_unweighted',):
 		if key in penalty_source_info:merged[key]=penalty_source_info[key]
 	return merged
+def _merge_action_info(*parts:dict[str,torch.Tensor]|None)->dict[str,torch.Tensor]|None:
+	merged:dict[str,torch.Tensor]={}
+	for part in parts:
+		if part is not None:merged.update(part)
+	return merged or None
 class MADRLController:
 	def __init__(self,agent_n:list,noise_std:float=.0,projector=None)->None:self.agent_n=list(agent_n);self.noise_std=float(noise_std);default_projector=getattr(self.agent_n[0],'safety_projector',None)if self.agent_n else None;self.projector=projector if projector is not None else default_projector;self.device=getattr(self.agent_n[0],'device',torch.device('cpu'))if self.agent_n else torch.device('cpu');(self.last_action_info):dict[str,np.ndarray]|None=None
 	def reset(self)->None:self.last_action_info=None
@@ -27,9 +32,11 @@ class MADRLController:
 			if has_batch_dim:return[action_batch[:,agent_id].copy()for agent_id in range(action_batch.shape[1])],None
 			return[action_batch[0,agent_id].copy()for agent_id in range(action_batch.shape[1])],None
 		with torch.inference_mode():
-			if self.projector is not None:projected_t=self.projector.project_actions_from_safety_local(obs_t['safety_local'],action_t);executed_t,projector_residual_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],projected_t,efficiency=float(getattr(self.agent_n[0].cfg.env,'efficiency',1.)),dt_hours=float(getattr(self.agent_n[0].cfg.env,'dt',1.)),soc_min=float(getattr(self.agent_n[0].cfg.env,'soc_min',.0)),soc_max=float(getattr(self.agent_n[0].cfg.env,'soc_max',1.)));action_info=compute_action_gap_metrics_torch(obs_t['safety_local'],projected_t,executed_t)
-			else:executed_t,action_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],action_t,efficiency=float(getattr(self.agent_n[0].cfg.env,'efficiency',1.)),dt_hours=float(getattr(self.agent_n[0].cfg.env,'dt',1.)),soc_min=float(getattr(self.agent_n[0].cfg.env,'soc_min',.0)),soc_max=float(getattr(self.agent_n[0].cfg.env,'soc_max',1.)));projector_residual_info=action_info
-			action_info=_override_soc_penalty_metrics(action_info,projector_residual_info)
+			feasibility_kwargs={'efficiency':float(getattr(self.agent_n[0].cfg.env,'efficiency',1.)),'dt_hours':float(getattr(self.agent_n[0].cfg.env,'dt',1.)),'soc_min':float(getattr(self.agent_n[0].cfg.env,'soc_min',.0)),'soc_max':float(getattr(self.agent_n[0].cfg.env,'soc_max',1.))}
+			mapped_t,mapping_info=map_actor_output_to_soc_feasible_action_torch(obs_t['safety_local'],action_t,**feasibility_kwargs)
+			if self.projector is not None:projected_t=self.projector.project_actions_from_safety_local(obs_t['safety_local'],mapped_t);executed_t,projector_residual_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],projected_t,**feasibility_kwargs);gap_info=compute_action_gap_metrics_torch(obs_t['safety_local'],projected_t,executed_t)
+			else:executed_t,projector_residual_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],mapped_t,**feasibility_kwargs);gap_info=compute_action_gap_metrics_torch(obs_t['safety_local'],mapped_t,executed_t)
+			action_info=_merge_action_info(_override_soc_penalty_metrics(gap_info,projector_residual_info),mapping_info)
 		executed_np=executed_t.to(dtype=torch.float32).cpu().numpy();action_info_np=action_info_to_numpy(action_info)
 		if has_batch_dim:return[executed_np[:,agent_id].copy()for agent_id in range(executed_np.shape[1])],action_info_np
 		single_env_info=None

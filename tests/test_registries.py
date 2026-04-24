@@ -64,6 +64,6 @@ def test_default_compose_config_targets_grid_training_mainline():
     assert cfg.grid.sb_code == "1-LV-rural1--0-sw"
     assert cfg.grid.agent_bus_ids == [12, 4, 2]
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["wholesale_price", "wholesale_price_rank", "load", "pv"]
+    assert cfg.obs.sequence_features == ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"]
     assert cfg.safety.enabled is False
     assert get_agent_cls("MATD3_SAFE_POC").__name__ == "MATD3SafePOC"

@@ -31,6 +31,8 @@ HAS_WORKING_GUROBI_LICENSE = _has_working_gurobi_license()
 
 from configs.profiles import summarize_experiment
 from configs.experiment_config import ExperimentConfig
+from predictors.shared_data import PRICE_OBSERVATION_CONTRACT
+from scripts.checkpoints import ACTOR_ACTION_MAPPING_CONTRACT, TRAINING_HEALTH_CONTRACT
 from scripts.mainline_compare import (
     _get_local_mpc_solver,
     build_compare_economic_table,
@@ -40,6 +42,13 @@ from scripts.mainline_compare import (
     compare_rollout_metrics,
     validate_compare_model_bundles,
 )
+
+_CURRENT_COMPARE_TRAINING_CONTRACT = {
+    "actor_action_mapping_contract": ACTOR_ACTION_MAPPING_CONTRACT,
+    "training_health_contract": TRAINING_HEALTH_CONTRACT,
+    "price_observation_contract": PRICE_OBSERVATION_CONTRACT,
+    "discount_gamma": 0.999,
+}
 from scripts.utils.grid_notebook_workflow import (
     FORECAST_EVAL_MODE,
     NORMAL_PREDICTION_MODE,
@@ -207,7 +216,7 @@ def test_apply_notebook_experiment_settings_updates_cfg_for_user_controls(tmp_pa
     )
 
     assert cfg.obs.local_features == ["calendar_time", "soc"]
-    assert cfg.obs.sequence_features == ["wholesale_price", "wholesale_price_rank", "load", "pv"]
+    assert cfg.obs.sequence_features == ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"]
     assert cfg.env.future_horizon == 24
     assert cfg.forecast.type == "lstm"
     assert cfg.data.test_start_date == "2019-01-01"
@@ -342,6 +351,7 @@ def test_resolve_madrl_notebook_training_builds_external_launch_payloads(tmp_pat
 
     case_dir = make_case_dir(tmp_path, "madrl_notebook_training_external")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "lstm"
     (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
     cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
     cfg.runtime.shared_data_signature = "sig-123"
@@ -371,10 +381,11 @@ def test_resolve_madrl_notebook_training_builds_external_launch_payloads(tmp_pat
 
     assert captured["env_name"] == "GridTrainBase"
     assert captured["project_root"] == case_dir.resolve()
-    assert captured["train_controls"]["show_progress"] is True
+    assert captured["train_controls"]["show_progress"] is False
     assert captured["train_controls"]["progress_episode_interval"] == int(cfg.train.progress_episode_interval)
     assert captured["train_controls"]["train_window_days"] == int(cfg.env.train_window_days)
     assert captured["train_controls"]["window_stride_days"] == int(cfg.env.window_stride_days)
+    assert captured["train_controls"]["discount_gamma"] == pytest.approx(cfg.algo.gamma)
     assert captured["experiment_controls"]["runtime_controls"]["shared_data_dir"] == str((case_dir / "shared_data").resolve())
     assert captured["experiment_controls"]["runtime_controls"]["shared_data_signature"] == "sig-123"
     assert resolved["model_root"].endswith("run_a")
@@ -387,6 +398,7 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
 
     case_dir = make_case_dir(tmp_path, "madrl_notebook_training_load")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "lstm"
     (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
     cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
     cfg.runtime.shared_data_signature = "sig-456"
@@ -433,6 +445,13 @@ def test_resolve_madrl_notebook_training_loads_and_validates_saved_run(tmp_path,
                 "train_controls": {
                     "train_window_days": int(cfg.env.train_window_days),
                     "window_stride_days": int(cfg.env.window_stride_days),
+                    "learning_starts_transitions": cfg.train.learning_starts_transitions,
+                    "actor_learning_starts_transitions": cfg.train.actor_learning_starts_transitions,
+                    "n_step_return": int(cfg.train.n_step_return),
+                    "feasible_random_exploration_start": float(cfg.train.feasible_random_exploration_start),
+                    "feasible_random_exploration_end": float(cfg.train.feasible_random_exploration_end),
+                    "feasible_random_exploration_decay_steps": int(cfg.train.feasible_random_exploration_decay_steps),
+                    "discount_gamma": float(cfg.algo.gamma),
                 },
             },
         }
@@ -457,6 +476,7 @@ def test_resolve_madrl_notebook_training_rejects_mismatched_saved_run(tmp_path, 
 
     case_dir = make_case_dir(tmp_path, "madrl_notebook_training_mismatch")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "lstm"
     (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
     cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
     cfg.runtime.shared_data_signature = "sig-789"
@@ -500,6 +520,7 @@ def test_resolve_madrl_notebook_training_rejects_mismatched_window_contract(tmp_
 
     case_dir = make_case_dir(tmp_path, "madrl_notebook_training_window_mismatch")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "lstm"
     cfg.env.train_window_days = 7
     (case_dir / "shared_data").mkdir(parents=True, exist_ok=True)
     cfg.runtime.shared_data_dir = str((case_dir / "shared_data").resolve())
@@ -544,6 +565,13 @@ def test_resolve_madrl_notebook_training_rejects_mismatched_window_contract(tmp_
                 "train_controls": {
                     "train_window_days": 1,
                     "window_stride_days": int(cfg.env.window_stride_days),
+                    "learning_starts_transitions": cfg.train.learning_starts_transitions,
+                    "actor_learning_starts_transitions": cfg.train.actor_learning_starts_transitions,
+                    "n_step_return": int(cfg.train.n_step_return),
+                    "feasible_random_exploration_start": float(cfg.train.feasible_random_exploration_start),
+                    "feasible_random_exploration_end": float(cfg.train.feasible_random_exploration_end),
+                    "feasible_random_exploration_decay_steps": int(cfg.train.feasible_random_exploration_decay_steps),
+                    "discount_gamma": float(cfg.algo.gamma),
                 },
             },
         },
@@ -645,6 +673,7 @@ def test_bootstrap_madrl_notebook_shared_data_rejects_missing_signature(tmp_path
 def test_resolve_madrl_notebook_training_requires_shared_data_runtime_contract(tmp_path):
     case_dir = make_case_dir(tmp_path, "madrl_notebook_training_requires_shared_data")
     cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "lstm"
     spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
 
     with pytest.raises(ValueError, match="shared_data_record.json"):
@@ -655,6 +684,39 @@ def test_resolve_madrl_notebook_training_requires_shared_data_runtime_contract(t
             root=case_dir,
             notebook_path="notebooks/madrl/train_base.ipynb",
         )
+
+
+def test_resolve_madrl_notebook_training_allows_perfect_without_shared_data(tmp_path, monkeypatch):
+    import scripts.mainline_madrl as mainline_madrl
+
+    case_dir = make_case_dir(tmp_path, "madrl_notebook_training_perfect")
+    cfg = make_smoke_config(case_dir, algorithm="MATD3")
+    cfg.forecast.type = "perfect"
+    spec = {"algorithm": "MATD3", "experiment_name": "train_base", "env_name": "GridTrainBase"}
+    captured: dict[str, object] = {}
+
+    def _fake_run_external_train_mainline(**kwargs):
+        captured.update(kwargs)
+        return {
+            "result": {"model_root": str(case_dir / "models" / "run_perfect"), "episodes_completed": 1},
+            "launch_info": {
+                "result_json_path": str(case_dir / "models" / "run_perfect" / "_meta" / "train_result.json")
+            },
+        }
+
+    monkeypatch.setattr(mainline_madrl, "run_external_train_mainline", _fake_run_external_train_mainline)
+
+    resolved = resolve_madrl_notebook_training(
+        cfg,
+        spec=spec,
+        force_retrain_madrl=True,
+        root=case_dir,
+        notebook_path="notebooks/madrl/train_base.ipynb",
+    )
+
+    assert captured["data_controls"]["prediction_mode"] == "perfect"
+    assert "runtime_controls" not in captured["experiment_controls"]
+    assert resolved["model_root"].endswith("run_perfect")
 
 
 def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tmp_path, monkeypatch):
@@ -682,6 +744,7 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
     monkeypatch.setattr(mainline_madrl, "run_external_train_mainline", _fake_run_external_train_mainline)
 
     base_cfg = make_smoke_config(case_dir / "base_case", algorithm="MATD3")
+    base_cfg.forecast.type = "lstm"
     base_cfg.runtime.shared_data_dir = str(shared_data_dir)
     base_cfg.runtime.shared_data_signature = "sig-aligned"
     base_cfg.reward.action_boundary_penalty_weight = 0.5
@@ -694,6 +757,7 @@ def test_resolve_madrl_notebook_training_keeps_base_and_safe_payloads_aligned(tm
     base_cfg.reward.w_trafo_pen = 0.0
 
     safe_cfg = make_smoke_config(case_dir / "safe_case", algorithm="MATD3")
+    safe_cfg.forecast.type = "lstm"
     safe_cfg.runtime.shared_data_dir = str(shared_data_dir)
     safe_cfg.runtime.shared_data_signature = "sig-aligned"
     safe_cfg.reward.action_boundary_penalty_weight = 2.0
@@ -2081,7 +2145,7 @@ def test_validate_compare_model_bundles_rejects_missing_or_mismatched_models(tmp
         payloads = {
             "train_result.json": {
                 "model_root": str(run_dir),
-                "training_contract": {},
+                "training_contract": dict(_CURRENT_COMPARE_TRAINING_CONTRACT),
             },
             "experiment_controls.json": experiment_controls,
             "data_controls.json": data_controls,
@@ -2162,7 +2226,7 @@ def test_validate_compare_model_bundles_accepts_matching_triplet_with_different_
         payloads = {
             "train_result.json": {
                 "model_root": str(run_dir),
-                "training_contract": {},
+                "training_contract": dict(_CURRENT_COMPARE_TRAINING_CONTRACT),
             },
             "experiment_controls.json": shared_experiment,
             "data_controls.json": shared_data,
@@ -2194,7 +2258,7 @@ def test_validate_compare_model_bundles_rejects_removed_legacy_reward_keys(tmp_p
     payloads = {
         "train_result.json": {
             "model_root": str((tmp_path / "train_base").resolve()),
-            "training_contract": {},
+            "training_contract": dict(_CURRENT_COMPARE_TRAINING_CONTRACT),
         },
         "experiment_controls.json": {
             "seed": 0,

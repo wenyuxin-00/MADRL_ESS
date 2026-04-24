@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from configs.experiment_config import ExperimentConfig
+from configs.experiment_config import ExperimentConfig, MADRL_NOTEBOOK_SPECS
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 
 
@@ -15,10 +15,28 @@ def test_experiment_config_defaults_align_with_madrl_notebooks() -> None:
     assert cfg.data.test_end_date == "2020-04-15"
     assert int(cfg.env.num_agents) == 3
     assert int(cfg.env.episode_limit) == 96
+    assert int(cfg.train.train_episodes) == 50
     assert int(cfg.env.train_window_days) == 7
     assert int(cfg.env.window_stride_days) == 1
     assert int(cfg.env.resolved_train_episode_limit()) == 96 * 7
     assert int(cfg.env.future_horizon) == 48
+    assert cfg.algo.gamma == 0.999
+    assert int(cfg.train.n_step_return) == 96
+    assert int(cfg.train.resolved_actor_learning_starts_transitions(cfg.env.resolved_train_episode_limit())) == 96 * 7 * cfg.train.num_envs * 3
+    assert cfg.train.feasible_random_exploration_start == 0.50
+    assert cfg.train.feasible_random_exploration_end == 0.05
+    assert int(cfg.train.feasible_random_exploration_decay_steps) == 50_000
+    assert cfg.env.max_charge_rate == 0.1
+    assert cfg.env.init_soc == 0.5
+    assert cfg.env.train_init_soc_low == 0.20
+    assert cfg.env.train_init_soc_high == 0.80
+    assert cfg.env.soc_target == 0.5
+
+    train_base_battery = MADRL_NOTEBOOK_SPECS["train_base"]["battery"]
+    assert train_base_battery["max_charge_rate"] == 0.5
+    assert train_base_battery["init_soc"] == 0.05
+    assert train_base_battery["train_init_soc_low"] == 0.05
+    assert train_base_battery["train_init_soc_high"] == 0.05
 
 
 def test_data_config_resolved_scale_defaults_follow_global_values() -> None:

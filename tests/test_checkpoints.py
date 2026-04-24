@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from scripts.checkpoints import (
+    ACTOR_ACTION_MAPPING_CONTRACT,
     LATEST_CHECKPOINT_MANIFEST,
+    TRAINING_HEALTH_CONTRACT,
     TRAINING_CONTRACT_KEY,
     TRAINING_CONTRACT_SIGNATURE_KEY,
     build_checkpoint_manifest,
@@ -16,23 +18,35 @@ from scripts.checkpoints import (
     resolve_checkpoint_to_load,
     write_checkpoint_manifest,
 )
+from predictors.shared_data import PRICE_OBSERVATION_CONTRACT, SHARED_DATA_SCHEMA_VERSION
 from tests.support.helpers import make_case_dir
 
 TEST_TRAINING_CONTRACT = {
     "reward_contract": "madrl_incremental_storage_reward_v1",
     "rollout_soc_contract": "continuous_soc_v1",
+    "actor_action_mapping_contract": ACTOR_ACTION_MAPPING_CONTRACT,
+    "training_health_contract": TRAINING_HEALTH_CONTRACT,
+    "price_observation_contract": PRICE_OBSERVATION_CONTRACT,
+    "discount_gamma": 0.999,
     "train_window_days": 7,
     "window_stride_days": 1,
     "train_episode_limit": 672,
     "test_episode_limit": 96,
-    "shared_data_schema_version": 7,
+    "learning_starts_transitions": 5376,
+    "actor_learning_starts_transitions": 8064,
+    "n_step_return": 96,
+    "feasible_random_exploration_start": 0.5,
+    "feasible_random_exploration_end": 0.05,
+    "feasible_random_exploration_decay_steps": 50000,
+    "shared_data_schema_version": SHARED_DATA_SCHEMA_VERSION,
     "shared_data_signature": None,
     "observation_feature_set": {
         "local": ["calendar_time", "soc"],
-        "sequence": ["wholesale_price"],
+        "sequence": ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"],
         "adjacency_type": "identity",
     },
     "observation_normalization_signature": None,
+    "wholesale_price_spread_scale_eur_per_kwh": 0.2,
     "storage_objective_mode": "max_storage_profit",
     "storage_price_mode": "real_time_price",
     "storage_profit_weight": 1.0,
@@ -46,8 +60,8 @@ TEST_TRAINING_CONTRACT = {
     "w_voltage_pen": 400.0,
     "w_line_pen": 0.0,
     "w_trafo_pen": 10.0,
-    "train_init_soc_low": 0.2,
-    "train_init_soc_high": 0.8,
+    "train_init_soc_low": 0.05,
+    "train_init_soc_high": 0.05,
 }
 
 
@@ -151,6 +165,104 @@ def test_checkpoint_manifest_rejects_action_feasibility_regularization_contract(
     write_checkpoint_manifest(algo_dir, manifest)
 
     with pytest.raises(ValueError, match="action_feasibility_regularization_weight"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_old_action_mapping_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_old_action_mapping_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract={
+            **TEST_TRAINING_CONTRACT,
+            "action_mapping_contract": "soc_aware_actor_mapping_v1",
+        },
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="actor_action_mapping_contract"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_missing_price_observation_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_missing_price_observation_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    legacy_contract = dict(TEST_TRAINING_CONTRACT)
+    legacy_contract.pop("price_observation_contract")
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract=legacy_contract,
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="price_observation_contract"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_wrong_price_observation_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_wrong_price_observation_contract")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract={
+            **TEST_TRAINING_CONTRACT,
+            "price_observation_contract": "old_train_year_absolute_price_v1",
+        },
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="price_observation_contract"):
+        resolve_checkpoint_to_load(model_dir, "MADDPG")
+
+
+def test_checkpoint_manifest_rejects_missing_discount_gamma_contract(tmp_path):
+    case_dir = make_case_dir(tmp_path, "checkpoint_missing_discount_gamma")
+    model_dir = case_dir / "saved_models"
+    algo_dir = model_dir / "MADDPG"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    _touch_checkpoint_pair(algo_dir, episode_tag=7)
+    legacy_contract = dict(TEST_TRAINING_CONTRACT)
+    legacy_contract.pop("discount_gamma")
+    manifest = build_checkpoint_manifest(
+        algorithm="MADDPG",
+        saved_episode_tag=7,
+        episodes_completed=7,
+        total_steps=128,
+        num_envs=4,
+        episode_limit=32,
+        save_dir=algo_dir,
+        training_contract=legacy_contract,
+    )
+    write_checkpoint_manifest(algo_dir, manifest)
+
+    with pytest.raises(ValueError, match="discount_gamma"):
         resolve_checkpoint_to_load(model_dir, "MADDPG")
 
 

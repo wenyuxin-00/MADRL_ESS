@@ -303,7 +303,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["node_ids"] == cfg.grid.agent_bus_ids
 
         next_obs, reward, terminated, truncated, info = env.step(
@@ -333,7 +333,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = fallback_env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
 
         _, reward, terminated, truncated, info = fallback_env.step(

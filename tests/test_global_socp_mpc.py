@@ -45,6 +45,7 @@ def _make_global_mpc_cfg(tmp_path, label: str):
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.forecast.type = "perfect"
     cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
     return cfg
 
 

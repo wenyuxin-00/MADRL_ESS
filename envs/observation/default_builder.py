@@ -3,7 +3,9 @@ import numpy as np,pandas as pd
 from envs.observation.normalization import ObservationNormalizer
 _SAFETY_LOCAL_FIELDS=['soc_raw','load_raw','pv_raw','battery_capacity_kwh','p_max_kw']
 _LOCAL_DIMS={'time':2,'calendar_time':4,'wholesale_price':1,'load':1,'pv':1,'soc':1}
-_SEQUENCE_SCOPES={'wholesale_price':'shared','wholesale_price_rank':'shared','load':'per_agent','pv':'per_agent'}
+_SEQUENCE_SCOPES={'wholesale_price':'shared','wholesale_price_rank':'shared','wholesale_price_relative':'shared','wholesale_price_spread':'shared','load':'per_agent','pv':'per_agent'}
+_DEFAULT_PRICE_SPREAD_SCALE_EUR_PER_KWH=.20
+_EPSILON=1e-06
 _TS_FALLBACK=pd.Timestamp('2000-01-01 00:00:00+00:00')
 def _adjacency(n_agents:int,adjacency_type:str)->np.ndarray:
 	if adjacency_type=='identity':return np.eye(n_agents,dtype=np.float32)
@@ -19,13 +21,19 @@ def _rank_sequence(values:np.ndarray)->np.ndarray:
 	array=np.asarray(values,dtype=np.float32).reshape(-1);length=int(array.size)
 	if length<=1:return np.zeros((length,),dtype=np.float32)
 	order=np.argsort(array,kind='mergesort');ranks=np.empty((length,),dtype=np.float32);ranks[order]=np.arange(length,dtype=np.float32);return(ranks/np.float32(max(length-1,1))).astype(np.float32)
+def _relative_price_sequence(values:np.ndarray)->np.ndarray:
+	array=np.asarray(values,dtype=np.float32).reshape(-1);spread=float(np.max(array)-np.min(array))if array.size else .0
+	if spread<=_EPSILON:return np.zeros_like(array,dtype=np.float32)
+	return(2.*(array-np.min(array))/np.float32(spread)-1.).astype(np.float32)
+def _spread_price_sequence(values:np.ndarray,scale_eur_per_kwh:float)->np.ndarray:
+	array=np.asarray(values,dtype=np.float32).reshape(-1);spread=float(np.max(array)-np.min(array))if array.size else .0;scale=max(float(scale_eur_per_kwh),_EPSILON);value=np.float32(np.clip(spread/scale,.0,1.));return np.full_like(array,value,dtype=np.float32)
 def _signal_history(env,signal_name:str)->np.ndarray:signal=env.get_signal(signal_name);prefix=np.asarray(env.history_signals.get(signal_name),dtype=np.float32);return signal[:env.cur_step+1].copy()if prefix.size==0 else np.concatenate([prefix,signal[:env.cur_step+1]],axis=0).astype(np.float32,copy=False)
 class DefaultObservationBuilder:
-	def __init__(self,local_features:list[str],sequence_features:list[str],future_horizon:int,adjacency_type:str='identity',normalizer:ObservationNormalizer|None=None,precomputed:bool=False):
+	def __init__(self,local_features:list[str],sequence_features:list[str],future_horizon:int,adjacency_type:str='identity',normalizer:ObservationNormalizer|None=None,precomputed:bool=False,price_spread_scale_eur_per_kwh:float=_DEFAULT_PRICE_SPREAD_SCALE_EUR_PER_KWH):
 		self.local_feature_names=[str(name)for name in local_features];self.sequence_feature_names=[str(name)for name in sequence_features];unknown_local=sorted(set(self.local_feature_names)-set(_LOCAL_DIMS));unknown_sequence=sorted(set(self.sequence_feature_names)-set(_SEQUENCE_SCOPES))
 		if unknown_local:raise ValueError(f"Unknown local feature(s): {unknown_local}")
 		if unknown_sequence:raise ValueError(f"Unknown sequence feature(s): {unknown_sequence}")
-		self.future_horizon=int(future_horizon);self.sequence_length=self.future_horizon+1;self.adjacency_type=str(adjacency_type);self.normalizer=normalizer;self.precomputed=bool(precomputed);self.local_dim=sum(_LOCAL_DIMS[name]for name in self.local_feature_names)
+		self.future_horizon=int(future_horizon);self.sequence_length=self.future_horizon+1;self.adjacency_type=str(adjacency_type);self.normalizer=normalizer;self.precomputed=bool(precomputed);self.price_spread_scale_eur_per_kwh=float(price_spread_scale_eur_per_kwh);self.local_dim=sum(_LOCAL_DIMS[name]for name in self.local_feature_names)
 	def get_schema(self,n_agents:int)->dict[str,tuple[int,...]]:return{'local':(int(n_agents),self.local_dim),'adjacency':(int(n_agents),int(n_agents)),'safety_local':(int(n_agents),len(_SAFETY_LOCAL_FIELDS)),**{f"{name}_seq":(self.sequence_length,)if _SEQUENCE_SCOPES[name]=='shared'else(int(n_agents),self.sequence_length)for name in self.sequence_feature_names}}
 	def get_layout(self,n_agents:int)->dict[str,dict]:
 		layout={'local':{'group':'local','scope':'per_agent','dim':int(self.local_dim),'fields':list(self.local_feature_names)},'adjacency':{'group':'graph','scope':'shared','dim':int(n_agents),'fields':['adjacency']},'safety_local':{'group':'projector','scope':'per_agent','dim':len(_SAFETY_LOCAL_FIELDS),'fields':list(_SAFETY_LOCAL_FIELDS)}};schema=self.get_schema(n_agents)
@@ -55,6 +63,8 @@ class DefaultObservationBuilder:
 			if tuple(values.shape)!=expected_shape:raise ValueError(f"Precomputed observation horizon contract mismatch at DefaultObservationBuilder._sequence_feature(...): old shared-data object '{getattr(env,'_precomputed_data_dir',None)}' returned '{cache_key}' with shape {tuple(values.shape)}, but current cfg.env.future_horizon={self.future_horizon} and env.n={int(env.n)} require shape {expected_shape}. Expected shared-data generated with the current config. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun the consuming notebook or entrypoint.")
 			return values
 		if name=='wholesale_price_rank':return _rank_sequence(self._sequence_feature(env,'wholesale_price'))
+		if name=='wholesale_price_relative':return _relative_price_sequence(self._sequence_feature(env,'wholesale_price'))
+		if name=='wholesale_price_spread':return _spread_price_sequence(self._sequence_feature(env,'wholesale_price'),self.price_spread_scale_eur_per_kwh)
 		if getattr(env,'forecaster',None)is None:return _pad_sequence(env.get_signal(name),env.cur_step,self.sequence_length)
 		history=_signal_history(env,name);timestamps=list(dict(getattr(env,'episode_meta',{})).get('timestamps')or[]);history_timestamps=[*env.history_timestamps,*[str(timestamp)for timestamp in timestamps[:max(0,int(env.cur_step)+1)]]];return np.asarray(env.forecaster.predict(history,self.sequence_length,signal_name=name,history_timestamps=history_timestamps),dtype=np.float32)
 	def _build(self,env,*,normalize:bool)->dict[str,np.ndarray]:
