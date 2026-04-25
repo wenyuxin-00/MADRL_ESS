@@ -1,0 +1,7 @@
+{
+  "experiment_name": "train_base",
+  "checkpoint_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints",
+  "prediction_mode": "normal",
+  "run_label": "matd3_normal_train_base_ep1000_20260425_012418",
+  "model_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3\\normal\\train_base\\matd3_normal_train_base_ep1000_20260425_012418"
+}

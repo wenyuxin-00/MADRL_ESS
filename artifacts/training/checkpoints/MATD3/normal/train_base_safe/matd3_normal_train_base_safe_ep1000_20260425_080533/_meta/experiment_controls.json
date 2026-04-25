@@ -1,0 +1,72 @@
+{
+  "algorithm": "MATD3",
+  "seed": 0,
+  "runtime_mode": "performance",
+  "device_request": "cuda:0",
+  "forecast_controls": {
+    "target_signals": [
+      "wholesale_price",
+      "load",
+      "pv"
+    ],
+    "history_window": 192,
+    "load_model_mode": "per_agent",
+    "load_component_split": true,
+    "load_scaler_type": "robust",
+    "load_time_feature_mode": "hour_week_year",
+    "pv_time_feature_mode": "hour_week_year",
+    "load_hybrid_mode": "baseline_blend",
+    "load_baseline_mode": "last_value",
+    "pv_postprocess_mode": "physical_clip",
+    "auto_train_missing": false,
+    "artifact_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\forecast\\lstm",
+    "future_horizon": 48,
+    "signal_training_overrides": {
+      "pv": {
+        "hidden_size": 64,
+        "num_layers": 1,
+        "dropout": 0.1,
+        "batch_size": 1024,
+        "epochs": 20,
+        "lr": 0.0008
+      },
+      "wholesale_price": {
+        "hidden_size": 128,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "batch_size": 1024,
+        "epochs": 50,
+        "lr": 0.001,
+        "history_window": 192
+      },
+      "load": {
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.1,
+        "batch_size": 1024,
+        "epochs": 20,
+        "lr": 0.001
+      }
+    }
+  },
+  "reward_controls": {
+    "action_boundary_penalty_weight": 0.05,
+    "soc_boundary_regularization_weight": 0.005,
+    "throughput_bonus_eur_per_kwh_max": 0.002,
+    "soc_boundary_epsilon": 0.02,
+    "soc_boundary_margin": 0.02,
+    "w_voltage_pen": 400.0,
+    "w_line_pen": 0.0,
+    "w_trafo_pen": 10.0,
+    "export_subsidy_eur_per_kwh": 0.0,
+    "import_price_markup_eur_per_kwh": 0.0,
+    "storage_objective_mode": "max_storage_profit",
+    "storage_price_mode": "real_time_price",
+    "storage_profit_weight": 1.0
+  },
+  "safety_controls": {},
+  "runtime_controls": {
+    "shared_data_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\shared_data\\mainline\\6be0cd6f08bc0369",
+    "shared_data_signature": "6be0cd6f08bc0369"
+  }
+}

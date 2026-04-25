@@ -1,0 +1,28 @@
+{
+  "prediction_mode": "normal",
+  "agent_profiles": [
+    "SFH12",
+    "SFH18",
+    "SFH20"
+  ],
+  "agent_bus_ids": [
+    12,
+    4,
+    2
+  ],
+  "load_scale": [
+    20.0,
+    20.0,
+    20.0
+  ],
+  "pv_scale": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "future_horizon": 48,
+  "train_year": 2019,
+  "test_year": 2020,
+  "test_start_date": "2020-04-01",
+  "test_end_date": "2020-04-15"
+}

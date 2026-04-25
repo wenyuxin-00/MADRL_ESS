@@ -1,0 +1,7 @@
+{
+  "experiment_name": "train_projection_safe",
+  "checkpoint_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints",
+  "prediction_mode": "normal",
+  "run_label": "matd3_safe_poc_normal_train_projection_safe_ep1000_20260425_082353",
+  "model_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3_SAFE_POC\\normal\\train_projection_safe\\matd3_safe_poc_normal_train_projection_safe_ep1000_20260425_082353"
+}

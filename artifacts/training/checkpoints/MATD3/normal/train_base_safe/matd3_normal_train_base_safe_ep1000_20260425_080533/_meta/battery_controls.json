@@ -1,0 +1,15 @@
+{
+  "battery_capacity": [
+    100.0,
+    100.0,
+    100.0
+  ],
+  "max_charge_rate": 0.5,
+  "efficiency": 0.95,
+  "init_soc": 0.05,
+  "train_init_soc_low": 0.05,
+  "train_init_soc_high": 0.05,
+  "soc_min": 0.05,
+  "soc_max": 0.95,
+  "soc_target": 0.5
+}
