@@ -4,6 +4,7 @@ from envs.observation.normalization import ObservationNormalizer
 _SAFETY_LOCAL_FIELDS=['soc_raw','load_raw','pv_raw','battery_capacity_kwh','p_max_kw']
 _LOCAL_DIMS={'time':2,'calendar_time':4,'wholesale_price':1,'load':1,'pv':1,'soc':1}
 _SEQUENCE_SCOPES={'wholesale_price':'shared','wholesale_price_rank':'shared','wholesale_price_relative':'shared','wholesale_price_spread':'shared','load':'per_agent','pv':'per_agent'}
+_RAW_SEQUENCE_DEPENDENCIES={'wholesale_price_rank':('wholesale_price',),'wholesale_price_relative':('wholesale_price',),'wholesale_price_spread':('wholesale_price',)}
 _DEFAULT_PRICE_SPREAD_SCALE_EUR_PER_KWH=.20
 _EPSILON=1e-06
 _TS_FALLBACK=pd.Timestamp('2000-01-01 00:00:00+00:00')
@@ -40,8 +41,14 @@ class DefaultObservationBuilder:
 		for name in self.sequence_feature_names:layout[f"{name}_seq"]={'feature_name':name,'group':'sequence','scope':_SEQUENCE_SCOPES[name],'dim':1,'shape':schema[f"{name}_seq"]}
 		return layout
 	def zeros(self,n_agents:int)->dict[str,np.ndarray]:return{key:np.zeros(shape,dtype=np.float32)for(key,shape)in self.get_schema(n_agents).items()}
-	def build_raw(self,env)->dict[str,np.ndarray]:return self._build(env,normalize=False)
-	def build(self,env)->dict[str,np.ndarray]:return self._build(env,normalize=True)
+	def _raw_sequence_feature_names(self)->list[str]:
+		names=list(self.sequence_feature_names)
+		for feature_name in self.sequence_feature_names:
+			for dependency in _RAW_SEQUENCE_DEPENDENCIES.get(feature_name,()):
+				if dependency not in names:names.insert(0,dependency)
+		return names
+	def build_raw(self,env)->dict[str,np.ndarray]:return self._build(env,normalize=False,sequence_feature_names=self._raw_sequence_feature_names())
+	def build(self,env)->dict[str,np.ndarray]:return self._build(env,normalize=True,sequence_feature_names=self.sequence_feature_names)
 	def _normalize(self,feature_name:str,values:np.ndarray,*,normalize:bool,sequence:bool)->np.ndarray:
 		if not normalize or self.normalizer is None:return np.asarray(values,dtype=np.float32)
 		transform=self.normalizer.transform_sequence if sequence else self.normalizer.transform_local;return np.asarray(transform(feature_name,values),dtype=np.float32)
@@ -67,7 +74,7 @@ class DefaultObservationBuilder:
 		if name=='wholesale_price_spread':return _spread_price_sequence(self._sequence_feature(env,'wholesale_price'),self.price_spread_scale_eur_per_kwh)
 		if getattr(env,'forecaster',None)is None:return _pad_sequence(env.get_signal(name),env.cur_step,self.sequence_length)
 		history=_signal_history(env,name);timestamps=list(dict(getattr(env,'episode_meta',{})).get('timestamps')or[]);history_timestamps=[*env.history_timestamps,*[str(timestamp)for timestamp in timestamps[:max(0,int(env.cur_step)+1)]]];return np.asarray(env.forecaster.predict(history,self.sequence_length,signal_name=name,history_timestamps=history_timestamps),dtype=np.float32)
-	def _build(self,env,*,normalize:bool)->dict[str,np.ndarray]:
+	def _build(self,env,*,normalize:bool,sequence_feature_names:list[str])->dict[str,np.ndarray]:
 		local_parts=[self._normalize(name,self._local_feature(env,name),normalize=normalize,sequence=False)for name in self.local_feature_names];obs={'local':np.concatenate(local_parts,axis=1).astype(np.float32)if local_parts else np.zeros((env.n,0),dtype=np.float32),'adjacency':_adjacency(env.n,self.adjacency_type),'safety_local':env._current_safety_local().astype(np.float32)}
-		for name in self.sequence_feature_names:obs[f"{name}_seq"]=self._normalize(name,self._sequence_feature(env,name),normalize=normalize,sequence=True)
+		for name in sequence_feature_names:obs[f"{name}_seq"]=self._normalize(name,self._sequence_feature(env,name),normalize=normalize,sequence=True)
 		return obs

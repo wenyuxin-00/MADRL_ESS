@@ -151,7 +151,7 @@ def test_shift_primal_solution_start_shifts_controls_and_reuses_penultimate_term
     not HAS_WORKING_GUROBI_LICENSE,
     reason="a working Gurobi license is required for the real MPC solver behavior tests",
 )
-def test_local_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
+def test_local_gurobi_solver_ignores_export_subsidy_when_price_is_zero():
     power = gurobi_agent_mpc.solve_local_gurobi_mpc_action(
         import_price_seq=np.array([0.0], dtype=np.float32),
         load_seq=np.array([0.0], dtype=np.float32),
@@ -159,7 +159,7 @@ def test_local_gurobi_solver_exports_when_subsidy_makes_last_step_valuable():
         **{**_base_solver_kwargs(), "soc": 0.8, "export_subsidy_eur_per_kwh": 0.079},
     )
 
-    assert power < 0.0
+    assert power == pytest.approx(0.0, abs=1e-6)
 
 
 @pytest.mark.skipif(
@@ -265,6 +265,30 @@ def test_full_horizon_solver_matches_first_step_action():
         0.6 + full_horizon.signed_battery_kw[0],
         abs=1e-6,
     )
+
+
+@pytest.mark.skipif(
+    not HAS_WORKING_GUROBI_LICENSE,
+    reason="a working Gurobi license is required for the full-horizon MPC tests",
+)
+def test_full_horizon_objective_matches_storage_profit_objective():
+    result = gurobi_agent_mpc.solve_local_gurobi_mpc_full_horizon(
+        import_price_seq=np.array([0.10, 0.30], dtype=np.float32),
+        load_seq=np.array([0.0, 0.0], dtype=np.float32),
+        pv_seq=np.array([0.0, 0.0], dtype=np.float32),
+        **{**_base_solver_kwargs(), "soc": 0.5},
+    )
+
+    expected_objective = float(
+        np.sum(
+            (
+                np.array([0.10, 0.30], dtype=np.float32) * result.charge_kw
+                - np.array([0.10, 0.30], dtype=np.float32) * result.discharge_kw
+            )
+            * np.float32(1.0)
+        )
+    )
+    assert result.objective_eur == pytest.approx(expected_objective, abs=1e-6)
 
 
 @pytest.mark.skipif(

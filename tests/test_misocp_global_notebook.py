@@ -480,7 +480,12 @@ def test_misocp_global_notebook_code_cells_compile():
 
     assert len(code_cells) >= 2
     assert "collect_global_full_horizon_rollout" in notebook_source
-    assert "collect_global_full_horizon_rollout(cfg, label='Global MISOCP')" in notebook_source
+    assert "resolve_comparison_episode_window(window_cfg)" in notebook_source
+    assert "resolve_episode_indices_for_start_timestamps(misocp_solve_cfg, episode_start_timestamps)" in notebook_source
+    assert "episode_indices=misocp_episode_indices" in notebook_source
+    assert "comparison_window_contract" in notebook_source
+    assert "MISOCP_COMPARE_EPISODE_INDICES" not in notebook_source
+    assert "range(89, 103)" not in notebook_source
     assert "save_rollout_record(" in notebook_source
     assert "scheme_name='global_misocp'" in notebook_source
     assert "compare_rollout_metrics(rollout)" in notebook_source

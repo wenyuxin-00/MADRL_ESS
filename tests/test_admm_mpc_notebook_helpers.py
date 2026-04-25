@@ -12,6 +12,7 @@ import pytest
 
 from scripts.mainline_compare import collect_local_mpc_rollout, compare_rollout_metrics
 from scripts.utils import admm_mpc_notebook_helpers as admm_mpc_nb
+from scripts.utils import admm_mpc_solver as admm_solver
 from scripts.utils import grid_notebook_workflow as grid_nb
 
 
@@ -67,6 +68,7 @@ def _make_cfg(*, future_horizon: int = 4, n_agents: int = 2, test_start_date: st
             agent_bus_ids=[idx + 1 for idx in range(int(n_agents))],
         ),
         forecast=SimpleNamespace(type="lstm", lstm_artifact_root=None, auto_train_missing=False),
+        obs=SimpleNamespace(sequence_features=[]),
         runtime=SimpleNamespace(shared_data_dir="test-shared-data-dir", shared_data_signature="test-shared-data-signature", forecast_ready=None),
         data=SimpleNamespace(
             test_start_date=str(test_start_date),
@@ -259,6 +261,39 @@ def test_admm_window_data_has_no_terminal_soc_target():
     assert not hasattr(data, "energy_ref_kwh")
 
 
+def test_admm_projection_enforces_transformer_lower_and_upper_bounds():
+    values = np.asarray(
+        [
+            [-3.0, 1.0, 2.0, 3.0],
+            [-2.0, 2.0, 1.0, 4.0],
+        ],
+        dtype=np.float32,
+    )
+    lower = np.asarray([-2.0, 0.0, 1.0, -10.0], dtype=np.float32)
+    upper = np.asarray([2.0, 4.0, 5.0, 5.0], dtype=np.float32)
+
+    projected = admm_solver._project_contribution_copies(values, lower, upper)
+
+    assert np.allclose(projected.sum(axis=0), [-2.0, 3.0, 3.0, 5.0])
+    assert np.allclose(projected[:, 1], values[:, 1])
+    assert np.allclose(projected[:, 2], values[:, 2])
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "error_match"),
+    [
+        (np.asarray([0.0], dtype=np.float32), np.asarray([1.0, 2.0], dtype=np.float32), "lower_bound horizon"),
+        (np.asarray([0.0, 2.0], dtype=np.float32), np.asarray([1.0, 1.0], dtype=np.float32), "upper_bound_kw"),
+        (np.asarray([0.0, 0.0], dtype=np.float32), np.asarray([1.0, np.inf], dtype=np.float32), "finite"),
+    ],
+)
+def test_admm_projection_rejects_invalid_transformer_bounds(lower, upper, error_match):
+    values = np.zeros((2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match=error_match):
+        admm_solver._project_contribution_copies(values, lower, upper)
+
+
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
 def test_admm_storage_profit_objective_charges_when_real_time_price_is_negative():
     env = _make_env(n_agents=1, future_horizon=1)
@@ -296,6 +331,48 @@ def test_admm_storage_profit_objective_charges_when_real_time_price_is_negative(
     )
 
     assert float(result.executed_action_array[0, 0]) > 0.9
+
+
+@pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
+def test_admm_negative_price_charge_respects_transformer_import_bound():
+    env = _make_env(n_agents=1, future_horizon=0)
+    window_data = admm_mpc_nb.AdmmMpcWindowData(
+        import_price_eur_per_kwh=np.asarray([-0.10], dtype=np.float32),
+        load_seq=np.zeros((1, 1), dtype=np.float32),
+        pv_seq=np.zeros((1, 1), dtype=np.float32),
+        battery_capacity_kwh=np.asarray([4.0], dtype=np.float32),
+        p_max_kw=np.asarray([2.0], dtype=np.float32),
+        efficiency=1.0,
+        energy_init_kwh=np.asarray([2.0], dtype=np.float32),
+        energy_min_kwh=np.asarray([0.0], dtype=np.float32),
+        energy_max_kwh=np.asarray([4.0], dtype=np.float32),
+        export_subsidy_eur_per_kwh=0.5,
+        dt_hours=0.25,
+    )
+    surrogate_cache = admm_mpc_nb.AdmmMpcSurrogateCache(
+        trafo_limit_kw=0.5,
+        trafo_base_kw=0.0,
+        alpha_netload_window_kw=np.ones((1, 1), dtype=np.float32),
+    )
+
+    result = admm_mpc_nb.run_admm_mpc_step(
+        env,
+        window_data,
+        surrogate_cache=surrogate_cache,
+        rho_init=1.0,
+        rho_min=1e-3,
+        rho_max=1e3,
+        rho_adaptation=None,
+        max_iters=200,
+        max_iters_first_step=200,
+        primal_tol=1e-5,
+        dual_tol=1e-5,
+    )
+
+    battery_power_kw = float(result.executed_action_array[0, 0] * window_data.p_max_kw[0])
+    estimated_trafo_kw = float(surrogate_cache.trafo_base_kw + battery_power_kw)
+    assert battery_power_kw > 0.0
+    assert estimated_trafo_kw <= float(surrogate_cache.trafo_limit_kw) + 1e-3
 
 
 @pytest.mark.skipif(not HAS_WORKING_GUROBI_LICENSE, reason="requires a working Gurobi installation/license")
@@ -789,6 +866,10 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                 "purchase_cost_total": [0.48, 0.68],
                 "export_subsidy_total": [0.0, 0.0],
                 "objective_total": [0.48, 0.68],
+                "storage_charge_cost_eur": [0.03, 0.04],
+                "storage_discharge_revenue_eur": [0.0, 0.0],
+                "storage_profit_eur": [-0.03, -0.04],
+                "storage_objective_eur": [0.03, 0.04],
                 "pp_root_p_kw": [1.6, 1.7],
                 "trafo_loading_pct_max": [55.0, 58.0],
                 "n_trafo_violations": [0, 0],
@@ -827,6 +908,10 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
                         "purchase_cost": 0.24 + 0.01 * step_idx,
                         "export_subsidy": 0.0,
                         "objective_total": 0.24 + 0.01 * step_idx,
+                        "storage_charge_cost_eur": 0.015 + 0.005 * step_idx,
+                        "storage_discharge_revenue_eur": 0.0,
+                        "storage_profit_eur": -(0.015 + 0.005 * step_idx),
+                        "storage_objective_eur": 0.015 + 0.005 * step_idx,
                     }
                 )
         agent_df = pd.DataFrame(agent_rows)
@@ -848,7 +933,15 @@ def test_compare_helpers_accept_admm_mpc_and_local_mpc_rollouts(monkeypatch):
         )
         summary = (
             agent_df.groupby(["controller", "agent_profile"], as_index=False)[
-                ["purchase_cost", "export_subsidy", "objective_total"]
+                [
+                    "purchase_cost",
+                    "export_subsidy",
+                    "objective_total",
+                    "storage_charge_cost_eur",
+                    "storage_discharge_revenue_eur",
+                    "storage_profit_eur",
+                    "storage_objective_eur",
+                ]
             ].sum()
         )
         return grid_nb.RolloutResult(

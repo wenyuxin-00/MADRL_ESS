@@ -109,6 +109,13 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 - Prefer the simplest path that achieves the real goal with clear tradeoffs.
 - Be cautious about hidden assumptions, especially when the user sounds confident but key constraints are still missing.
 
+## Encoding Hygiene
+
+- Treat repository text files and notebooks as UTF-8. When editing Chinese comments, markdown, or notebook cells, use UTF-8-aware tooling and verify the result by reading it back with `encoding="utf-8"`.
+- Never leave corrupted placeholders or mojibake in comments, markdown, notebook source, or saved notebook outputs. Check for repeated question-mark placeholders, Unicode replacement characters, and obvious mojibake sequences.
+- If the exact Chinese wording cannot be recovered, replace the damaged text with concise correct Chinese or plain English. Do not preserve unreadable placeholders.
+- After editing notebooks or documentation with non-ASCII text, run `C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe -m pytest tests/test_encoding_hygiene.py` before finishing.
+
 ## Codebase Hard Rules
 
 - Optimize first for owner purity, explicit contracts, and low complexity; prefer fewer lines and shorter chains only after those are preserved.

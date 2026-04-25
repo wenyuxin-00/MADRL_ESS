@@ -38,6 +38,7 @@ def test_compare_notebook_reads_saved_records_instead_of_recomputing() -> None:
         "COMPARE_SCHEME_ORDER",
         "RECORD_SCHEME_CATEGORIES",
         "load_rollout_record(",
+        "assert_rollout_timestamp_alignment(*rollouts)",
         "compare_rollout_metrics(*rollouts)",
         "build_compare_economic_table",
         "build_compare_safety_table",

@@ -3,7 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any,Mapping
+from typing import Any,Mapping,Sequence
 import numpy as np,pandas as pd
 from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy,merge_action_info_into_step_info
 from scripts.compare.storage_profit_recompute import reject_legacy_storage_profit_meta,reject_legacy_storage_profit_tables
@@ -14,6 +14,7 @@ from scripts.plots.grid_notebook_plotting import plot_battery_power_and_soc_comp
 from scripts.utils.price_protocol import IMPORT_PRICE_COLUMN,IMPORT_PRICE_MARKUP_KEY,IMPORT_PRICE_PRED_COLUMN,IMPORT_PRICE_SEQ_FIELD,WHOLESALE_PRICE_PRED_COLUMN,WHOLESALE_PRICE_SEQ_FIELD,WHOLESALE_PRICE_SIGNAL,canonicalize_step_price_frame,derive_import_price,derive_import_price_seq,get_import_price_markup,require_import_price_markup
 PERFECT_PREDICTION_MODE,NORMAL_PREDICTION_MODE='perfect','normal'
 ORACLE_EVAL_MODE,FORECAST_EVAL_MODE='oracle_eval','forecast_eval'
+COMPARISON_WINDOW_CONTRACT='episode_start_timestamps_v1'
 def normalize_prediction_mode(prediction_mode:str)->str:
 	normalized=str(prediction_mode).strip().lower()
 	if normalized in{'perfect','perfect_prediction','perfect prediction'}:return PERFECT_PREDICTION_MODE
@@ -73,6 +74,42 @@ def build_comparison_cfg(cfg,*,prediction_mode:str):
 	comparison_cfg.forecast.type=resolved_type;comparison_cfg.obs.sequence_features=[WHOLESALE_PRICE_SEQ_FIELD.removesuffix('_seq'),'load','pv']
 	if comparison_cfg.forecast.type=='lstm'and comparison_cfg.forecast.lstm_artifact_root is None:comparison_cfg.forecast.lstm_artifact_root=get_default_lstm_artifact_dir()
 	return comparison_cfg
+def _normalize_episode_timestamp(value:object)->str:return pd.Timestamp(value).isoformat()
+def _episode_boundary_timestamps(reset_info:Mapping[str,object],*,episode_idx:int,context:str)->tuple[str,str]:
+	episode_meta=dict(reset_info.get('episode_meta',{}));timestamps=list(episode_meta.get('timestamps')or[])
+	if not timestamps:raise ValueError(f"{context} requires timestamp metadata for episode_idx={episode_idx}. Old compare code reused backend episode_idx across perfect/shared-data datasets; new contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}' with exact episode start timestamps. Re-run notebooks/madrl/local_MPC.ipynb or notebooks/madrl/global_MISOCP.ipynb.")
+	return _normalize_episode_timestamp(timestamps[0]),_normalize_episode_timestamp(timestamps[-1])
+def resolve_comparison_episode_window(cfg)->dict[str,object]:
+	if resolve_prediction_mode_from_forecast_backend(str(getattr(getattr(cfg,'forecast',None),'type','')))!=NORMAL_PREDICTION_MODE:raise ValueError(f"resolve_comparison_episode_window expects the normal/LSTM shared-data cfg as the canonical window source. Old compare code reused backend episode_idx; new contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}'. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun notebooks/madrl/local_MPC.ipynb or notebooks/madrl/global_MISOCP.ipynb.")
+	runtime_cfg=getattr(cfg,'runtime',None);shared_data_dir=str(getattr(runtime_cfg,'shared_data_dir',None)or'').strip();shared_data_signature=str(getattr(runtime_cfg,'shared_data_signature',None)or'').strip()
+	if not shared_data_dir or not shared_data_signature:raise ValueError(f"resolve_comparison_episode_window requires cfg.runtime.shared_data_dir and cfg.runtime.shared_data_signature from the canonical shared-data package. Old compare code reused backend episode_idx; new contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}'. Re-run notebooks/forecast/forecast_lstm.ipynb, then rerun notebooks/madrl/local_MPC.ipynb or notebooks/madrl/global_MISOCP.ipynb.")
+	from scripts.builder import build_env
+	env=build_env(cfg,mode='test')
+	try:
+		source_episode_indices=[int(index)for index in list(getattr(cfg.runtime,'selected_episode_indices',[])or[])]
+		if not source_episode_indices:raise ValueError(f"Shared-data test selection returned no episodes. New compare contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}' with explicit episode start timestamps. Re-run notebooks/forecast/forecast_lstm.ipynb.")
+		starts,ends=[],[]
+		for episode_idx in source_episode_indices:
+			_,reset_info=env.reset(episode_idx=episode_idx);start,end=_episode_boundary_timestamps(reset_info,episode_idx=episode_idx,context='resolve_comparison_episode_window');starts.append(start);ends.append(end)
+		return{'comparison_window_contract':COMPARISON_WINDOW_CONTRACT,'episode_start_timestamps':starts,'episode_end_timestamps':ends,'source_episode_indices':source_episode_indices}
+	finally:
+		env.close()
+def resolve_episode_indices_for_start_timestamps(cfg,episode_start_timestamps:Sequence[object])->list[int]:
+	targets=[_normalize_episode_timestamp(value)for value in list(episode_start_timestamps)]
+	if not targets:raise ValueError(f"resolve_episode_indices_for_start_timestamps requires at least one episode start timestamp. New compare contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}'.")
+	from scripts.builder import build_env
+	env=build_env(cfg,mode='test')
+	try:
+		by_start:dict[str,int]={}
+		for episode_idx in range(int(env.num_available_episodes)):
+			_,reset_info=env.reset(episode_idx=episode_idx);start,_=_episode_boundary_timestamps(reset_info,episode_idx=episode_idx,context='resolve_episode_indices_for_start_timestamps')
+			if start in by_start:raise ValueError(f"Duplicate episode start timestamp {start!r} for backend episode_idx={episode_idx} and episode_idx={by_start[start]}. New compare contract expects one backend episode per exact start timestamp. Re-run notebooks/madrl/local_MPC.ipynb or notebooks/madrl/global_MISOCP.ipynb.")
+			by_start[start]=episode_idx
+		missing=[timestamp for timestamp in targets if timestamp not in by_start]
+		if missing:raise ValueError(f"Backend timeline cannot map requested episode start timestamp(s) {missing}. Old compare code reused backend episode_idx across perfect/shared-data datasets; new contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}' and exact timestamp matches. Re-run notebooks/madrl/local_MPC.ipynb or notebooks/madrl/global_MISOCP.ipynb with the current canonical shared-data package.")
+		return[int(by_start[timestamp])for timestamp in targets]
+	finally:
+		env.close()
 def _aligned_prediction(previous_obs:dict|None,current_obs:dict,field_name:str):
 	current_value=np.asarray(current_obs[field_name],dtype=np.float32)
 	if previous_obs is None:
@@ -82,10 +119,8 @@ def _aligned_prediction(previous_obs:dict|None,current_obs:dict,field_name:str):
 	if previous_value.ndim==1:return float(previous_value[forecast_index])
 	return previous_value[...,forecast_index].astype(np.float32)
 def _aligned_wholesale_price_prediction(env,previous_obs:dict|None,current_obs:dict)->float:
-	if WHOLESALE_PRICE_SEQ_FIELD in current_obs:
-		aligned_previous=previous_obs if previous_obs is not None and WHOLESALE_PRICE_SEQ_FIELD in previous_obs else None
-		return float(_aligned_prediction(aligned_previous,current_obs,WHOLESALE_PRICE_SEQ_FIELD))
-	return float(env.get_signal_step(WHOLESALE_PRICE_SIGNAL))
+	del env
+	return float(_aligned_prediction(previous_obs,current_obs,WHOLESALE_PRICE_SEQ_FIELD))
 def _step_timestamp(reset_info:dict[str,object],step_idx:int)->pd.Timestamp:
 	episode_meta=dict(reset_info.get('episode_meta',{}));timestamps=episode_meta.get('timestamps')or[]
 	if step_idx<len(timestamps):return pd.Timestamp(timestamps[step_idx])
@@ -301,3 +336,19 @@ def load_rollout_record(*,category:str,scheme_name:str,root:str|Path|None=None)-
 	for(key,filename)in dict(manifest.get('meta_series',{})).items():meta[str(key)]=pd.Series(json.loads((record_dir/filename).read_text(encoding='utf-8')))
 	_reject_legacy_madrl_rollout_record(category=category,scheme_name=scheme_name,meta=meta,tables={'step_df':step_df,'agent_df':agent_df,'grid_df':grid_df,'summary_df':summary_df})
 	markup_eur_per_kwh=require_import_price_markup(meta,context=f"Saved rollout '{scheme_name}' metadata");step_df=canonicalize_step_price_frame(step_df,markup_eur_per_kwh=markup_eur_per_kwh,context=f"Saved rollout '{scheme_name}' step_df",require_actual=not step_df.empty,require_prediction=False);return RolloutResult(step_df=step_df,agent_df=agent_df,grid_df=grid_df,summary=summary_df,meta=meta)
+
+
+def assert_rollout_timestamp_alignment(*rollouts:RolloutResult)->None:
+	if len(rollouts)<2:return
+	def _controller_name(rollout:RolloutResult)->str:return str(dict(rollout.meta).get('controller','<unknown>'))
+	def _timestamp_sequence(rollout:RolloutResult)->list[str]:
+		if'timestamp'not in rollout.step_df.columns:raise ValueError(f"Compare timestamp alignment requires a 'timestamp' column for rollout {_controller_name(rollout)!r}. New contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}'. Re-run the source notebook for this record.")
+		return[_normalize_episode_timestamp(value)for value in rollout.step_df['timestamp'].tolist()]
+	reference=_timestamp_sequence(rollouts[0]);reference_name=_controller_name(rollouts[0])
+	for rollout in rollouts[1:]:
+		candidate=_timestamp_sequence(rollout);candidate_name=_controller_name(rollout)
+		if candidate==reference:continue
+		first_mismatch=next((idx for idx,(left,right)in enumerate(zip(reference,candidate,strict=False))if left!=right),min(len(reference),len(candidate)))
+		reference_value=reference[first_mismatch]if first_mismatch<len(reference)else'<missing>'
+		candidate_value=candidate[first_mismatch]if first_mismatch<len(candidate)else'<missing>'
+		raise ValueError(f"Compare timestamp alignment failed between {reference_name!r} and {candidate_name!r} at position {first_mismatch}: expected {reference_value!r}, got {candidate_value!r}. Old records reused backend episode_idx across perfect/shared-data datasets; new contract expects comparison_window_contract='{COMPARISON_WINDOW_CONTRACT}' with identical step timestamps. Re-run the stale source notebook.")

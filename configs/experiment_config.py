@@ -33,11 +33,11 @@ RECORD_SCHEME_CATEGORIES = {
 MADRL_NOTEBOOK_SPECS = {
     "train_base": {
         "scheme_name": "madrl_base",
-        "display_label": "MADRL + No Safety",
+        "display_label": "MADRL + No Safety + LSTM Forecast",
         "algorithm": "MATD3",
         "env_name": "GridTrainBase",
         "experiment_name": "train_base",
-        "prediction_mode": "perfect",
+        "prediction_mode": "normal",
         "num_envs": 4,
         "battery": {
             "battery_capacity": list(CANONICAL_BATTERY_CAPACITY_KWH),
@@ -58,13 +58,56 @@ MADRL_NOTEBOOK_SPECS = {
             "w_trafo_pen": 0.0,
         },
     },
+    "train_base_perfect": {
+    "scheme_name": "madrl_base_perfect",
+    "display_label": "MADRL + Perfect Forecast",
+    "algorithm": "MATD3",
+    "env_name": "GridTrainBasePerfect",
+    "experiment_name": "train_base_perfect",
+    "prediction_mode": "perfect",
+    "num_envs": 4,
+        "train": {
+            "train_episodes": 350,
+            "show_progress": True,
+        },
+        "battery": {
+            "battery_capacity": list(CANONICAL_BATTERY_CAPACITY_KWH),
+            "max_charge_rate": 0.5,
+            "init_soc": 0.05,
+            "train_init_soc_low": 0.05,
+            "train_init_soc_high": 0.05,
+            "soc_min": 0.05,
+            "soc_max": 0.95,
+            "soc_target": 0.5,
+        },
+        "reward": {
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "w_voltage_pen": 0.0,
+            "w_line_pen": 0.0,
+            "w_trafo_pen": 0.0,
+        },
+    },
+
     "train_base_safe": {
         "scheme_name": "madrl_base_safe",
-        "display_label": "MADRL + Safety Penalty",
+        "display_label": "MADRL + Safety Penalty + LSTM Forecast",
         "algorithm": "MATD3",
         "env_name": "GridTrainBaseSafe",
         "experiment_name": "train_base_safe",
+        "prediction_mode": "normal",
         "num_envs": 4,
+        "battery": {
+            "battery_capacity": list(CANONICAL_BATTERY_CAPACITY_KWH),
+            "max_charge_rate": 0.5,
+            "init_soc": 0.05,
+            "train_init_soc_low": 0.05,
+            "train_init_soc_high": 0.05,
+            "soc_min": 0.05,
+            "soc_max": 0.95,
+            "soc_target": 0.5,
+        },
         "reward": {
             "action_boundary_penalty_weight": 0.05,
             "soc_boundary_regularization_weight": 0.005,
@@ -76,11 +119,26 @@ MADRL_NOTEBOOK_SPECS = {
     },
     "train_projection_safe": {
         "scheme_name": "madrl_projection_safe",
-        "display_label": "MADRL + Safety Projection",
+        "display_label": "MADRL + Safety Projection + LSTM Forecast",
         "algorithm": "MATD3_SAFE_POC",
         "env_name": "GridTrainProjectionSafe",
         "experiment_name": "train_projection_safe",
+        "prediction_mode": "normal",
         "num_envs": 4,
+        "train": {
+            "train_episodes": 1000,
+            "show_progress": True,
+        },
+        "battery": {
+            "battery_capacity": list(CANONICAL_BATTERY_CAPACITY_KWH),
+            "max_charge_rate": 0.5,
+            "init_soc": 0.05,
+            "train_init_soc_low": 0.05,
+            "train_init_soc_high": 0.05,
+            "soc_min": 0.05,
+            "soc_max": 0.95,
+            "soc_target": 0.5,
+        },
         "reward": {
             "action_boundary_penalty_weight": 0.05,
             "soc_boundary_regularization_weight": 0.005,
@@ -93,6 +151,7 @@ MADRL_NOTEBOOK_SPECS = {
             "enabled": True,
         },
     },
+    
 }
 ADMM_NOTEBOOK_SPEC = {
     "scheme_name": "admm_mpc_lstm",
@@ -172,7 +231,7 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    train_episodes: int = 50
+    train_episodes: int = 1000
     max_train_steps: int | None = None
     num_envs: int = 2
     vec_env_type: str = "dummy"
@@ -193,7 +252,7 @@ class TrainConfig:
     noise_std_min: float = 0.2
     noise_decay_steps: float = 3e5
     use_noise_decay: bool = True
-    show_progress: bool = False
+    show_progress: bool = True
     # The bar advances per interaction step; postfix metrics refresh every N completed episodes.
     progress_episode_interval: int = 1
     progress_write_interval_seconds: float = 5.0
@@ -237,9 +296,9 @@ class EnvConfig:
     window_stride_days: int = 1
     future_horizon: int = 48
     battery_capacity: float | list[float] = field(default_factory=lambda: list(CANONICAL_BATTERY_CAPACITY_KWH))
-    max_charge_rate: float = 0.1
+    max_charge_rate: float = 0.5
     efficiency: float = 0.95
-    init_soc: float = 0.5
+    init_soc: float = 0.05
     train_init_soc_low: float = 0.20
     train_init_soc_high: float = 0.80
     dt: float = 0.25

@@ -78,11 +78,15 @@ class SignalCsvSource:
 class SignalForecastEvaluation:
 	def __init__(self,**kwargs):self.__dict__.update(kwargs)
 def _normalize_signal_name(signal_name:str)->str:return normalize_internal_signal_name(signal_name)
+_WHOLESALE_PRICE_DERIVED_OBSERVATION_FEATURES={'wholesale_price_relative','wholesale_price_spread','wholesale_price_rank'}
+def _forecast_signal_for_observation_feature(feature_name:str)->str:
+	normalized=_normalize_signal_name(feature_name)
+	return WHOLESALE_PRICE_SIGNAL if normalized in _WHOLESALE_PRICE_DERIVED_OBSERVATION_FEATURES else normalized
 def configured_forecast_signals(cfg)->list[str]:unique=list(dict.fromkeys(normalized for signal_name in cfg.forecast.target_signals if(normalized:=_normalize_signal_name(signal_name))));return unique or list(DEFAULT_SUPPORTED_FORECAST_SIGNALS)
 def required_forecast_signals(cfg)->list[str]:
 	configured,active=set(configured_forecast_signals(cfg)),[]
 	for signal_name in cfg.obs.sequence_features:
-		if(normalized:=_normalize_signal_name(signal_name))in configured and normalized not in active:active.append(normalized)
+		if(normalized:=_forecast_signal_for_observation_feature(signal_name))in configured and normalized not in active:active.append(normalized)
 	return active or configured_forecast_signals(cfg)
 def clone_config_with_signal_overrides(cfg,overrides:dict[str,object]|None=None):
 	cloned=copy.deepcopy(cfg)
