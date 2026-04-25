@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "category": "mpc",
+  "scheme_name": "local_mpc_perfect",
+  "record_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\notebooks\\record\\mpc\\local_mpc_perfect",
+  "files": {
+    "step_df": "step.parquet",
+    "agent_df": "agent.parquet",
+    "grid_df": "grid.parquet",
+    "summary_df": "summary.parquet",
+    "metrics_df": "metrics.parquet",
+    "meta": "meta.json",
+    "config_snapshot": "config_snapshot.json"
+  },
+  "meta_tables": {},
+  "meta_series": {}
+}

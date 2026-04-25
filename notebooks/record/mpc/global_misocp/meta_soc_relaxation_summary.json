@@ -1,0 +1,6 @@
+{
+  "max_soc_slack": 0.7252646088600159,
+  "mean_soc_slack": 0.0005603579338639975,
+  "p95_soc_slack": 0.0007154730265028775,
+  "soc_relaxation_is_tight": false
+}

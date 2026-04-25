@@ -1,0 +1,17 @@
+{
+  "steps_outside_tolerance": 1306,
+  "pp_root_p_available_ratio": 1.0,
+  "root_power_validation_unavailable": false,
+  "root_p_fit_k": 1.000655931902787,
+  "root_p_fit_b": 0.43484942416475464,
+  "root_p_fit_r2": 0.9999927770875762,
+  "root_s_fit_k": 0.975988064469426,
+  "root_s_fit_b": 0.3604982844749513,
+  "root_s_fit_r2": 0.9999775162905545,
+  "max_solver_feeder_gap_kw": 6.7277374267578125,
+  "mean_abs_solver_feeder_gap_kw": 1.0604490284723787,
+  "max_replay_feeder_gap_kw": 7.2105865478515625,
+  "mean_abs_replay_feeder_gap_kw": 1.5165346615200785,
+  "p95_soc_slack": 0.0007154730265028775,
+  "root_p_fit_interpretation": "consistent"
+}
