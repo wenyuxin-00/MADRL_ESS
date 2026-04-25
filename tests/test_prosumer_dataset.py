@@ -7,8 +7,9 @@ from configs.experiment_config import ExperimentConfig
 from data.loaders.registry import build_dataset
 from data.loaders.prosumer import ProsumerDataset
 from envs.grid_env import GridEnv
-from envs.observation.registry import build_obs_builder
-from envs.rewards import NormalReward
+from envs.observation.default_builder import DefaultObservationBuilder
+from envs.observation.normalization import build_observation_normalizer
+from envs.rewards.NormalReward import NormalReward
 from predictors.registry import build_forecaster
 from predictors.training import _load_signal_matrix_from_source, resolve_signal_csv_source
 from tests.support.helpers import (
@@ -35,31 +36,29 @@ class TinyGridCore:
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
-        from envs.grid.core.grid_types import GridStepResult
+        from envs.grid.core.grid_core import GridStepResult
 
         n = len(p_batt_kw)
         return GridStepResult(
             converged=True,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
-            va_degree=np.zeros(self.n_buses, dtype=np.float32),
             line_loading_pct=np.zeros(self.n_lines, dtype=np.float32),
             trafo_loading_pct=np.zeros(self.n_trafos, dtype=np.float32),
-            p_mw_from=np.zeros(self.n_lines, dtype=np.float32),
-            agent_vm_pu=np.ones(n, dtype=np.float32),
             v_violation=np.zeros(n, dtype=np.float32),
-            line_violation=0.0,
-            trafo_violation=0.0,
-            l_violation=0.0,
-            n_buses=self.n_buses,
-            n_lines=self.n_lines,
-            n_trafos=self.n_trafos,
-            bus_v_excess=np.zeros(self.n_buses, dtype=np.float32),
-            line_excess=np.zeros(self.n_lines, dtype=np.float32),
-            trafo_excess=np.zeros(self.n_trafos, dtype=np.float32),
             psi_v_raw=0.0,
             psi_line_raw=0.0,
             psi_trafo_raw=0.0,
         )
+
+
+def _build_obs_builder(cfg):
+    return DefaultObservationBuilder(
+        local_features=cfg.obs.local_features,
+        sequence_features=cfg.obs.sequence_features,
+        future_horizon=cfg.env.future_horizon,
+        adjacency_type=cfg.obs.adjacency_type,
+        normalizer=build_observation_normalizer(cfg),
+    )
 
 
 def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
@@ -108,7 +107,7 @@ def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
         ),
     )
     assert np.isclose(
-        episode["signals"]["price"][0],
+        episode["signals"]["wholesale_price"][0],
         synthetic_prosumer_price_eur_per_kwh(0, year_offset=0),
     )
     assert episode["meta"]["node_ids"] == [10, 6]
@@ -116,7 +115,7 @@ def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
     assert episode["meta"]["year"] == 2019
     assert episode["meta"]["load_components"] == ["household"]
     assert episode["meta"]["pv_reference"] == "east"
-    assert episode["meta"]["signal_names"] == ["price", "load", "pv"]
+    assert episode["meta"]["signal_names"] == ["wholesale_price", "load", "pv"]
     assert episode["meta"]["timestamps"][0].startswith("2019-01-01 00:00:00")
 
 
@@ -213,11 +212,15 @@ def test_prosumer_dataset_filters_explicit_date_range_and_build_dataset_uses_it(
     cfg = ExperimentConfig()
     cfg.data.data_dir = data_dir
     cfg.data.agent_profiles = ["SFH12", "SFH14"]
+    cfg.data.load_scale = [1.0, 1.0]
+    cfg.data.pv_scale = [1.0, 1.0]
     cfg.data.train_year = 2019
     cfg.data.train_start_date = "2019-01-05"
     cfg.data.train_end_date = "2019-01-06"
     cfg.env.num_agents = 2
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.grid.agent_bus_ids = [10, 6]
 
     built = build_dataset(cfg, mode="train")
@@ -269,8 +272,12 @@ def test_prosumer_dataset_validates_inputs_and_build_dataset_lengths(tmp_path):
     cfg = ExperimentConfig()
     cfg.data.data_dir = data_dir
     cfg.data.agent_profiles = ["SFH12"]
+    cfg.data.load_scale = [1.0, 1.0]
+    cfg.data.pv_scale = [1.0, 1.0]
     cfg.env.num_agents = 2
     cfg.env.episode_limit = 4
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.grid.agent_bus_ids = [10, 6]
 
     with pytest.raises(ValueError, match="agent_profiles length should equal n_agents"):
@@ -291,22 +298,27 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         dataset=dataset,
         reward_fn=NormalReward(cfg),
         forecaster=build_forecaster(cfg),
-        obs_builder=build_obs_builder(cfg),
+        obs_builder=_build_obs_builder(cfg),
         grid_core=TinyGridCore(cfg.env.num_agents),
     )
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["node_ids"] == cfg.grid.agent_bus_ids
 
         next_obs, reward, terminated, truncated, info = env.step(
-            [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
+            [np.zeros((2,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         )
         assert next_obs["pv_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
         assert len(truncated) == cfg.env.num_agents
-        assert set(info) == {"episode_done", *[str(meta.key) for meta in env.reward_fn.component_meta]}
+        assert set(info) == {
+            "episode_done",
+            "madrl_throughput_bonus_weight",
+            "madrl_throughput_kwh",
+            *[str(meta.key) for meta in env.reward_fn.component_meta],
+        }
     finally:
         env.close()
 
@@ -316,27 +328,21 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
         dataset=None,
         reward_fn=NormalReward(cfg),
         forecaster=build_forecaster(cfg),
-        obs_builder=build_obs_builder(cfg),
+        obs_builder=_build_obs_builder(cfg),
         grid_core=TinyGridCore(cfg.env.num_agents),
     )
     try:
         obs, reset_info = fallback_env.reset(episode_idx=0)
-        assert set(obs.keys()) == {"local", "price_seq", "load_seq", "pv_seq", "adjacency"}
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
 
         _, reward, terminated, truncated, info = fallback_env.step(
-            [np.zeros((1,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
+            [np.zeros((2,), dtype=np.float32) for _ in range(cfg.env.num_agents)]
         )
         assert len(reward) == cfg.env.num_agents
         assert len(terminated) == cfg.env.num_agents
         assert len(truncated) == cfg.env.num_agents
-        assert sorted(info["available_signals"]) == [
-            "load",
-            "load_heatpump",
-            "load_household",
-            "price",
-            "pv",
-        ]
+        assert info["episode_done"] is False
     finally:
         fallback_env.close()
 

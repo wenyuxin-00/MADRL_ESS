@@ -1,0 +1,116 @@
+{
+  "algorithm": "MATD3",
+  "saved_episode_tag": 1000,
+  "episodes_completed": 1000,
+  "total_steps": 672000,
+  "global_interaction_step": 672000,
+  "target_total_steps": 672000,
+  "num_envs": 4,
+  "episode_limit": 672,
+  "save_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3\\normal\\train_base\\matd3_normal_train_base_ep1000_20260425_012418\\MATD3",
+  "training_contract_signature": "43ae20dfe2982bee",
+  "training_contract": {
+    "action_boundary_penalty_weight": 0.05,
+    "actor_action_mapping_contract": "soc_affine_feasible_actor_mapping_v1",
+    "actor_learning_starts_transitions": 8064,
+    "discount_gamma": 0.999,
+    "export_subsidy_eur_per_kwh": 0.0,
+    "feasible_random_exploration_decay_steps": 50000,
+    "feasible_random_exploration_end": 0.05,
+    "feasible_random_exploration_start": 0.5,
+    "import_price_markup_eur_per_kwh": 0.0,
+    "learning_starts_transitions": 5376,
+    "n_step_return": 96,
+    "observation_feature_set": {
+      "adjacency_type": "identity",
+      "local": [
+        "calendar_time",
+        "soc"
+      ],
+      "sequence": [
+        "wholesale_price_relative",
+        "wholesale_price_spread",
+        "load",
+        "pv"
+      ]
+    },
+    "observation_normalization_signature": {
+      "agent_profiles": [
+        "SFH12",
+        "SFH18",
+        "SFH20"
+      ],
+      "base_episode_limit": 96,
+      "clip_high": 0.99,
+      "clip_low": 0.01,
+      "load_components": [
+        "household",
+        "heatpump"
+      ],
+      "load_normalization": "robust_tanh",
+      "load_scale": [
+        20.0,
+        20.0,
+        20.0
+      ],
+      "load_tanh_scale": 3.0,
+      "local_features": [
+        "calendar_time",
+        "soc"
+      ],
+      "num_agents": 3,
+      "pv_capacity_kw": [],
+      "pv_normalization": "capacity",
+      "pv_reference": "south",
+      "pv_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "pv_tanh_scale": 2.0,
+      "sequence_features": [
+        "wholesale_price_relative",
+        "wholesale_price_spread",
+        "load",
+        "pv"
+      ],
+      "soc_normalization": "linear_pm1",
+      "test_end_date": "2020-04-15",
+      "test_episode_limit": 96,
+      "test_start_date": "2020-04-01",
+      "test_year": 2020,
+      "train_end_date": null,
+      "train_episode_limit": 672,
+      "train_start_date": null,
+      "train_window_days": 7,
+      "train_year": 2019,
+      "wholesale_price_normalization": "robust_tanh",
+      "wholesale_price_spread_scale_eur_per_kwh": 0.2,
+      "wholesale_price_tanh_scale": 2.0,
+      "window_stride_days": 1
+    },
+    "price_observation_contract": "oracle_window_relative_price_v1",
+    "reward_contract": "madrl_incremental_storage_reward_v1",
+    "rollout_soc_contract": "continuous_soc_v1",
+    "shared_data_schema_version": 8,
+    "shared_data_signature": "6be0cd6f08bc0369",
+    "soc_boundary_epsilon": 0.02,
+    "soc_boundary_margin": 0.02,
+    "soc_boundary_regularization_weight": 0.005,
+    "storage_objective_mode": "max_storage_profit",
+    "storage_price_mode": "real_time_price",
+    "storage_profit_weight": 1.0,
+    "test_episode_limit": 96,
+    "throughput_bonus_eur_per_kwh_max": 0.002,
+    "train_episode_limit": 672,
+    "train_init_soc_high": 0.05,
+    "train_init_soc_low": 0.05,
+    "train_window_days": 7,
+    "training_health_contract": "finite_loss_grad_health_v1",
+    "w_line_pen": 0.0,
+    "w_trafo_pen": 0.0,
+    "w_voltage_pen": 0.0,
+    "wholesale_price_spread_scale_eur_per_kwh": 0.2,
+    "window_stride_days": 1
+  }
+}

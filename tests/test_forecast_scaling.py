@@ -11,8 +11,9 @@ import torch
 
 from data.loaders.registry import build_dataset
 from envs.grid_env import GridEnv
-from envs.observation.registry import build_obs_builder
-from envs.rewards import NormalReward
+from envs.observation.default_builder import DefaultObservationBuilder
+from envs.observation.normalization import build_observation_normalizer
+from envs.rewards.NormalReward import NormalReward
 from predictors.lstm_forecaster import (
     BASELINE_MODE_LAST_VALUE,
     LSTMForecaster,
@@ -27,6 +28,7 @@ from predictors.training import (
     _managed_lstm_artifact_paths,
     _select_heatpump_blocked_blend_weight,
     _select_load_blend_weight_from_validation,
+    ensure_lstm_artifacts,
     build_lstm_source_signature,
     build_supervised_windows_from_matrix,
     compare_lstm_artifact_meta,
@@ -88,7 +90,7 @@ class SpyForecaster:
         history: np.ndarray,
         horizon: int,
         *,
-        signal_name: str = "price",
+        signal_name: str = "wholesale_price",
         history_timestamps=None,
     ) -> np.ndarray:
         del signal_name
@@ -636,19 +638,19 @@ def test_old_heatpump_rmse_first_meta_is_marked_incompatible(tmp_path) -> None:
 def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path)
     cfg.forecast.type = "lstm"
-    cfg.forecast.target_signals = ["price", "pv"]
-    cfg.obs.sequence_features = ["price", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "pv"]
     cfg.forecast.lstm_artifact_root = tmp_path / "artifacts" / "forecast" / "lstm"
     cfg.forecast.history_window = 4
     cfg.env.future_horizon = 2
     cfg.forecast.lstm_epochs = 1
     cfg.forecast.lstm_batch_size = 4
-    cfg.forecast.lstm_hidden_size = 8
-    cfg.forecast.lstm_num_layers = 1
-    cfg.forecast.lstm_dropout = 0.0
+    cfg.forecast.lstm_num_layers = 2
+    cfg.forecast.lstm_dropout = 0.1
     cfg.forecast.auto_train_missing = False
+    cfg.forecast.signal_training_overrides = {}
 
-    train_signal_lstm(cfg, "price", show_progress=False)
+    train_signal_lstm(cfg, "wholesale_price", show_progress=False)
 
     pv_paths = _managed_lstm_artifact_paths(cfg, "pv")
     pv_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
@@ -668,14 +670,83 @@ def test_stale_pv_artifact_is_marked_incompatible_and_refreshable(tmp_path) -> N
     assert {"input_size", "time_feature_mode", "postprocess_mode"} <= set(validation["mismatches"])
 
     inventory_before = _collect_lstm_artifact_inventory(cfg)
-    assert "price" in inventory_before["artifacts"]
+    assert "wholesale_price" in inventory_before["artifacts"]
     assert "pv" in inventory_before["mismatched_signals"]
 
+    cfg.forecast.lstm_num_layers = 1
+    cfg.forecast.signal_training_overrides = {"wholesale_price": {"num_layers": 2}}
     train_signal_lstm(cfg, "pv", show_progress=False)
 
     inventory_after = _collect_lstm_artifact_inventory(cfg)
-    assert set(inventory_after["artifacts"]) == {"price", "pv"}
+    assert set(inventory_after["artifacts"]) == {"wholesale_price", "pv"}
     assert "pv" not in inventory_after["invalid_artifacts"]
+
+
+def test_ensure_lstm_artifacts_is_preflight_only_when_auto_train_missing_is_false(tmp_path, monkeypatch) -> None:
+    cfg = make_smoke_config(tmp_path)
+    cfg.forecast.type = "lstm"
+    cfg.forecast.target_signals = ["wholesale_price", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "pv"]
+    cfg.forecast.lstm_artifact_root = tmp_path / "artifacts" / "forecast" / "lstm"
+    cfg.forecast.history_window = 4
+    cfg.env.future_horizon = 2
+    cfg.forecast.lstm_epochs = 1
+    cfg.forecast.lstm_batch_size = 4
+    cfg.forecast.lstm_num_layers = 2
+    cfg.forecast.lstm_dropout = 0.1
+    cfg.forecast.auto_train_missing = False
+    cfg.forecast.signal_training_overrides = {}
+
+    train_signal_lstm(cfg, "wholesale_price", show_progress=False)
+
+    pv_paths = _managed_lstm_artifact_paths(cfg, "pv")
+    pv_paths["artifact_dir"].mkdir(parents=True, exist_ok=True)
+    pv_paths["model_path"].write_bytes(b"stale-model")
+    pv_paths["scaler_path"].write_bytes(b"stale-scaler")
+    stale_meta = dict(expected_lstm_artifact_meta(cfg, "pv"))
+    stale_meta["time_feature_mode"] = "none"
+    stale_meta["input_size"] = 1
+    pv_paths["meta_path"].write_text(json.dumps(stale_meta), encoding="utf-8")
+
+    retrain_calls: list[str] = []
+
+    def _unexpected_train_signal_lstm(*args, **kwargs):
+        retrain_calls.append(str(args[1] if len(args) > 1 else kwargs.get("signal_name")))
+        raise AssertionError("ensure_lstm_artifacts should not retrain when auto_train_missing=False")
+
+    monkeypatch.setattr("predictors.training.train_signal_lstm", _unexpected_train_signal_lstm)
+
+    with pytest.raises(ValueError, match="Managed LSTM forecast artifacts are missing or incompatible"):
+        ensure_lstm_artifacts(cfg)
+
+    assert retrain_calls == []
+
+
+def test_train_signal_lstm_can_skip_weekly_evaluations(tmp_path, monkeypatch) -> None:
+    cfg = make_smoke_config(tmp_path)
+    cfg.forecast.type = "lstm"
+    cfg.forecast.target_signals = ["wholesale_price"]
+    cfg.obs.sequence_features = ["wholesale_price"]
+    cfg.forecast.lstm_artifact_root = tmp_path / "artifacts" / "forecast" / "lstm"
+    cfg.forecast.history_window = 4
+    cfg.env.future_horizon = 2
+    cfg.forecast.lstm_epochs = 1
+    cfg.forecast.lstm_batch_size = 4
+    cfg.forecast.lstm_hidden_size = 8
+    cfg.forecast.lstm_num_layers = 1
+    cfg.forecast.lstm_dropout = 0.0
+    cfg.forecast.auto_train_missing = False
+
+    def _unexpected_evaluate_signal_one_week(*args, **kwargs):
+        raise AssertionError("train_signal_lstm should skip weekly evaluations when compute_evaluations=False")
+
+    monkeypatch.setattr("predictors.training.evaluate_signal_one_week", _unexpected_evaluate_signal_one_week)
+
+    result = train_signal_lstm(cfg, "wholesale_price", show_progress=False, compute_evaluations=False)
+
+    assert result["evaluation"] is None
+    assert result["online_evaluation"] is None
+    assert result["open_loop_evaluation"] is None
 
 
 def test_grid_env_reset_passes_episode_meta_to_forecaster(tmp_path) -> None:
@@ -689,7 +760,13 @@ def test_grid_env_reset_passes_episode_meta_to_forecaster(tmp_path) -> None:
         dataset=dataset,
         reward_fn=NormalReward(cfg),
         forecaster=spy_forecaster,
-        obs_builder=build_obs_builder(cfg),
+        obs_builder=DefaultObservationBuilder(
+            local_features=cfg.obs.local_features,
+            sequence_features=cfg.obs.sequence_features,
+            future_horizon=cfg.env.future_horizon,
+            adjacency_type=cfg.obs.adjacency_type,
+            normalizer=build_observation_normalizer(cfg),
+        ),
         grid_core=PassiveGridCore(cfg.env.num_agents),
     )
 

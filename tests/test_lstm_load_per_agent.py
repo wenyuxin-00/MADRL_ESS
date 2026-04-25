@@ -7,7 +7,7 @@ import pytest
 
 from predictors.lstm_forecaster import LSTMForecaster
 from predictors.registry import build_forecaster
-from predictors.training import collect_available_lstm_artifacts, train_signal_lstm
+from predictors.training import collect_available_lstm_artifacts, required_forecast_signals, train_signal_lstm
 from tests.support.helpers import DEFAULT_TEST_BUSES, make_smoke_config, write_prosumer_processed_dataset
 
 
@@ -28,6 +28,8 @@ def _make_load_only_cfg(tmp_path):
     cfg.forecast.load_time_feature_mode = "hour_week_year"
     cfg.forecast.load_hybrid_mode = "baseline_blend"
     cfg.forecast.load_baseline_mode = "last_value"
+    cfg.forecast.load_component_split = False
+    cfg.forecast.signal_training_overrides = {}
     cfg.forecast.auto_train_missing = False
     return cfg
 
@@ -44,6 +46,8 @@ def _make_load_only_cfg_for_profiles(tmp_path, agent_profiles):
     cfg.data.data_dir = data_dir
     cfg.data.agent_profiles = list(agent_profiles)
     cfg.env.num_agents = len(agent_profiles)
+    cfg.data.load_scale = [1.0] * cfg.env.num_agents
+    cfg.data.pv_scale = [1.0] * cfg.env.num_agents
     cfg.grid.agent_bus_ids = DEFAULT_TEST_BUSES[: cfg.env.num_agents]
     return cfg
 
@@ -154,6 +158,14 @@ def test_build_forecaster_reuses_cfg_signal_training_overrides(tmp_path) -> None
     assert isinstance(forecaster, LSTMForecaster)
     assert "load" in forecaster.signal_runtimes
     assert len(forecaster.signal_runtimes["load"]) == cfg.env.num_agents
+
+
+def test_required_forecast_signals_include_price_runtime_for_derived_price_features(tmp_path) -> None:
+    cfg = _make_load_only_cfg(tmp_path)
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"]
+
+    assert required_forecast_signals(cfg) == ["wholesale_price", "load", "pv"]
 
 
 def test_collect_available_lstm_artifacts_accepts_notebook_overrides(tmp_path) -> None:

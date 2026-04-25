@@ -7,17 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
-from configs import compose_experiment_config, recommended_gpu_fast_num_envs
-from scripts.run_train_mainline import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
+from configs.profiles import compose_experiment_config, recommended_gpu_fast_num_envs
+from envs.rewards.NormalReward import NormalReward
+from scripts.checkpoints import ACTOR_ACTION_MAPPING_CONTRACT, TRAINING_HEALTH_CONTRACT
+from scripts.mainline_madrl import _apply_reward_controls, _apply_runtime_controls, _apply_train_controls
+from scripts.train import apply_controller_action_postprocessing
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
-from scripts.utils.train_mainline_launcher import (
-    _monitor_process_progress,
-    build_train_mainline_command,
-    prepare_train_mainline_launch,
-)
+from predictors.shared_data import PRICE_OBSERVATION_CONTRACT, SHARED_DATA_SCHEMA_VERSION, ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
 
@@ -41,35 +40,6 @@ def test_gpu_fast_profile_defaults_are_predictable_with_28_threads(tmp_path):
     assert cfg.train.use_noise_decay is True
 
 
-def test_prepare_train_mainline_launch_builds_expected_command(tmp_path):
-    launch = prepare_train_mainline_launch(
-        project_root=tmp_path,
-        experiment_controls={"seed": 7, "algorithm": "MATD3"},
-        data_controls={"prediction_mode": "perfect"},
-        battery_controls={"battery_capacity": [25.0, 25.0, 25.0, 25.0, 25.0], "max_charge_rate": 0.4},
-        train_controls={"profile": "gpu_fast", "launch_mode": "external", "train_episodes": 100},
-        checkpoint_controls={"experiment_name": "grid_mainline"},
-        env_name="GridTrainMainline",
-        run_number=3,
-    )
-    command = build_train_mainline_command(launch, python_executable="python")
-
-    assert Path(launch["experiment_controls_path"]).exists()
-    assert Path(launch["data_controls_path"]).exists()
-    assert Path(launch["battery_controls_path"]).exists()
-    assert Path(launch["train_controls_path"]).exists()
-    assert Path(launch["checkpoint_controls_path"]).exists()
-    assert Path(launch["meta_dir"]).exists()
-    assert Path(launch["model_root"]).parts[-4:-1] == ("MATD3", "perfect", "grid_mainline")
-    assert command[:3] == ["python", "-m", "scripts.run_train_mainline"]
-    assert "--battery-controls" in command
-    assert "--checkpoint-controls" in command
-    assert "--env-name" in command
-    assert "GridTrainMainline" in command
-    assert "--run-number" in command
-    assert "3" in command
-
-
 @pytest.mark.parametrize(
     ("deprecated_key", "value"),
     [
@@ -86,129 +56,124 @@ def test_apply_runtime_controls_rejects_legacy_cache_keys(tmp_path, deprecated_k
         _apply_runtime_controls(cfg, {deprecated_key: value})
 
 
-def test_apply_reward_controls_supports_w_soc_pen_and_compat(tmp_path):
-    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
-
-    _apply_reward_controls(cfg, {"w_soc_pen": 5.0})
-    assert cfg.reward.w_soc_pen == pytest.approx(5.0)
-
-    cfg2 = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
-    _apply_reward_controls(cfg2, {"w_action_pen": 3.0})
-    assert cfg2.reward.w_soc_pen == pytest.approx(3.0)
-
-
-def test_apply_reward_controls_ignores_lambda_throughput(tmp_path):
+def test_apply_reward_controls_supports_step3_reward_fields(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
     _apply_reward_controls(
         cfg,
         {
+            "action_boundary_penalty_weight": 0.12,
+            "soc_boundary_regularization_weight": 0.34,
+            "throughput_bonus_eur_per_kwh_max": 0.005,
+            "soc_boundary_epsilon": 0.03,
+            "soc_boundary_margin": 0.08,
+        },
+    )
+    assert cfg.reward.action_boundary_penalty_weight == pytest.approx(0.12)
+    assert cfg.reward.soc_boundary_regularization_weight == pytest.approx(0.34)
+    assert cfg.reward.throughput_bonus_eur_per_kwh_max == pytest.approx(0.005)
+    assert cfg.reward.soc_boundary_epsilon == pytest.approx(0.03)
+    assert cfg.reward.soc_boundary_margin == pytest.approx(0.08)
+
+    _apply_reward_controls(
+        cfg,
+        {
+            "action_boundary_penalty_weight": 0.5,
+            "soc_boundary_regularization_weight": 0.25,
+            "throughput_bonus_eur_per_kwh_max": 0.001,
+            "soc_boundary_epsilon": 0.01,
+            "soc_boundary_margin": 0.07,
             "export_subsidy_eur_per_kwh": 0.081,
-            "import_price_adder_eur_per_kwh": 0.205,
-            "lambda_throughput": 0.123,
-            "w_soc_pen": 0.0,
+            "import_price_markup_eur_per_kwh": 0.205,
+            "storage_objective_mode": "max_storage_profit",
+            "storage_price_mode": "real_time_price",
+            "storage_profit_weight": 1.0,
         },
     )
 
+    assert cfg.reward.action_boundary_penalty_weight == pytest.approx(0.5)
+    assert cfg.reward.soc_boundary_regularization_weight == pytest.approx(0.25)
+    assert cfg.reward.throughput_bonus_eur_per_kwh_max == pytest.approx(0.001)
+    assert cfg.reward.soc_boundary_epsilon == pytest.approx(0.01)
+    assert cfg.reward.soc_boundary_margin == pytest.approx(0.07)
     assert cfg.reward.export_subsidy_eur_per_kwh == pytest.approx(0.081)
-    assert cfg.reward.import_price_adder_eur_per_kwh == pytest.approx(0.205)
-    assert cfg.reward.w_soc_pen == pytest.approx(0.0)
+    assert cfg.reward.import_price_markup_eur_per_kwh == pytest.approx(0.205)
+    assert cfg.reward.storage_objective_mode == "max_storage_profit"
+    assert cfg.reward.storage_price_mode == "real_time_price"
+    assert cfg.reward.storage_profit_weight == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("legacy_key", ["w_action_pen", "w_soc_pen", "lambda_throughput", "local_action_penalty_mode", "local_action_penalty_weight", "terminal_soc_value_weight", "action_feasibility_regularization_weight"])
+def test_apply_reward_controls_rejects_removed_legacy_keys(tmp_path, legacy_key):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+
+    with pytest.raises(ValueError, match=legacy_key):
+        _apply_reward_controls(cfg, {legacy_key: 1.0})
 
 
 def test_apply_reward_controls_rejects_unknown_keys(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
     with pytest.raises(ValueError, match="Unknown reward_controls"):
-        _apply_reward_controls(cfg, {"w_soc_pen": 5.0, "bogus_key": 1.0})
+        _apply_reward_controls(cfg, {"action_boundary_penalty_weight": 0.1, "bogus_key": 1.0})
+
+
+def test_apply_controller_action_postprocessing_keeps_reward_and_merges_action_info(tmp_path):
+    cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
+    runner = SimpleNamespace(env_evaluate=SimpleNamespace(reward_fn=NormalReward(cfg)))
+    reward = np.array([[[1.0], [2.0], [3.0]]], dtype=np.float32)
+    base_reward = reward[0, :, 0].copy()
+    info_list = [
+        {
+            "madrl_r_action_penalty": np.zeros(3, dtype=np.float32),
+            "madrl_r_total_internal": base_reward.copy(),
+        }
+    ]
+    action_info = {"soc_penalty_unweighted": np.array([[0.0, 0.5, 1.0]], dtype=np.float32)}
+
+    processed_reward, processed_info = apply_controller_action_postprocessing(
+        runner,
+        reward,
+        info_list,
+        action_info,
+    )
+
+    np.testing.assert_allclose(processed_reward[0, :, 0], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["reward"], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["madrl_r_action_penalty"], 0.0, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["madrl_r_total_internal"], base_reward, rtol=1e-6)
+    np.testing.assert_allclose(processed_info[0]["soc_penalty_unweighted"], action_info["soc_penalty_unweighted"][0], rtol=1e-6)
 
 
 def test_apply_train_controls_sets_progress_episode_interval(tmp_path):
     cfg = compose_experiment_config(profile="base", algorithm="MATD3", data_dir=tmp_path / "data", device="cpu")
 
-    _apply_train_controls(cfg, {"progress_episode_interval": 7})
+    _apply_train_controls(
+        cfg,
+        {
+            "progress_episode_interval": 7,
+            "train_window_days": 3,
+            "window_stride_days": 2,
+            "learning_starts_transitions": 11,
+            "actor_learning_starts_transitions": 17,
+            "n_step_return": 5,
+            "feasible_random_exploration_start": 0.4,
+            "feasible_random_exploration_end": 0.1,
+            "feasible_random_exploration_decay_steps": 99,
+            "discount_gamma": 0.997,
+        },
+    )
 
     assert cfg.train.progress_episode_interval == 7
-
-
-def test_monitor_process_progress_reports_at_episode_intervals(monkeypatch, tmp_path):
-    progress_json_path = tmp_path / "progress.json"
-    progress_json_path.write_text("{}", encoding="utf-8")
-    payloads = iter(
-        [
-            {
-                "interaction_step": 10,
-                "target_interactions": 100,
-                "episodes_completed": 5,
-                "avg_reward": 1.0,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 20,
-                "target_interactions": 100,
-                "episodes_completed": 10,
-                "avg_reward": 1.5,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 30,
-                "target_interactions": 100,
-                "episodes_completed": 15,
-                "avg_reward": 1.7,
-                "steps_per_sec": 2.0,
-                "status": "running",
-            },
-            {
-                "interaction_step": 30,
-                "target_interactions": 100,
-                "episodes_completed": 15,
-                "avg_reward": 1.7,
-                "steps_per_sec": 2.0,
-                "status": "completed",
-                "estimated_end_time": "2026-04-01T12:00:00+00:00",
-                "remaining_seconds": 0.0,
-            },
-        ]
-    )
-    printed: list[str] = []
-
-    class DummyProcess:
-        def __init__(self) -> None:
-            self._poll_results = iter([None, None, None, 0])
-
-        def poll(self):
-            return next(self._poll_results)
-
-    original_stat = Path.stat
-    stat_counter = {"value": 0}
-
-    def fake_load_progress(_path: Path):
-        return next(payloads)
-
-    def fake_stat(self: Path):
-        if self == progress_json_path:
-            stat_counter["value"] += 1
-            return SimpleNamespace(st_mtime_ns=stat_counter["value"])
-        return original_stat(self)
-
-    monkeypatch.setattr("scripts.utils.train_mainline_launcher._load_progress_payload", fake_load_progress)
-    monkeypatch.setattr(Path, "stat", fake_stat)
-    monkeypatch.setattr("builtins.print", lambda message: printed.append(str(message)))
-    monkeypatch.setattr("scripts.utils.train_mainline_launcher.time.sleep", lambda _seconds: None)
-
-    last_payload = _monitor_process_progress(
-        DummyProcess(),
-        progress_json_path=progress_json_path,
-        summary_interval_s=0.0,
-        progress_episode_interval=10,
-    )
-
-    assert len(printed) == 2
-    assert "episodes=10" in printed[0]
-    assert "[train:completed]" in printed[1]
-    assert "episodes=15" in printed[1]
-    assert last_payload["status"] == "completed"
+    assert cfg.env.train_window_days == 3
+    assert cfg.env.window_stride_days == 2
+    assert cfg.train.learning_starts_transitions == 11
+    assert cfg.train.actor_learning_starts_transitions == 17
+    assert cfg.train.n_step_return == 5
+    assert cfg.train.feasible_random_exploration_start == pytest.approx(0.4)
+    assert cfg.train.feasible_random_exploration_end == pytest.approx(0.1)
+    assert cfg.train.feasible_random_exploration_decay_steps == 99
+    assert cfg.algo.gamma == pytest.approx(0.997)
 
 
 def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
@@ -231,6 +196,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         seed=0,
         require_cuda=False,
     )
+    shared_cfg.env.train_window_days = 1
+    shared_cfg.env.window_stride_days = 1
     apply_notebook_experiment_settings(
         shared_cfg,
         prediction_mode="perfect",
@@ -256,8 +223,12 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
             "shared_data_signature": str(shared_data.signature_hash),
         },
         "reward_controls": {
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "soc_boundary_epsilon": 0.02,
+            "soc_boundary_margin": 0.02,
             "export_subsidy_eur_per_kwh": 0.079,
-            "w_soc_pen": 0.0,
             "w_voltage_pen": 0.0,
             "w_line_pen": 0.0,
             "w_trafo_pen": 0.0,
@@ -281,6 +252,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
+        "train_init_soc_low": 0.2,
+        "train_init_soc_high": 0.8,
         "soc_min": 0.05,
         "soc_max": 0.95,
         "soc_target": 0.5,
@@ -291,18 +264,28 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
         "model_family": "mlp",
         "num_envs": 2,
         "vec_env_type": "subproc",
-        "train_episodes": 1,
-        "max_train_steps": 4,
+        "train_episodes": 2,
+        "max_train_steps": None,
         "batch_size": 2,
         "buffer_size": 32,
         "update_interval": 1,
         "updates_per_step": 1,
+        "learning_starts_transitions": 0,
+        "actor_learning_starts_transitions": 0,
+        "n_step_return": 1,
+        "feasible_random_exploration_start": 0.0,
+        "feasible_random_exploration_end": 0.0,
+        "feasible_random_exploration_decay_steps": 1,
+        "discount_gamma": 0.9995,
         "policy_update_freq": 2,
         "use_noise_decay": True,
-        "show_progress": False,
+        "show_progress": True,
+        "progress_episode_interval": 1,
         "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
+        "train_window_days": 1,
+        "window_stride_days": 1,
     }
     checkpoint_controls = {
         "experiment_name": "grid_mainline",
@@ -325,7 +308,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "scripts.run_train_mainline",
+        "scripts.mainline_madrl",
         "--experiment-controls",
         str(experiment_path),
         "--data-controls",
@@ -354,11 +337,15 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    combined_output = f"{completed.stdout}\n{completed.stderr}"
+    assert "Training:" in combined_output
+    assert "avg_reward=" in combined_output
+    for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
+        assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert f"0/{int(result['perf_summary']['target_total_steps'])}" in combined_output
     reward_summary_path = Path(result["reward_summary_path"])
     reward_summary = json.loads(reward_summary_path.read_text(encoding="utf-8"))
-    progress_payload = json.loads((Path(result["meta_dir"]) / "progress.json").read_text(encoding="utf-8"))
-
     assert result["algorithm"] == "MATD3"
     assert result["prediction_mode"] == "perfect"
     assert result["evaluation_mode"] == "oracle_eval"
@@ -380,18 +367,46 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     assert len(reward_summary["episodes"]) == result["episodes_completed"]
     assert len(reward_summary["episode_total_reward"]) == result["episodes_completed"]
     assert "components" in reward_summary
-    assert {"r_purchase_cost", "r_export_subsidy", "r_soc_pen", "r_safe_v", "r_safe_line", "r_safe_trafo"} == set(
-        reward_summary["components"]
-    )
+    assert {
+        "madrl_r_inc",
+        "madrl_r_action_penalty",
+        "madrl_r_soc_regularization",
+        "madrl_r_throughput_bonus",
+        "madrl_r_safe_v",
+        "madrl_r_safe_line",
+        "madrl_r_safe_trafo",
+        "madrl_r_safe_total",
+        "madrl_r_total_internal",
+    } == set(reward_summary["components"])
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
-    assert progress_payload["estimated_end_time"]
-    assert progress_payload["remaining_seconds"] == 0.0
+    assert "terminal_soc_value_weight" not in result["experiment_controls"]["reward_controls"]
+    assert "training_contract_signature" in result
+    assert "training_contract" in result
+    assert "action_mapping_contract" not in result["training_contract"]
+    assert result["training_contract"]["actor_action_mapping_contract"] == ACTOR_ACTION_MAPPING_CONTRACT
+    assert result["training_contract"]["training_health_contract"] == TRAINING_HEALTH_CONTRACT
+    assert result["training_contract"]["price_observation_contract"] == PRICE_OBSERVATION_CONTRACT
+    assert result["training_contract"]["shared_data_schema_version"] == SHARED_DATA_SCHEMA_VERSION
+    assert result["training_contract"]["discount_gamma"] == pytest.approx(0.9995)
+    assert result["training_contract"]["action_boundary_penalty_weight"] == pytest.approx(0.05)
+    assert result["training_contract"]["learning_starts_transitions"] == 0
+    assert result["training_contract"]["actor_learning_starts_transitions"] == 0
+    assert result["training_contract"]["n_step_return"] == 1
+    assert result["training_contract"]["feasible_random_exploration_start"] == pytest.approx(0.0)
+    assert result["training_contract"]["observation_feature_set"]["sequence"] == [
+        "wholesale_price_relative",
+        "wholesale_price_spread",
+        "load",
+        "pv",
+    ]
+    assert "training_health" in result
+    assert "training_health" in reward_summary
+    assert result["checkpoint_info"]["training_contract_signature"] == result["training_contract_signature"]
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]
     assert "avg_update_ms_per_call" in result["perf_summary"]
     assert "sample_time_s" in result["perf_summary"]
     assert "history_time_s" in result["perf_summary"]
-    assert "progress_io_time_s" in result["perf_summary"]
     assert "agent_update_time_s" in result["perf_summary"]
     assert result["perf_summary"]["shared_data_enabled"] is True
     assert result["perf_summary"]["shared_data_signature"] == str(shared_data.signature_hash)
@@ -419,8 +434,12 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "device_request": "cpu",
         "require_cuda": False,
         "reward_controls": {
+            "action_boundary_penalty_weight": 0.05,
+            "soc_boundary_regularization_weight": 0.005,
+            "throughput_bonus_eur_per_kwh_max": 0.002,
+            "soc_boundary_epsilon": 0.02,
+            "soc_boundary_margin": 0.02,
             "export_subsidy_eur_per_kwh": 0.079,
-            "w_soc_pen": 0.0,
         },
         "safety_controls": {
             "enabled": True,
@@ -449,6 +468,8 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "max_charge_rate": 0.5,
         "efficiency": 0.95,
         "init_soc": 0.5,
+        "train_init_soc_low": 0.2,
+        "train_init_soc_high": 0.8,
         "soc_min": 0.05,
         "soc_max": 0.95,
         "soc_target": 0.5,
@@ -465,12 +486,21 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
         "buffer_size": 32,
         "update_interval": 1,
         "updates_per_step": 1,
+        "learning_starts_transitions": 0,
+        "actor_learning_starts_transitions": 0,
+        "n_step_return": 1,
+        "feasible_random_exploration_start": 0.0,
+        "feasible_random_exploration_end": 0.0,
+        "feasible_random_exploration_decay_steps": 1,
+        "discount_gamma": 0.9995,
         "policy_update_freq": 2,
         "use_noise_decay": False,
         "show_progress": False,
         "progress_postfix_interval": 2,
         "noise_std_init": 0.2,
         "noise_std_min": 0.05,
+        "train_window_days": 1,
+        "window_stride_days": 1,
     }
     checkpoint_controls = {
         "experiment_name": "grid_mainline_safe_poc",
@@ -503,7 +533,7 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "scripts.run_train_mainline",
+        "scripts.mainline_madrl",
         "--experiment-controls",
         str(experiment_path),
         "--data-controls",
@@ -532,11 +562,15 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    combined_output = f"{completed.stdout}\n{completed.stderr}"
+    for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
+        assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
     reward_summary = json.loads(Path(result["reward_summary_path"]).read_text(encoding="utf-8"))
 
     assert result["algorithm"] == "MATD3_SAFE_POC"
     assert result["experiment_controls"]["reward_controls"]["export_subsidy_eur_per_kwh"] == 0.079
+    assert "terminal_soc_value_weight" not in result["experiment_controls"]["reward_controls"]
     assert result["safety_controls"]["enabled"] is True
     assert result["safety_summary"]["enabled"] is True
     assert result["safety_summary"]["projection_batches"] > 0
@@ -552,5 +586,6 @@ def test_run_train_mainline_cli_supports_matd3_safe_poc(tmp_path):
     assert result["perf_summary"]["projection_time_s"] >= 0.0
     assert "target_projection_time_s" in result["perf_summary"]
     assert "actor_projection_time_s" in result["perf_summary"]
-    assert "r_soc_pen" in reward_summary["components"]
+    assert "madrl_r_soc_regularization" in reward_summary["components"]
+    assert "r_terminal_soc_value" not in reward_summary["components"]
     assert Path(result["model_root"]).parts[-4:-1] == ("MATD3_SAFE_POC", "perfect", "grid_mainline_safe_poc")

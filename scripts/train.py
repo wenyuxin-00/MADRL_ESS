@@ -1,819 +1,164 @@
-"""Training loop for MADRL experiments."""
-
 from __future__ import annotations
-
-import json
-import os
-import time
-from datetime import datetime, timedelta
-from pathlib import Path
+import os,time
+from datetime import datetime
 from typing import Any
-
-import numpy as np
-import torch
+import numpy as np,torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
-
-from controllers.action_feasibility import (
-    action_info_to_numpy,
-    compute_action_gap_metrics_torch,
-    enforce_local_action_feasibility_torch,
-    merge_action_info_into_step_info,
-)
-from controllers.madrl.registry import get_agent_cls
+from controllers.madrl.base_agent import get_agent_cls
+from controllers.madrl.safety_projector import action_info_to_numpy,compute_action_gap_metrics_torch,enforce_local_action_feasibility_torch,map_actor_output_to_soc_feasible_action_torch,merge_action_info_into_step_info,sample_feasible_random_battery_action_torch
 from controllers.madrl.safety_projector import SAFE_POC_ALGO_NAME
-from scripts.checkpoints import build_checkpoint_manifest, write_checkpoint_manifest
-from scripts.utils.nested import to_torch_nested
+from controllers.madrl_controller import _override_soc_penalty_metrics
+from scripts.checkpoints import build_checkpoint_manifest,build_training_contract,build_training_contract_signature,write_checkpoint_manifest
 from scripts.utils.project_paths import get_tensorboard_run_dir
+from scripts.utils.torch_runtime import to_torch_nested
 from scripts.utils.replay_buffer import ReplayBuffer
-
-_PROJECTION_RESIDUAL_TOL = 1e-6
-
-
-def _iso_timestamp(value: datetime) -> str:
-    return value.astimezone().isoformat(timespec="seconds")
-
-
-def _estimate_remaining_seconds(
-    *,
-    interaction_step: int,
-    target_interactions: int,
-    elapsed_seconds: float,
-) -> float | None:
-    remaining_interactions = max(int(target_interactions) - int(interaction_step), 0)
-    if remaining_interactions == 0:
-        return 0.0
-    if interaction_step <= 0 or elapsed_seconds <= 0.0:
-        return None
-    return float(remaining_interactions * (elapsed_seconds / float(interaction_step)))
-
-
-def _build_progress_payload(
-    *,
-    interaction_step: int,
-    target_interactions: int,
-    episodes_completed: int,
-    total_steps: int,
-    avg_reward: float,
-    action_time_total: float,
-    env_step_time_total: float,
-    update_time_total: float,
-    update_calls: int,
-    run_start: float,
-    started_at: datetime,
-    status: str,
-    error_message: str = "",
-) -> dict[str, object]:
-    now = datetime.now().astimezone()
-    elapsed = max(time.perf_counter() - run_start, 0.0)
-    safe_elapsed = max(elapsed, 1e-6)
-    remaining_seconds = _estimate_remaining_seconds(
-        interaction_step=interaction_step,
-        target_interactions=target_interactions,
-        elapsed_seconds=elapsed,
-    )
-    if status != "running" and int(interaction_step) >= int(target_interactions):
-        remaining_seconds = 0.0
-        estimated_end_time = now
-    elif remaining_seconds is None:
-        estimated_end_time = None
-    else:
-        estimated_end_time = now + timedelta(seconds=float(remaining_seconds))
-    return {
-        "status": str(status),
-        "error_message": str(error_message),
-        "interaction_step": int(interaction_step),
-        "target_interactions": int(target_interactions),
-        "episodes_completed": int(episodes_completed),
-        "total_steps": int(total_steps),
-        "avg_reward": float(avg_reward),
-        "steps_per_sec": float(total_steps / safe_elapsed),
-        "avg_action_ms_per_iter": float(1000.0 * action_time_total / max(interaction_step, 1)),
-        "avg_env_ms_per_iter": float(1000.0 * env_step_time_total / max(interaction_step, 1)),
-        "avg_update_ms_per_call": float(1000.0 * update_time_total / max(update_calls, 1)),
-        "started_at": _iso_timestamp(started_at),
-        "updated_at": _iso_timestamp(now),
-        "elapsed_seconds": float(round(elapsed, 3)),
-        "remaining_seconds": None if remaining_seconds is None else float(round(remaining_seconds, 3)),
-        "estimated_end_time": None if estimated_end_time is None else _iso_timestamp(estimated_end_time),
-    }
-
-
-def _write_progress_snapshot(path: str | os.PathLike[str], payload: dict[str, object]) -> None:
-    target_path = Path(path)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _override_soc_penalty_metrics(
-    action_info: dict[str, torch.Tensor] | None,
-    penalty_source_info: dict[str, torch.Tensor] | None,
-) -> dict[str, torch.Tensor] | None:
-    if action_info is None:
-        return penalty_source_info
-    if penalty_source_info is None:
-        return action_info
-    merged = dict(action_info)
-    for key in ("soc_penalty_unweighted", "action_penalty_unweighted"):
-        if key in penalty_source_info:
-            merged[key] = penalty_source_info[key]
-    return merged
-
-
+_PROJECTION_RESIDUAL_TOL=1e-06
+def _iso_timestamp(value:datetime)->str:return value.astimezone().isoformat(timespec='seconds')
+def _estimate_remaining_seconds(*,interaction_step:int,target_interactions:int,elapsed_seconds:float)->float|None:
+	remaining_interactions=max(int(target_interactions)-int(interaction_step),0)
+	if remaining_interactions==0:return .0
+	if interaction_step<=0 or elapsed_seconds<=.0:return
+	return float(remaining_interactions*(elapsed_seconds/float(interaction_step)))
+def init_safety_tracking(runner:Any)->None:runner._safety_projection_stats={stage:{'calls':0,'time_s':.0}for stage in('rollout','target','actor')};runner._safety_diag={'samples':0,'projected_fraction':.0,'pre_trafo_import_violation_kw':.0,'pre_trafo_export_violation_kw':.0,'post_trafo_import_violation_kw':.0,'post_trafo_export_violation_kw':.0,'max_abs_delta':.0};runner._projector_local_infeasible_count=0
+def _safe_projection_enabled(runner:Any)->bool:algo_cfg=getattr(runner.cfg,'algo',None);algo_name=getattr(algo_cfg,'name','');return str(algo_name)==SAFE_POC_ALGO_NAME and getattr(runner,'safety_projector',None)is not None
+def _record_projection_event(runner:Any,*,stage:str,batch_size:int,elapsed_s:float,diagnostics:dict[str,Any]|None=None)->None:
+	normalized_stage=str(stage)if str(stage)in runner._safety_projection_stats else'rollout';runner._safety_projection_stats[normalized_stage]['calls']+=1;runner._safety_projection_stats[normalized_stage]['time_s']+=float(elapsed_s)
+	if diagnostics is not None:
+		weighted_batch=max(int(diagnostics.get('batch_size',batch_size)),1);runner._safety_diag['samples']+=weighted_batch
+		for field_name in('projected_fraction','pre_trafo_import_violation_kw','pre_trafo_export_violation_kw','post_trafo_import_violation_kw','post_trafo_export_violation_kw'):runner._safety_diag[field_name]+=float(diagnostics.get(field_name,.0))*weighted_batch
+		runner._safety_diag['max_abs_delta']=max(runner._safety_diag['max_abs_delta'],float(diagnostics.get('max_abs_delta',.0)))
+def _record_projector_local_infeasible(runner:Any,residual_action_info:dict[str,torch.Tensor]|None)->None:
+	if residual_action_info is None or(residual:=residual_action_info.get('soc_penalty_unweighted'))is None:return
+	residual_tensor=torch.as_tensor(residual,dtype=torch.float32)
+	if residual_tensor.ndim==1:residual_tensor=residual_tensor.unsqueeze(0)
+	affected=torch.any(residual_tensor>_PROJECTION_RESIDUAL_TOL,dim=-1);runner._projector_local_infeasible_count+=int(torch.count_nonzero(affected).item())
+def _feasibility_kwargs(cfg:Any)->dict[str,float]:return{'efficiency':float(cfg.env.efficiency),'dt_hours':float(cfg.env.dt),'soc_min':float(cfg.env.soc_min),'soc_max':float(cfg.env.soc_max)}
+def _merge_action_info(*parts:dict[str,torch.Tensor]|None)->dict[str,torch.Tensor]|None:
+	merged:dict[str,torch.Tensor]={}
+	for part in parts:
+		if part is not None:merged.update(part)
+	return merged or None
+def _apply_feasible_random_exploration(runner:Any,safety_local:torch.Tensor,mapped_action_t:torch.Tensor)->tuple[torch.Tensor,dict[str,torch.Tensor]]:
+	epsilon=float(runner.cfg.train.resolved_feasible_random_exploration(runner.total_steps))
+	mask=torch.rand(mapped_action_t.shape[:-1],device=mapped_action_t.device)<epsilon
+	random_action_t,random_info=sample_feasible_random_battery_action_torch(safety_local,mapped_action_t,**_feasibility_kwargs(runner.cfg))
+	explored_action_t=torch.where(mask.unsqueeze(-1),random_action_t,mapped_action_t)
+	info={'feasible_random_exploration_epsilon':torch.full(mask.shape,epsilon,dtype=mapped_action_t.dtype,device=mapped_action_t.device),'feasible_random_exploration_source':mask.to(dtype=mapped_action_t.dtype)}
+	info.update(random_info)
+	return explored_action_t,info
+def build_safety_summary(runner:Any)->dict[str,Any]:
+	if not _safe_projection_enabled(runner):return{'enabled':False,'algorithm':str(runner.cfg.algo.name)}
+	diagnostic_denominator=max(int(runner._safety_diag['samples']),1);projection_time_total=float(sum(stage_stats['time_s']for stage_stats in runner._safety_projection_stats.values()));return{'enabled':True,'algorithm':str(runner.cfg.algo.name),'projector_mode':str(getattr(runner.cfg.safety,'projector_mode','joint_linearized')),'projection_batches':int(sum(stage_stats['calls']for stage_stats in runner._safety_projection_stats.values())),'projected_fraction':float(runner._safety_diag['projected_fraction']/diagnostic_denominator),'max_abs_action_delta':float(runner._safety_diag['max_abs_delta']),'mean_pre_trafo_import_violation_kw':float(runner._safety_diag['pre_trafo_import_violation_kw']/diagnostic_denominator),'mean_pre_trafo_export_violation_kw':float(runner._safety_diag['pre_trafo_export_violation_kw']/diagnostic_denominator),'mean_post_trafo_import_violation_kw':float(runner._safety_diag['post_trafo_import_violation_kw']/diagnostic_denominator),'mean_post_trafo_export_violation_kw':float(runner._safety_diag['post_trafo_export_violation_kw']/diagnostic_denominator),'projection_time_s':projection_time_total,'rollout_projection_calls':int(runner._safety_projection_stats['rollout']['calls']),'target_projection_calls':int(runner._safety_projection_stats['target']['calls']),'actor_projection_calls':int(runner._safety_projection_stats['actor']['calls']),'rollout_projection_time_s':float(runner._safety_projection_stats['rollout']['time_s']),'target_projection_time_s':float(runner._safety_projection_stats['target']['time_s']),'actor_projection_time_s':float(runner._safety_projection_stats['actor']['time_s']),'projector_local_infeasible_count':int(runner._projector_local_infeasible_count)}
+def select_action_batch_with_info(runner:Any,obs_np:dict)->tuple[np.ndarray,dict[str,np.ndarray]|None]:
+	obs_t=to_torch_nested(obs_np,runner.cfg.runtime.device)
+	with torch.inference_mode():
+		raw_action_t=torch.stack([agent.act_from_torch_obs(obs_t,noise_std=runner.noise_std)for agent in runner.agent_n],dim=1);action_info=None
+		if'safety_local'in obs_t:
+			mapped_action_t,mapping_info=map_actor_output_to_soc_feasible_action_torch(obs_t['safety_local'],raw_action_t,**_feasibility_kwargs(runner.cfg))
+			rollout_action_t,exploration_info=_apply_feasible_random_exploration(runner,obs_t['safety_local'],mapped_action_t)
+			if _safe_projection_enabled(runner):projection_started=time.perf_counter();projected_action_t,diagnostics=runner.safety_projector.project_actions_from_safety_local(obs_t['safety_local'],rollout_action_t,return_diagnostics=True);_record_projection_event(runner,stage='rollout',batch_size=int(raw_action_t.shape[0]),elapsed_s=time.perf_counter()-projection_started,diagnostics=diagnostics);action_t,projector_residual_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],projected_action_t,**_feasibility_kwargs(runner.cfg));_record_projector_local_infeasible(runner,projector_residual_info);gap_info=compute_action_gap_metrics_torch(obs_t['safety_local'],projected_action_t,action_t);action_info=_merge_action_info(_override_soc_penalty_metrics(gap_info,projector_residual_info),mapping_info,exploration_info)
+			else:action_t,residual_info=enforce_local_action_feasibility_torch(obs_t['safety_local'],rollout_action_t,**_feasibility_kwargs(runner.cfg));gap_info=compute_action_gap_metrics_torch(obs_t['safety_local'],rollout_action_t,action_t);action_info=_merge_action_info(_override_soc_penalty_metrics(gap_info,residual_info),mapping_info,exploration_info)
+		else:action_t=raw_action_t
+	return action_t.to(dtype=torch.float32).cpu().numpy(),action_info_to_numpy(action_info)
+def apply_controller_action_postprocessing(runner:Any,reward:np.ndarray,info_list:list[dict[str,Any]],action_info:dict[str,np.ndarray]|None)->tuple[np.ndarray,list[dict[str,Any]]]:
+	reward_array=np.asarray(reward,dtype=np.float32)
+	if reward_array.ndim==2:reward_array=reward_array[...,None]
+	processed_info_list:list[dict[str,Any]]=[]
+	for(env_idx,info)in enumerate(info_list):
+		env_action_info=None if action_info is None else{key:np.asarray(value[env_idx],dtype=np.float32)for(key,value)in action_info.items()};merged_info=merge_action_info_into_step_info(info,env_action_info);reward_vector=np.asarray(reward_array[env_idx,:,0],dtype=np.float32)
+		merged_info['reward']=reward_vector
+		processed_info_list.append(merged_info)
+	return reward_array.astype(np.float32),processed_info_list
+def build_replay_next_obs(next_obs:dict[str,np.ndarray],info_list:list[dict[str,Any]])->dict[str,np.ndarray]:
+	replay_next_obs={key:np.asarray(value,dtype=np.float32).copy()for(key,value)in next_obs.items()}
+	for env_idx,info in enumerate(info_list):
+		bootstrap_obs=info.get('bootstrap_obs')
+		if bootstrap_obs is None:continue
+		for key,value in dict(bootstrap_obs).items():
+			if key not in replay_next_obs:raise KeyError(f"bootstrap_obs contains unexpected observation key '{key}'.")
+			replay_next_obs[key][env_idx]=np.asarray(value,dtype=np.float32)
+	return replay_next_obs
+def train_env_episode_length(train_env:Any)->int:
+	value=getattr(train_env,'episode_length',None)
+	if value is None:raise AttributeError(f"{type(train_env).__name__} must expose episode_length for TrainRunner; rebuild the vector env metadata instead of falling back to cfg.env.episode_limit.")
+	length=int(value)
+	if length<=0:raise ValueError(f"{type(train_env).__name__}.episode_length must be positive, got {length}.")
+	return length
+def build_shared_update_ctx(runner:Any,batch:dict[str,Any])->dict[str,Any]:
+	next_obs=batch['next_obs']
+	with torch.no_grad():target_actor_actions_raw=torch.stack([agent._actor_target_call(next_obs)for agent in runner.agent_n],dim=1)
+	shared_ctx={'target_actor_actions_raw':target_actor_actions_raw,'batch_size':int(batch['action'].shape[0]),'device':batch['action'].device}
+	if _safe_projection_enabled(runner):
+		shared_ctx['safety_projector']=runner.safety_projector;shared_ctx['projection_event_recorder']=lambda**kwargs:_record_projection_event(runner,**kwargs)
+	return shared_ctx
+def save_runner_model(runner:Any,model_dir:str,episode:int)->None:
+	algo_dir=os.path.join(model_dir,runner.cfg.algo.name);os.makedirs(algo_dir,exist_ok=True)
+	for agent in runner.agent_n:agent.save_model(algo_dir,episode)
+	manifest=build_checkpoint_manifest(algorithm=runner.cfg.algo.name,saved_episode_tag=episode,episodes_completed=runner.episodes_completed,total_steps=runner.total_steps,num_envs=runner.cfg.train.num_envs,episode_limit=train_env_episode_length(runner.env),save_dir=algo_dir,training_contract=build_training_contract(runner.cfg));manifest['target_total_steps']=int(dict(getattr(runner,'perf_summary',{})or{}).get('target_total_steps',runner.total_steps));manifest['global_interaction_step']=int(dict(getattr(runner,'perf_summary',{})or{}).get('global_interaction_step',runner.total_steps));write_checkpoint_manifest(algo_dir,manifest)
+def close_runner(runner:Any)->None:
+	if runner._closed:return
+	runner.env.close();runner.env_evaluate.close();runner.writer.close();runner._closed=True
+def build_training_health_summary(runner:Any)->dict[str,Any]:
+	agent_health=[dict(getattr(agent,'training_health',{})or{})for agent in getattr(runner,'agent_n',[])]
+	return{'agents':agent_health,'nonfinite_failure_count':int(sum(int(item.get('nonfinite_failure_count',0))for item in agent_health)),'actor_gradient_collapse_agents':[int(item.get('agent_id',idx))for(idx,item)in enumerate(agent_health)if bool(item.get('actor_gradient_collapse_flag',False))]}
+def build_reward_summary(runner:Any)->dict[str,Any]:
+	episode_indices=list(range(1,len(runner.episode_rewards)+1));components={str(meta.key):{'label':str(getattr(meta,'label',meta.key)),'color':str(getattr(meta,'color','#111827')),'sign':int(getattr(meta,'sign',0)),'values':[float(value)for value in runner.episode_reward_components.get(str(meta.key),[])]}for meta in runner.reward_component_meta};aggregates:dict[str,list[float]]={};grid_safety_keys=[str(meta.key)for meta in runner.reward_component_meta if str(meta.key).startswith('madrl_r_safe_')and not str(meta.key).endswith('_total')and int(getattr(meta,'sign',0))==-1]
+	if grid_safety_keys and all(key in components for key in grid_safety_keys):aggregates['grid_safety_penalty']=[float(sum(runner.episode_reward_components[key][episode_idx]for key in grid_safety_keys))for episode_idx in range(len(episode_indices))]
+	if getattr(runner,'_episode_throughput_bonus_weight_mean',None):aggregates['madrl_throughput_bonus_weight_mean']=[float(value)for value in runner._episode_throughput_bonus_weight_mean]
+	if getattr(runner,'_episode_throughput_kwh_total',None):aggregates['throughput_kwh_total']=[float(value)for value in runner._episode_throughput_kwh_total]
+	training_contract=build_training_contract(runner.cfg)
+	return{'episodes':episode_indices,'episode_total_reward':[float(value)for value in runner.episode_rewards],'components':components,'aggregates':aggregates,'madrl_throughput_bonus_weight_final':float(getattr(runner,'_last_throughput_bonus_weight',0.0)),'training_health':build_training_health_summary(runner),'training_contract':training_contract,'training_contract_signature':build_training_contract_signature(runner.cfg)}
 class TrainRunner:
-    """Lightweight explicit training runner."""
-
-    def __init__(
-        self,
-        cfg: Any,
-        train_env: Any,
-        eval_env: Any,
-        env_name: str = "GridEnv",
-        number: int = 1,
-        seed: int = 0,
-    ) -> None:
-        self.cfg = cfg
-        self.seed = int(seed)
-        self.env_name = env_name
-        self.env = train_env
-        self.env_evaluate = eval_env
-
-        agent_cls = get_agent_cls(self.cfg.algo.name)
-        self.agent_n = [agent_cls(cfg, agent_id) for agent_id in range(self.cfg.env.num_agents)]
-        self.safety_projector = getattr(self.agent_n[0], "safety_projector", None) if self.agent_n else None
-        self.apply_action_penalty = True
-
-        self.replay_buffer = ReplayBuffer(self.cfg)
-        log_dir = get_tensorboard_run_dir(
-            algorithm=self.cfg.algo.name,
-            env_name=env_name,
-            run_number=number,
-            seed=seed,
-        )
-        log_dir.mkdir(parents=True, exist_ok=True)
-        self.tensorboard_dir = str(log_dir)
-        self.writer = SummaryWriter(log_dir=str(log_dir))
-        self.vec_env_name = type(self.env).__name__
-        self.agent_performance = dict(getattr(self.agent_n[0], "performance_summary", {}))
-        self.progress_write_interval_seconds = max(
-            0.0,
-            float(getattr(self.cfg.train, "progress_write_interval_seconds", 5.0)),
-        )
-        self.history: list[dict[str, Any]] = []
-        self.episode_rewards: list[float] = []
-        self.total_steps = 0
-        self.episodes_completed = 0
-        self.noise_std = float(self.cfg.train.noise_std_init)
-        self.perf_summary: dict[str, Any] = {}
-        self.run_metadata: dict[str, Any] = {}
-        self.reward_component_meta: list[Any] = []
-        self.episode_reward_components: dict[str, list[float]] = {}
-        self._safety_projection_batches = 0
-        self._safety_projection_samples = 0
-        self._safety_diagnostic_samples = 0
-        self._safety_projection_calls_by_stage = {
-            "rollout": 0,
-            "target": 0,
-            "actor": 0,
-        }
-        self._safety_projection_samples_by_stage = {
-            "rollout": 0,
-            "target": 0,
-            "actor": 0,
-        }
-        self._safety_projection_time_s_by_stage = {
-            "rollout": 0.0,
-            "target": 0.0,
-            "actor": 0.0,
-        }
-        self._safety_projected_fraction_weighted = 0.0
-        self._safety_mean_abs_delta_weighted = 0.0
-        self._safety_mean_abs_delta_kw_weighted = 0.0
-        self._safety_pre_violation_weighted = 0.0
-        self._safety_post_violation_weighted = 0.0
-        self._safety_pre_trafo_import_violation_kw_weighted = 0.0
-        self._safety_pre_trafo_export_violation_kw_weighted = 0.0
-        self._safety_post_trafo_import_violation_kw_weighted = 0.0
-        self._safety_post_trafo_export_violation_kw_weighted = 0.0
-        self._safety_max_abs_delta = 0.0
-        self._safety_env_fallback_steps = 0
-        self._safety_env_observations = 0
-        self._safety_env_action_pen_total = 0.0
-        self._projector_local_infeasible_count = 0
-        self._closed = False
-
-    def _safe_projection_enabled(self) -> bool:
-        algo_cfg = getattr(self.cfg, "algo", None)
-        algo_name = getattr(algo_cfg, "name", "")
-        return str(algo_name) == SAFE_POC_ALGO_NAME and getattr(self, "safety_projector", None) is not None
-
-    def _record_projection_diagnostics(self, diagnostics: dict[str, Any]) -> None:
-        batch_size = max(int(diagnostics.get("batch_size", 0)), 1)
-        self._safety_diagnostic_samples += batch_size
-        self._safety_projected_fraction_weighted += float(diagnostics.get("projected_fraction", 0.0)) * batch_size
-        self._safety_mean_abs_delta_weighted += float(diagnostics.get("mean_abs_delta", 0.0)) * batch_size
-        self._safety_mean_abs_delta_kw_weighted += float(diagnostics.get("mean_abs_delta_kw", 0.0)) * batch_size
-        self._safety_pre_violation_weighted += float(diagnostics.get("pre_violation", 0.0)) * batch_size
-        self._safety_post_violation_weighted += float(diagnostics.get("post_violation", 0.0)) * batch_size
-        self._safety_pre_trafo_import_violation_kw_weighted += float(
-            diagnostics.get("pre_trafo_import_violation_kw", 0.0)
-        ) * batch_size
-        self._safety_pre_trafo_export_violation_kw_weighted += float(
-            diagnostics.get("pre_trafo_export_violation_kw", 0.0)
-        ) * batch_size
-        self._safety_post_trafo_import_violation_kw_weighted += float(
-            diagnostics.get("post_trafo_import_violation_kw", 0.0)
-        ) * batch_size
-        self._safety_post_trafo_export_violation_kw_weighted += float(
-            diagnostics.get("post_trafo_export_violation_kw", 0.0)
-        ) * batch_size
-        self._safety_max_abs_delta = max(
-            self._safety_max_abs_delta,
-            float(diagnostics.get("max_abs_delta", 0.0)),
-        )
-
-    def _record_projection_event(
-        self,
-        *,
-        stage: str,
-        batch_size: int,
-        elapsed_s: float,
-        diagnostics: dict[str, Any] | None = None,
-    ) -> None:
-        normalized_stage = str(stage)
-        if normalized_stage not in self._safety_projection_calls_by_stage:
-            normalized_stage = "rollout"
-        safe_batch_size = max(int(batch_size), 1)
-        self._safety_projection_batches += 1
-        self._safety_projection_samples += safe_batch_size
-        self._safety_projection_calls_by_stage[normalized_stage] += 1
-        self._safety_projection_samples_by_stage[normalized_stage] += safe_batch_size
-        self._safety_projection_time_s_by_stage[normalized_stage] += float(elapsed_s)
-        if diagnostics is not None:
-            self._record_projection_diagnostics(diagnostics)
-
-    def _record_env_fallback(self, info: dict[str, Any]) -> None:
-        del info
-        return
-
-    def _record_projector_local_infeasible(
-        self,
-        residual_action_info: dict[str, torch.Tensor] | None,
-    ) -> None:
-        if residual_action_info is None:
-            return
-        residual = residual_action_info.get("soc_penalty_unweighted")
-        if residual is None:
-            return
-        residual_tensor = torch.as_tensor(residual, dtype=torch.float32)
-        if residual_tensor.ndim == 1:
-            residual_tensor = residual_tensor.unsqueeze(0)
-        affected = torch.any(residual_tensor > _PROJECTION_RESIDUAL_TOL, dim=-1)
-        self._projector_local_infeasible_count += int(torch.count_nonzero(affected).item())
-
-    def build_safety_summary(self) -> dict[str, Any]:
-        if not self._safe_projection_enabled():
-            return {
-                "enabled": False,
-                "algorithm": str(self.cfg.algo.name),
-            }
-
-        diagnostic_denominator = max(self._safety_diagnostic_samples, 1)
-        env_denominator = max(self._safety_env_observations, 1)
-        projection_time_total = float(sum(self._safety_projection_time_s_by_stage.values()))
-        return {
-            "enabled": True,
-            "algorithm": str(self.cfg.algo.name),
-            "projector_mode": str(getattr(self.cfg.safety, "projector_mode", "joint_linearized")),
-            "projection_batches": int(self._safety_projection_batches),
-            "projection_samples": int(self._safety_projection_samples),
-            "projection_diagnostic_samples": int(self._safety_diagnostic_samples),
-            "projected_fraction": float(self._safety_projected_fraction_weighted / diagnostic_denominator),
-            "mean_abs_action_delta": float(self._safety_mean_abs_delta_weighted / diagnostic_denominator),
-            "max_abs_action_delta": float(self._safety_max_abs_delta),
-            "mean_abs_action_delta_kw": float(self._safety_mean_abs_delta_kw_weighted / diagnostic_denominator),
-            "mean_pre_projection_violation": float(self._safety_pre_violation_weighted / diagnostic_denominator),
-            "mean_post_projection_violation": float(self._safety_post_violation_weighted / diagnostic_denominator),
-            "mean_pre_trafo_import_violation_kw": float(
-                self._safety_pre_trafo_import_violation_kw_weighted / diagnostic_denominator
-            ),
-            "mean_pre_trafo_export_violation_kw": float(
-                self._safety_pre_trafo_export_violation_kw_weighted / diagnostic_denominator
-            ),
-            "mean_post_trafo_import_violation_kw": float(
-                self._safety_post_trafo_import_violation_kw_weighted / diagnostic_denominator
-            ),
-            "mean_post_trafo_export_violation_kw": float(
-                self._safety_post_trafo_export_violation_kw_weighted / diagnostic_denominator
-            ),
-            "projection_time_s": projection_time_total,
-            "rollout_projection_calls": int(self._safety_projection_calls_by_stage["rollout"]),
-            "target_projection_calls": int(self._safety_projection_calls_by_stage["target"]),
-            "actor_projection_calls": int(self._safety_projection_calls_by_stage["actor"]),
-            "rollout_projection_samples": int(self._safety_projection_samples_by_stage["rollout"]),
-            "target_projection_samples": int(self._safety_projection_samples_by_stage["target"]),
-            "actor_projection_samples": int(self._safety_projection_samples_by_stage["actor"]),
-            "rollout_projection_time_s": float(self._safety_projection_time_s_by_stage["rollout"]),
-            "target_projection_time_s": float(self._safety_projection_time_s_by_stage["target"]),
-            "actor_projection_time_s": float(self._safety_projection_time_s_by_stage["actor"]),
-            "env_fallback_action_pen_steps": int(self._safety_env_fallback_steps),
-            "env_fallback_action_pen_rate": float(self._safety_env_fallback_steps / env_denominator),
-            "env_fallback_action_pen_mean": float(self._safety_env_action_pen_total / env_denominator),
-            "projector_local_infeasible_count": int(self._projector_local_infeasible_count),
-        }
-
-    def format_env_actions(self, action_batch: np.ndarray) -> list[np.ndarray]:
-        return [action_batch[:, agent_id].copy() for agent_id in range(self.cfg.env.num_agents)]
-
-    def _select_action_batch_with_info(
-        self,
-        obs_np: dict,
-    ) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
-        obs_t = to_torch_nested(obs_np, self.cfg.runtime.device)
-        with torch.inference_mode():
-            raw_action_t = torch.stack(
-                [agent.act_from_torch_obs(obs_t, noise_std=self.noise_std) for agent in self.agent_n],
-                dim=1,
-            )
-            action_info = None
-            if self._safe_projection_enabled():
-                projection_started = time.perf_counter()
-                projected_action_t, diagnostics = self.safety_projector.project_actions_from_safety_local(
-                    obs_t["safety_local"],
-                    raw_action_t,
-                    return_diagnostics=True,
-                )
-                self._record_projection_event(
-                    stage="rollout",
-                    batch_size=int(raw_action_t.shape[0]),
-                    elapsed_s=time.perf_counter() - projection_started,
-                    diagnostics=diagnostics,
-                )
-                action_t, projector_residual_info = enforce_local_action_feasibility_torch(
-                    obs_t["safety_local"],
-                    projected_action_t,
-                    efficiency=float(self.cfg.env.efficiency),
-                    dt_hours=float(self.cfg.env.dt),
-                    soc_min=float(self.cfg.env.soc_min),
-                    soc_max=float(self.cfg.env.soc_max),
-                )
-                self._record_projector_local_infeasible(projector_residual_info)
-                action_info = compute_action_gap_metrics_torch(obs_t["safety_local"], raw_action_t, action_t)
-                action_info = _override_soc_penalty_metrics(action_info, projector_residual_info)
-            elif "safety_local" in obs_t:
-                action_t, action_info = enforce_local_action_feasibility_torch(
-                    obs_t["safety_local"],
-                    raw_action_t,
-                    efficiency=float(self.cfg.env.efficiency),
-                    dt_hours=float(self.cfg.env.dt),
-                    soc_min=float(self.cfg.env.soc_min),
-                    soc_max=float(self.cfg.env.soc_max),
-                )
-            else:
-                action_t = raw_action_t
-        return (
-            action_t.to(dtype=torch.float32).cpu().numpy(),
-            action_info_to_numpy(action_info),
-        )
-
-    def select_action_batch(self, obs_np: dict) -> np.ndarray:
-        action_batch, _ = self._select_action_batch_with_info(obs_np)
-        return action_batch
-
-    def _apply_controller_action_postprocessing(
-        self,
-        reward: np.ndarray,
-        info_list: list[dict[str, Any]],
-        action_info: dict[str, np.ndarray] | None,
-    ) -> tuple[np.ndarray, list[dict[str, Any]]]:
-        reward_array = np.asarray(reward, dtype=np.float32)
-        if reward_array.ndim == 2:
-            reward_array = reward_array[..., None]
-
-        processed_info_list: list[dict[str, Any]] = []
-        for env_idx, info in enumerate(info_list):
-            env_action_info = None
-            if action_info is not None:
-                env_action_info = {
-                    key: np.asarray(value[env_idx], dtype=np.float32)
-                    for key, value in action_info.items()
-                }
-            merged_info, action_penalty = merge_action_info_into_step_info(
-                info,
-                env_action_info,
-                soc_pen_weight=float(self.cfg.reward.w_soc_pen),
-                apply_action_penalty=self.apply_action_penalty,
-            )
-            reward_array[env_idx, :, 0] -= np.asarray(action_penalty, dtype=np.float32)
-            merged_info["reward"] = np.asarray(reward_array[env_idx, :, 0], dtype=np.float32)
-            processed_info_list.append(merged_info)
-        return reward_array.astype(np.float32), processed_info_list
-
-    def rollout_once(self, obs_np: dict | None = None) -> dict:
-        if obs_np is None:
-            obs_np, reset_info = self.env.reset()
-        else:
-            reset_info = None
-        action_batch, action_info = self._select_action_batch_with_info(obs_np)
-        next_obs, reward, terminated, truncated, info_list = self.env.step(
-            self.format_env_actions(action_batch)
-        )
-        reward, info_list = self._apply_controller_action_postprocessing(reward, info_list, action_info)
-        done = np.logical_or(terminated, truncated).astype(np.float32)
-        return {
-            "obs": obs_np,
-            "reset_info": reset_info,
-            "action_batch": action_batch,
-            "next_obs": next_obs,
-            "reward": reward,
-            "done": done,
-            "terminated": terminated,
-            "truncated": truncated,
-            "info_list": info_list,
-        }
-
-    def _build_shared_update_ctx(self, batch: dict[str, Any]) -> dict[str, Any]:
-        next_obs = batch["next_obs"]
-        with torch.no_grad():
-            target_actor_actions_clean = torch.stack(
-                [agent._actor_target_call(next_obs) for agent in self.agent_n],
-                dim=1,
-            )
-        shared_ctx = {
-            "target_actor_actions_clean": target_actor_actions_clean,
-            "batch_size": int(batch["action"].shape[0]),
-            "device": batch["action"].device,
-        }
-        if self._safe_projection_enabled():
-            shared_ctx["safety_projector"] = self.safety_projector
-            shared_ctx["projection_event_recorder"] = self._record_projection_event
-            with torch.no_grad():
-                noise = (torch.randn_like(target_actor_actions_clean) * float(self.cfg.algo.policy_noise)).clamp(
-                    -float(self.cfg.algo.noise_clip),
-                    float(self.cfg.algo.noise_clip),
-                )
-                target_actor_actions = (target_actor_actions_clean + noise).clamp(
-                    -float(self.cfg.model.max_action),
-                    float(self.cfg.model.max_action),
-                )
-                projection_started = time.perf_counter()
-                shared_ctx["projected_target_actions"] = self.safety_projector.project_actions_from_safety_local(
-                    next_obs["safety_local"],
-                    target_actor_actions,
-                )
-                self._record_projection_event(
-                    stage="target",
-                    batch_size=int(target_actor_actions.shape[0]),
-                    elapsed_s=time.perf_counter() - projection_started,
-                )
-        return shared_ctx
-
-    def save_model(self, model_dir: str, episode: int) -> None:
-        algo_dir = os.path.join(model_dir, self.cfg.algo.name)
-        os.makedirs(algo_dir, exist_ok=True)
-        for agent in self.agent_n:
-            agent.save_model(algo_dir, episode)
-
-        manifest = build_checkpoint_manifest(
-            algorithm=self.cfg.algo.name,
-            saved_episode_tag=episode,
-            episodes_completed=self.episodes_completed,
-            total_steps=self.total_steps,
-            num_envs=self.cfg.train.num_envs,
-            episode_limit=self.cfg.env.episode_limit,
-            save_dir=algo_dir,
-        )
-        write_checkpoint_manifest(algo_dir, manifest)
-
-    def load_model(self, model_dir: str, episode: int) -> None:
-        algo_dir = os.path.join(model_dir, self.cfg.algo.name)
-        for agent in self.agent_n:
-            agent.load_model(algo_dir, episode)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self.env.close()
-        self.env_evaluate.close()
-        self.writer.close()
-        self._closed = True
-
-    def build_reward_summary(self) -> dict[str, Any]:
-        episode_indices = list(range(1, len(self.episode_rewards) + 1))
-        components: dict[str, dict[str, Any]] = {}
-        for meta in self.reward_component_meta:
-            key = str(meta.key)
-            values = [float(value) for value in self.episode_reward_components.get(key, [])]
-            components[key] = {
-                "label": str(getattr(meta, "label", meta.key)),
-                "color": str(getattr(meta, "color", "#111827")),
-                "sign": int(getattr(meta, "sign", 0)),
-                "values": values,
-            }
-
-        aggregates: dict[str, list[float]] = {}
-        grid_safety_keys = [
-            str(meta.key)
-            for meta in self.reward_component_meta
-            if str(meta.key).startswith("r_safe_") and int(getattr(meta, "sign", 0)) == -1
-        ]
-        if grid_safety_keys and all(key in components for key in grid_safety_keys):
-            num_episodes = len(episode_indices)
-            aggregates["grid_safety_penalty"] = [
-                float(sum(self.episode_reward_components[key][episode_idx] for key in grid_safety_keys))
-                for episode_idx in range(num_episodes)
-            ]
-
-        return {
-            "episodes": episode_indices,
-            "episode_total_reward": [float(value) for value in self.episode_rewards],
-            "components": components,
-            "aggregates": aggregates,
-        }
-
-    def run(self) -> int:
-        target_interactions = (
-            self.cfg.train.resolved_max_train_steps(self.cfg.env.episode_limit)
-            // self.cfg.train.num_envs
-        )
-        interaction_step = 0
-        episodes_completed = 0
-        noise_decay = float(self.cfg.train.resolved_noise_std_decay())
-        started_at = datetime.now().astimezone()
-        run_start = time.perf_counter()
-        action_time_total = 0.0
-        env_step_time_total = 0.0
-        update_time_total = 0.0
-        sample_time_total = 0.0
-        history_time_total = 0.0
-        progress_io_time_total = 0.0
-        agent_update_time_total = 0.0
-        update_calls = 0
-        error_message = ""
-        run_status = "completed"
-
-        reward_metas = list(self.env_evaluate.reward_fn.component_meta)
-        self.reward_component_meta = reward_metas
-        self.episode_reward_components = {str(meta.key): [] for meta in reward_metas}
-        progress_postfix_interval = max(1, int(getattr(self.cfg.train, "progress_postfix_interval", 10)))
-        progress_state_path = getattr(self.cfg.runtime, "progress_state_path", None)
-        active_episode_rewards = np.zeros(self.cfg.train.num_envs, dtype=np.float32)
-        active_component_totals = {
-            str(meta.key): np.zeros(self.cfg.train.num_envs, dtype=np.float32)
-            for meta in reward_metas
-        }
-
-        progress = tqdm(
-            total=target_interactions,
-            desc="Training",
-            unit="iters",
-            disable=not bool(getattr(self.cfg.train, "show_progress", True)),
-        )
-        pending_progress_steps = 0
-        last_progress_emit_step = -1
-        last_progress_write_at = run_start
-
-        def write_progress_snapshot(payload: dict[str, object]) -> None:
-            nonlocal progress_io_time_total, last_progress_write_at
-            if progress_state_path is None:
-                return
-            write_started = time.perf_counter()
-            _write_progress_snapshot(progress_state_path, payload)
-            progress_io_time_total += time.perf_counter() - write_started
-            last_progress_write_at = time.perf_counter()
-
-        def emit_progress(*, force: bool = False) -> None:
-            nonlocal pending_progress_steps, last_progress_emit_step
-            should_refresh = (
-                force
-                or interaction_step % progress_postfix_interval == 0
-                or interaction_step >= target_interactions
-            )
-            avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
-            should_write_progress = (
-                progress_state_path is not None
-                and (
-                    force
-                    or self.progress_write_interval_seconds <= 0.0
-                    or (time.perf_counter() - last_progress_write_at) >= self.progress_write_interval_seconds
-                )
-            )
-            if not should_refresh and not should_write_progress:
-                return
-            if force and pending_progress_steps == 0 and last_progress_emit_step == interaction_step:
-                if not should_write_progress:
-                    return
-            elapsed_seconds = max(time.perf_counter() - run_start, 0.0)
-            remaining_seconds = _estimate_remaining_seconds(
-                interaction_step=interaction_step,
-                target_interactions=target_interactions,
-                elapsed_seconds=elapsed_seconds,
-            )
-            if should_refresh:
-                if pending_progress_steps > 0:
-                    progress.update(pending_progress_steps)
-                    pending_progress_steps = 0
-                last_progress_emit_step = interaction_step
-                progress.set_postfix(
-                    {
-                        "avg_reward": f"{avg_reward:.2f}",
-                        "steps/s": f"{self.total_steps / max(time.perf_counter() - run_start, 1e-6):.1f}",
-                        "act_ms": f"{1000.0 * action_time_total / max(interaction_step, 1):.2f}",
-                        "env_ms": f"{1000.0 * env_step_time_total / max(interaction_step, 1):.2f}",
-                        "upd_ms": f"{1000.0 * update_time_total / max(update_calls, 1):.2f}",
-                        "eta": "--" if remaining_seconds is None else f"{remaining_seconds:.1f}s",
-                    }
-                )
-            if should_write_progress:
-                write_progress_snapshot(
-                    _build_progress_payload(
-                        interaction_step=interaction_step,
-                        target_interactions=target_interactions,
-                        episodes_completed=episodes_completed,
-                        total_steps=self.total_steps,
-                        avg_reward=avg_reward,
-                        action_time_total=action_time_total,
-                        env_step_time_total=env_step_time_total,
-                        update_time_total=update_time_total,
-                        update_calls=update_calls,
-                        run_start=run_start,
-                        started_at=started_at,
-                        status="running",
-                    )
-                )
-
-        if progress_state_path is not None:
-            write_progress_snapshot(
-                _build_progress_payload(
-                    interaction_step=0,
-                    target_interactions=target_interactions,
-                    episodes_completed=0,
-                    total_steps=0,
-                    avg_reward=0.0,
-                    action_time_total=0.0,
-                    env_step_time_total=0.0,
-                    update_time_total=0.0,
-                    update_calls=0,
-                    run_start=run_start,
-                    started_at=started_at,
-                    status="running",
-                ),
-            )
-
-        try:
-            obs, _ = self.env.reset()
-            while interaction_step < target_interactions:
-                action_start = time.perf_counter()
-                action_batch, action_info = self._select_action_batch_with_info(obs)
-                action_time_total += time.perf_counter() - action_start
-
-                env_step_start = time.perf_counter()
-                next_obs, reward, terminated, truncated, info_list = self.env.step(
-                    self.format_env_actions(action_batch)
-                )
-                reward, info_list = self._apply_controller_action_postprocessing(reward, info_list, action_info)
-                done = np.logical_or(terminated, truncated).astype(np.float32)
-                env_step_time_total += time.perf_counter() - env_step_start
-
-                history_started = time.perf_counter()
-                for env_idx, info in enumerate(info_list):
-                    step_total = float(np.sum(reward[env_idx]))
-                    active_episode_rewards[env_idx] += step_total
-                    for meta in reward_metas:
-                        component_key = str(meta.key)
-                        component_value = float(np.sum(np.asarray(info[meta.key], dtype=np.float32)))
-                        active_component_totals[component_key][env_idx] += float(meta.sign) * component_value
-                history_time_total += time.perf_counter() - history_started
-
-                self.replay_buffer.store_transitions_batched(
-                    obs,
-                    action_batch,
-                    reward,
-                    next_obs,
-                    done,
-                )
-
-                obs = next_obs
-                interaction_step += 1
-                pending_progress_steps += 1
-                self.total_steps += self.cfg.train.num_envs
-
-                history_started = time.perf_counter()
-                for env_idx, info in enumerate(info_list):
-                    if not bool(info.get("episode_done", False)):
-                        continue
-
-                    episode_reward = float(active_episode_rewards[env_idx])
-                    self.episode_rewards.append(episode_reward)
-                    for meta in reward_metas:
-                        component_key = str(meta.key)
-                        self.episode_reward_components[component_key].append(
-                            float(active_component_totals[component_key][env_idx])
-                        )
-                    self.writer.add_scalar(
-                        "train_episode_total_reward",
-                        episode_reward,
-                        global_step=self.total_steps,
-                    )
-
-                    active_episode_rewards[env_idx] = 0.0
-                    for meta in reward_metas:
-                        active_component_totals[str(meta.key)][env_idx] = 0.0
-                    episodes_completed += 1
-                    self.episodes_completed = episodes_completed
-                history_time_total += time.perf_counter() - history_started
-
-                if self.cfg.train.use_noise_decay:
-                    self.noise_std = max(
-                        self.noise_std - noise_decay,
-                        float(self.cfg.train.noise_std_min),
-                    )
-
-                if (
-                    self.replay_buffer.current_size >= self.cfg.train.batch_size
-                    and interaction_step % self.cfg.train.update_interval == 0
-                ):
-                    update_start = time.perf_counter()
-                    for _ in range(self.cfg.train.updates_per_step):
-                        sample_start = time.perf_counter()
-                        batch_torch = self.replay_buffer.sample_torch(
-                            self.cfg.runtime.device,
-                            pin_memory=bool(getattr(self.cfg.runtime, "pin_memory", False)),
-                            non_blocking=bool(getattr(self.cfg.runtime, "non_blocking_transfers", False)),
-                        )
-                        sample_time_total += time.perf_counter() - sample_start
-
-                        agent_update_start = time.perf_counter()
-                        shared_update_ctx = self._build_shared_update_ctx(batch_torch)
-                        for agent in self.agent_n:
-                            agent.train_on_batch(batch_torch, self.agent_n, shared_ctx=shared_update_ctx)
-                        agent_update_time_total += time.perf_counter() - agent_update_start
-                        update_calls += 1
-                    update_time_total += time.perf_counter() - update_start
-
-                emit_progress()
-        except Exception as exc:
-            run_status = "failed"
-            error_message = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            emit_progress(force=True)
-            if progress_state_path is not None:
-                avg_reward = float(np.mean(self.episode_rewards[-50:])) if self.episode_rewards else 0.0
-                write_progress_snapshot(
-                    _build_progress_payload(
-                        interaction_step=interaction_step,
-                        target_interactions=target_interactions,
-                        episodes_completed=episodes_completed,
-                        total_steps=self.total_steps,
-                        avg_reward=avg_reward,
-                        action_time_total=action_time_total,
-                        env_step_time_total=env_step_time_total,
-                        update_time_total=update_time_total,
-                        update_calls=update_calls,
-                        run_start=run_start,
-                        started_at=started_at,
-                        status=run_status,
-                        error_message=error_message,
-                    ),
-                )
-            progress.close()
-
-        finished_at = datetime.now().astimezone()
-        total_elapsed = max(time.perf_counter() - run_start, 1e-6)
-        self.run_metadata = {
-            "started_at": _iso_timestamp(started_at),
-            "finished_at": _iso_timestamp(finished_at),
-            "elapsed_seconds": float(round(total_elapsed, 3)),
-            "estimated_end_time": _iso_timestamp(finished_at),
-        }
-        self.perf_summary = {
-            "seed": self.seed,
-            "runtime_mode": str(self.cfg.runtime.execution_mode),
-            "device": str(self.cfg.runtime.device),
-            "vec_env": self.vec_env_name,
-            "tensorboard_dir": self.tensorboard_dir,
-            "total_wall_time_s": total_elapsed,
-            "action_time_s": action_time_total,
-            "env_step_time_s": env_step_time_total,
-            "update_time_s": update_time_total,
-            "sample_time_s": sample_time_total,
-            "history_time_s": history_time_total,
-            "progress_io_time_s": progress_io_time_total,
-            "agent_update_time_s": agent_update_time_total,
-            "update_calls": update_calls,
-            "steps_per_sec": self.total_steps / total_elapsed,
-            "avg_action_ms_per_iter": 1000.0 * action_time_total / max(interaction_step, 1),
-            "avg_env_ms_per_iter": 1000.0 * env_step_time_total / max(interaction_step, 1),
-            "avg_update_ms_per_call": 1000.0 * update_time_total / max(update_calls, 1),
-            "projection_time_s": float(sum(self._safety_projection_time_s_by_stage.values())),
-            "rollout_projection_time_s": float(self._safety_projection_time_s_by_stage["rollout"]),
-            "target_projection_time_s": float(self._safety_projection_time_s_by_stage["target"]),
-            "actor_projection_time_s": float(self._safety_projection_time_s_by_stage["actor"]),
-            "rollout_projection_calls": int(self._safety_projection_calls_by_stage["rollout"]),
-            "target_projection_calls": int(self._safety_projection_calls_by_stage["target"]),
-            "actor_projection_calls": int(self._safety_projection_calls_by_stage["actor"]),
-        }
-        self.perf_summary.update(self.agent_performance)
-        self.episodes_completed = episodes_completed
-        return episodes_completed
+	def __init__(self,cfg:Any,train_env:Any,eval_env:Any,env_name:str='GridEnv',number:int=1,seed:int=0)->None:self.cfg=cfg;self.seed=int(seed);self.env_name=env_name;self.env=train_env;self.env_evaluate=eval_env;agent_cls=get_agent_cls(self.cfg.algo.name);self.agent_n=[agent_cls(cfg,agent_id)for agent_id in range(self.cfg.env.num_agents)];self.safety_projector=getattr(self.agent_n[0],'safety_projector',None)if self.agent_n else None;self.replay_buffer=ReplayBuffer(self.cfg);log_dir=get_tensorboard_run_dir(algorithm=self.cfg.algo.name,env_name=env_name,run_number=number,seed=seed);log_dir.mkdir(parents=True,exist_ok=True);self.writer=SummaryWriter(log_dir=str(log_dir));self.vec_env_name=type(self.env).__name__;(self.history):list[Any]=[];(self.episode_rewards):list[float]=[];self.total_steps=self.episodes_completed=0;self.noise_std=float(self.cfg.train.noise_std_init);(self.perf_summary):dict[str,Any]={};(self.run_metadata):dict[str,Any]={};(self.reward_component_meta):list[Any]=[];(self.episode_reward_components):dict[str,list[float]]={};(self._episode_throughput_bonus_weight_mean):list[float]=[];(self._episode_throughput_kwh_total):list[float]=[];self._last_throughput_bonus_weight=0.;init_safety_tracking(self);self._closed=False
+	def select_action_batch(self,obs_np:dict)->np.ndarray:return self._select_action_batch_with_info(obs_np)[0]
+	_apply_controller_action_postprocessing=apply_controller_action_postprocessing;_build_replay_next_obs=staticmethod(build_replay_next_obs);_build_shared_update_ctx=build_shared_update_ctx;_select_action_batch_with_info=select_action_batch_with_info;build_reward_summary=build_reward_summary;build_safety_summary=build_safety_summary;build_training_health_summary=build_training_health_summary;close=close_runner;save_model=save_runner_model
+	def run(self)->int:
+		train_episode_limit=train_env_episode_length(self.env);target_total_steps=self.cfg.train.resolved_max_train_steps(train_episode_limit);target_interactions=target_total_steps//self.cfg.train.num_envs;learning_starts=int(self.cfg.train.resolved_learning_starts_transitions(train_episode_limit));actor_learning_starts=int(self.cfg.train.resolved_actor_learning_starts_transitions(train_episode_limit));interaction_step=episodes_completed=update_calls=0;noise_decay=float(self.cfg.train.resolved_noise_std_decay());started_at=datetime.now().astimezone();run_start=time.perf_counter();action_time_total=env_step_time_total=update_time_total=.0;reward_metas=list(self.env_evaluate.reward_fn.component_meta);self.reward_component_meta=reward_metas;self.episode_reward_components={str(meta.key):[]for meta in reward_metas};progress_episode_interval=max(1,int(getattr(self.cfg.train,'progress_episode_interval',10)));active_episode_rewards=np.zeros(self.cfg.train.num_envs,dtype=np.float32);active_component_totals={str(meta.key):np.zeros(self.cfg.train.num_envs,dtype=np.float32)for meta in reward_metas};active_throughput_kwh=np.zeros(self.cfg.train.num_envs,dtype=np.float32);active_bonus_weight_sum=np.zeros(self.cfg.train.num_envs,dtype=np.float32);active_bonus_weight_steps=np.zeros(self.cfg.train.num_envs,dtype=np.int32);progress=tqdm(total=max(target_total_steps,1),desc='Training',unit='step',disable=not bool(getattr(self.cfg.train,'show_progress',True)));last_progress_emit_episode,next_progress_episode_mark=-1,progress_episode_interval
+		def emit_progress_advance()->bool:
+			delta=int(self.total_steps)-int(getattr(progress,'n',0))
+			if delta<=0:return False
+			progress.update(delta);return True
+		def emit_progress_postfix(*,force:bool=False,refresh:bool=False)->bool:
+			nonlocal last_progress_emit_episode,next_progress_episode_mark
+			if episodes_completed<=0:return False
+			if not force and episodes_completed<next_progress_episode_mark:return False
+			if last_progress_emit_episode==episodes_completed:return False
+			avg_reward=float(np.mean(self.episode_rewards[-50:]))if self.episode_rewards else .0;elapsed_seconds=max(time.perf_counter()-run_start,.0);remaining_seconds=_estimate_remaining_seconds(interaction_step=self.total_steps,target_interactions=target_total_steps,elapsed_seconds=elapsed_seconds)
+			last_progress_emit_episode=episodes_completed
+			while episodes_completed>=next_progress_episode_mark:next_progress_episode_mark+=progress_episode_interval
+			progress.set_postfix({'avg_reward':f"{avg_reward:.2f}",'steps/s':f"{self.total_steps/max(time.perf_counter()-run_start,1e-06):.1f}",'act_ms':f"{1e3*action_time_total/max(interaction_step,1):.2f}",'env_ms':f"{1e3*env_step_time_total/max(interaction_step,1):.2f}",'upd_ms':f"{1e3*update_time_total/max(update_calls,1):.2f}",'eta':'--'if remaining_seconds is None else f"{remaining_seconds:.1f}s"},refresh=refresh);return True
+		try:
+			obs,_=self.env.reset()
+			while interaction_step<target_interactions:
+				action_start=time.perf_counter();action_batch,action_info=self._select_action_batch_with_info(obs);action_time_total+=time.perf_counter()-action_start;env_step_start=time.perf_counter();next_obs,reward,terminated,truncated,info_list=self.env.step([action_batch[:,agent_id].copy()for agent_id in range(self.cfg.env.num_agents)]);reward,info_list=self._apply_controller_action_postprocessing(reward,info_list,action_info);terminated=np.asarray(terminated,dtype=np.float32);truncated=np.asarray(truncated,dtype=np.float32);env_step_time_total+=time.perf_counter()-env_step_start
+				for(env_idx,info)in enumerate(info_list):
+					step_total=float(np.sum(reward[env_idx]));active_episode_rewards[env_idx]+=step_total
+					for meta in reward_metas:component_key=str(meta.key);component_value=float(np.sum(np.asarray(info[meta.key],dtype=np.float32)));active_component_totals[component_key][env_idx]+=float(meta.sign)*component_value
+					active_throughput_kwh[env_idx]+=float(np.sum(np.asarray(info.get('madrl_throughput_kwh',0.),dtype=np.float32)))
+					bonus_weight=float(info.get('madrl_throughput_bonus_weight',0.));active_bonus_weight_sum[env_idx]+=bonus_weight;active_bonus_weight_steps[env_idx]+=1;self._last_throughput_bonus_weight=bonus_weight
+				replay_next_obs=self._build_replay_next_obs(next_obs,info_list);self.replay_buffer.store_transitions_batched(obs,action_batch,reward,replay_next_obs,terminated,truncated);obs=next_obs;interaction_step+=1;self.total_steps+=self.cfg.train.num_envs
+				completed_episodes_this_step=0
+				for(env_idx,info)in enumerate(info_list):
+					if not bool(info.get('episode_done',False)):continue
+					episode_reward=float(active_episode_rewards[env_idx]);self.episode_rewards.append(episode_reward)
+					for meta in reward_metas:component_key=str(meta.key);self.episode_reward_components[component_key].append(float(active_component_totals[component_key][env_idx]))
+					bonus_weight_mean=float(active_bonus_weight_sum[env_idx]/max(int(active_bonus_weight_steps[env_idx]),1));self._episode_throughput_bonus_weight_mean.append(bonus_weight_mean);self._episode_throughput_kwh_total.append(float(active_throughput_kwh[env_idx]));self.writer.add_scalar('train_episode_total_reward',episode_reward,global_step=self.total_steps);active_episode_rewards[env_idx]=.0;active_throughput_kwh[env_idx]=.0;active_bonus_weight_sum[env_idx]=.0;active_bonus_weight_steps[env_idx]=0
+					for meta in reward_metas:active_component_totals[str(meta.key)][env_idx]=.0
+					episodes_completed+=1;self.episodes_completed=episodes_completed;completed_episodes_this_step+=1
+				if completed_episodes_this_step>0:emit_progress_postfix();emit_progress_advance()
+				if self.cfg.train.use_noise_decay:self.noise_std=max(self.noise_std-noise_decay,float(self.cfg.train.noise_std_min))
+				if self.total_steps>=learning_starts and self.replay_buffer.current_size>=self.cfg.train.batch_size and interaction_step%self.cfg.train.update_interval==0:
+					update_start=time.perf_counter()
+					for _ in range(self.cfg.train.updates_per_step):
+						batch_torch=self.replay_buffer.sample_torch(self.cfg.runtime.device,pin_memory=bool(getattr(self.cfg.runtime,'pin_memory',False)),non_blocking=bool(getattr(self.cfg.runtime,'non_blocking_transfers',False)));shared_update_ctx=self._build_shared_update_ctx(batch_torch)
+						shared_update_ctx['allow_actor_update']=bool(self.total_steps>=actor_learning_starts)
+						for agent in self.agent_n:agent.train_on_batch(batch_torch,self.agent_n,shared_ctx=shared_update_ctx)
+						update_calls+=1
+					update_time_total+=time.perf_counter()-update_start
+		finally:
+			emitted_postfix=emit_progress_postfix(force=True)
+			advanced_progress=emit_progress_advance()
+			if emitted_postfix and not advanced_progress and hasattr(progress,'refresh'):progress.refresh()
+			progress.close()
+		finished_at=datetime.now().astimezone();total_elapsed=max(time.perf_counter()-run_start,1e-06);self.run_metadata={'started_at':_iso_timestamp(started_at),'finished_at':_iso_timestamp(finished_at),'elapsed_seconds':float(round(total_elapsed,3)),'estimated_end_time':_iso_timestamp(finished_at)};self.perf_summary={'seed':self.seed,'runtime_mode':str(self.cfg.runtime.execution_mode),'device':str(self.cfg.runtime.device),'vec_env':self.vec_env_name,'target_total_steps':int(target_total_steps),'global_interaction_step':int(self.total_steps),'learning_starts_transitions':int(learning_starts),'actor_learning_starts_transitions':int(actor_learning_starts),'n_step_return':int(self.cfg.train.n_step_return),'feasible_random_exploration_start':float(self.cfg.train.feasible_random_exploration_start),'feasible_random_exploration_end':float(self.cfg.train.feasible_random_exploration_end),'feasible_random_exploration_decay_steps':int(self.cfg.train.feasible_random_exploration_decay_steps),'total_wall_time_s':total_elapsed,'action_time_s':action_time_total,'env_step_time_s':env_step_time_total,'update_time_s':update_time_total,'sample_time_s':.0,'history_time_s':.0,'agent_update_time_s':.0,'update_calls':update_calls,'steps_per_sec':self.total_steps/total_elapsed,'avg_action_ms_per_iter':1e3*action_time_total/max(interaction_step,1),'avg_env_ms_per_iter':1e3*env_step_time_total/max(interaction_step,1),'avg_update_ms_per_call':1e3*update_time_total/max(update_calls,1),'projection_time_s':float(sum(stage_stats['time_s']for stage_stats in self._safety_projection_stats.values())),'rollout_projection_time_s':float(self._safety_projection_stats['rollout']['time_s']),'target_projection_time_s':float(self._safety_projection_stats['target']['time_s']),'actor_projection_time_s':float(self._safety_projection_stats['actor']['time_s']),'rollout_projection_calls':int(self._safety_projection_stats['rollout']['calls']),'target_projection_calls':int(self._safety_projection_stats['target']['calls']),'actor_projection_calls':int(self._safety_projection_stats['actor']['calls']),'training_health':build_training_health_summary(self)};self.episodes_completed=episodes_completed;return episodes_completed

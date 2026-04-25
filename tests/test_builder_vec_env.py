@@ -1,15 +1,18 @@
+import json
+
 import pytest
 
 from envs.subproc_vec_env import SubprocVecEnv
-from envs.vec_env import DummyVecEnv
 from scripts.builder import _build_train_vec_env, build_env, build_train_runner
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import make_case_dir, make_smoke_config, write_prosumer_processed_dataset
 
 
 def _make_multiday_cfg(tmp_path, *, evaluation_days: int = 5):
     cfg = make_smoke_config(tmp_path, algorithm="MADDPG")
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.env.future_horizon = 1
     cfg.train.max_train_steps = cfg.train.train_episodes * cfg.env.episode_limit
     write_prosumer_processed_dataset(
@@ -23,8 +26,8 @@ def _make_multiday_cfg(tmp_path, *, evaluation_days: int = 5):
     return cfg
 
 
-def test_build_train_vec_env_falls_back_to_dummy_when_subproc_is_unsupported(tmp_path, monkeypatch):
-    case_dir = make_case_dir(tmp_path, "vec_env_fallback")
+def test_build_train_vec_env_rejects_unsupported_subproc_sessions(tmp_path, monkeypatch):
+    case_dir = make_case_dir(tmp_path, "vec_env_subproc_rejected")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
     cfg.train.vec_env_type = "subproc"
     cfg.train.num_envs = 2
@@ -34,14 +37,8 @@ def test_build_train_vec_env_falls_back_to_dummy_when_subproc_is_unsupported(tmp
         lambda: (False, "simulated interactive session"),
     )
 
-    with pytest.warns(RuntimeWarning, match="Falling back to DummyVecEnv"):
-        vec_env = _build_train_vec_env(cfg, seed=0)
-
-    try:
-        assert isinstance(vec_env, DummyVecEnv)
-        assert vec_env.num_envs == 2
-    finally:
-        vec_env.close()
+    with pytest.raises(RuntimeError, match="unsupported in this session"):
+        _build_train_vec_env(cfg, seed=0)
 
 
 def test_subproc_vec_env_surfaces_worker_init_errors(tmp_path):
@@ -68,9 +65,43 @@ def test_build_env_uses_shared_data_without_building_live_forecaster(tmp_path, m
     env = build_env(cfg, mode="test")
     try:
         assert env.forecaster is None
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
     finally:
         env.close()
+
+
+def test_build_env_rejects_shared_data_future_horizon_mismatch(tmp_path):
+    case_dir = make_case_dir(tmp_path, "shared_data_env_horizon_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
+    cfg.env.future_horizon = int(cfg.env.future_horizon) + 1
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
+
+    with pytest.raises(ValueError, match="Shared-data horizon contract mismatch") as excinfo:
+        build_env(cfg, mode="test")
+
+    message = str(excinfo.value)
+    assert "data_controls.future_horizon=1" in message
+    assert "cfg.env.future_horizon=2" in message
+    assert "forecast_lstm.ipynb" in message
+
+
+def test_build_env_rejects_old_shared_data_schema_6(tmp_path):
+    case_dir = make_case_dir(tmp_path, "shared_data_env_schema_mismatch")
+    cfg = make_smoke_config(case_dir, algorithm="MADDPG")
+    shared_data = ensure_madrl_shared_data(cfg, root=case_dir / "artifacts" / "training" / "shared_data")
+    root_manifest_path = shared_data.shared_data_dir / "manifest.json"
+    test_manifest_path = shared_data.shared_data_dir / "test" / "manifest.json"
+    for manifest_path in (root_manifest_path, test_manifest_path):
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["schema_version"] = 6
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg.runtime.shared_data_dir = str(shared_data.shared_data_dir)
+    cfg.runtime.shared_data_signature = str(shared_data.signature_hash)
+
+    with pytest.raises(ValueError, match="schema_version=6"):
+        build_env(cfg, mode="test")
 
 
 def test_build_env_resets_runtime_split_state_without_shared_data(tmp_path):
@@ -81,7 +112,7 @@ def test_build_env_resets_runtime_split_state_without_shared_data(tmp_path):
 
     env = build_env(cfg, mode="test")
     try:
-        assert env.has_precomputed_observations() is False
+        assert getattr(env, "_precomputed_store", None) is None
         assert cfg.runtime.effective_split_controls["source"] == "cfg"
         assert cfg.runtime.effective_split_controls["split"] == "test"
         assert cfg.runtime.selected_episode_indices is None
@@ -100,11 +131,11 @@ def test_build_env_uses_shared_data_manifest_controls_and_episode_subset(tmp_pat
 
     env = build_env(cfg, mode="test")
     try:
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
         assert cfg.runtime.effective_split_controls["source"] == "shared_data_manifest"
         assert cfg.runtime.effective_split_controls["start_date"] is None
         assert cfg.runtime.effective_split_controls["end_date"] is None
-        assert cfg.runtime.effective_split_controls["window_strategy"] == "full_year_runtime_slice"
+        assert cfg.runtime.effective_split_controls["window_strategy"] == "cfg_window"
         assert cfg.runtime.selected_episode_indices == [1, 2, 3]
     finally:
         env.close()

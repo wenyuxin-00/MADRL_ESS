@@ -1,46 +1,8 @@
-"""Shared constants for processed prosumer data."""
-
 from __future__ import annotations
-
 from pathlib import Path
-
-TZ_LOCAL = "Europe/Berlin"
-TZ_UTC = "UTC"
-DATA_FREQUENCY = "15min"
-
-PROSUMER_PROFILE_ALLOWLIST = (
-    "SFH3",
-    "SFH4",
-    "SFH5",
-    "SFH7",
-    "SFH9",
-    "SFH12",
-    "SFH14",
-    "SFH16",
-    "SFH18",
-    "SFH19",
-    "SFH20",
-    "SFH21",
-    "SFH22",
-    "SFH27",
-    "SFH28",
-    "SFH29",
-    "SFH30",
-    "SFH32",
-    "SFH34",
-    "SFH36",
-    "SFH38",
-    "SFH39",
-)
-DEFAULT_PROSUMER_PROFILES = ("SFH12", "SFH14", "SFH16", "SFH18", "SFH20")
-DEFAULT_PROCESSED_SUBDIR = Path("processed/prosumer")
-
-
-__all__ = [
-    "DATA_FREQUENCY",
-    "DEFAULT_PROCESSED_SUBDIR",
-    "DEFAULT_PROSUMER_PROFILES",
-    "PROSUMER_PROFILE_ALLOWLIST",
-    "TZ_LOCAL",
-    "TZ_UTC",
-]
+TZ_LOCAL='Europe/Berlin'
+TZ_UTC='UTC'
+DATA_FREQUENCY='15min'
+PROSUMER_PROFILE_ALLOWLIST='SFH3','SFH4','SFH5','SFH7','SFH9','SFH12','SFH14','SFH16','SFH18','SFH19','SFH20','SFH21','SFH22','SFH27','SFH28','SFH29','SFH30','SFH32','SFH34','SFH36','SFH38','SFH39'
+DEFAULT_PROSUMER_PROFILES='SFH12','SFH14','SFH16','SFH18','SFH20'
+DEFAULT_PROCESSED_SUBDIR=Path('processed/prosumer')

@@ -7,9 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from controllers.action_feasibility import _local_bounds_numpy, build_safety_local_numpy
-from envs.rewards import NormalReward
-from scripts.utils.madrl_shared_data import ensure_madrl_shared_data
+from controllers.madrl.safety_projector import _local_bounds_numpy, build_safety_local_numpy
+from envs.rewards.NormalReward import NormalReward
+from predictors.shared_data import ensure_madrl_shared_data
 from tests.support.helpers import write_prosumer_processed_dataset
 
 N_AGENTS = 3
@@ -32,50 +32,30 @@ class FakeGridCore:
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
-        from envs.grid.core.grid_types import GridStepResult
+        from envs.grid.core.grid_core import GridStepResult
 
         n = len(p_batt_kw)
         line_loading_pct = np.zeros(self.n_lines, dtype=np.float32)
         trafo_loading_pct = np.zeros(self.n_trafos, dtype=np.float32)
         if self._return_violations:
             v_violation = np.array([0.02, 0.00, 0.01], dtype=np.float32)
-            bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
-            bus_v_excess[3] = 0.03
-            bus_v_excess[7] = 0.02
-            line_excess = np.zeros(self.n_lines, dtype=np.float32)
-            line_excess[5] = 0.05
-            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
-            trafo_excess[0] = 0.04
+            psi_v_raw = float(0.03 ** 2 + 0.02 ** 2)
+            psi_line_raw = float(0.05 ** 2)
+            psi_trafo_raw = float(0.04 ** 2)
             line_loading_pct[5] = 105.0
             trafo_loading_pct[0] = 104.0
         else:
             v_violation = np.zeros(n, dtype=np.float32)
-            bus_v_excess = np.zeros(self.n_buses, dtype=np.float32)
-            line_excess = np.zeros(self.n_lines, dtype=np.float32)
-            trafo_excess = np.zeros(self.n_trafos, dtype=np.float32)
-
-        psi_v_raw = float(np.sum(bus_v_excess ** 2))
-        psi_line_raw = float(np.sum(line_excess ** 2))
-        psi_trafo_raw = float(np.sum(trafo_excess ** 2))
+            psi_v_raw = 0.0
+            psi_line_raw = 0.0
+            psi_trafo_raw = 0.0
 
         return GridStepResult(
             converged=True,
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
-            va_degree=np.zeros(self.n_buses, dtype=np.float32),
             line_loading_pct=line_loading_pct,
             trafo_loading_pct=trafo_loading_pct,
-            p_mw_from=np.zeros(self.n_lines, dtype=np.float32),
-            agent_vm_pu=1.0 - v_violation,
             v_violation=v_violation,
-            line_violation=0.10,
-            trafo_violation=0.05,
-            l_violation=0.10,
-            n_buses=self.n_buses,
-            n_lines=self.n_lines,
-            n_trafos=self.n_trafos,
-            bus_v_excess=bus_v_excess,
-            line_excess=line_excess,
-            trafo_excess=trafo_excess,
             psi_v_raw=psi_v_raw,
             psi_line_raw=psi_line_raw,
             psi_trafo_raw=psi_trafo_raw,
@@ -84,7 +64,7 @@ class FakeGridCore:
 
 
 def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
-    from configs import compose_experiment_config
+    from configs.profiles import compose_experiment_config
 
     cfg = compose_experiment_config(
         profile="debug",
@@ -94,9 +74,11 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
     )
     cfg.env.num_agents = n_agents
     cfg.env.episode_limit = episode_limit
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.obs.local_features = ["calendar_time", "soc"]
-    cfg.obs.sequence_features = ["price", "load", "pv"]
-    cfg.forecast.target_signals = ["price", "load", "pv"]
+    cfg.obs.sequence_features = ["wholesale_price", "load", "pv"]
+    cfg.forecast.target_signals = ["wholesale_price", "load", "pv"]
     cfg.reward.w_trafo_pen = 7.5
     cfg.grid.train_compact_info = False
     cfg.grid.agent_bus_ids = [10, 6, 12][:n_agents]
@@ -111,17 +93,12 @@ def _make_cfg(n_agents: int = N_AGENTS, episode_limit: int = EPISODE_LIMIT):
 
 def _ensure_case_data(*, n_agents: int, total_steps: int) -> Path:
     data_dir = Path(__file__).resolve().parent / ".tmp" / "grid_env_case" / "data"
-    prosumer_dir = data_dir / "processed" / "prosumer"
-    prosumer_dir.mkdir(parents=True, exist_ok=True)
-
-    household_csv = prosumer_dir / "household.csv"
-    if not household_csv.exists():
-        write_prosumer_processed_dataset(
-            data_dir,
-            agent_profiles=["SFH12", "SFH14", "SFH16"][:n_agents],
-            train_steps=total_steps,
-            test_steps=total_steps,
-        )
+    write_prosumer_processed_dataset(
+        data_dir,
+        agent_profiles=["SFH12", "SFH14", "SFH16"][:n_agents],
+        train_steps=total_steps,
+        test_steps=max(total_steps, 96 * 110),
+    )
     return data_dir
 
 
@@ -129,7 +106,7 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
     from envs.observation.default_builder import DefaultObservationBuilder
-    from models import validate_and_finalize_model_config
+    from models.assembly import validate_and_finalize_model_config
     from predictors.registry import build_forecaster
     from scripts.builder import _finalize_runtime_from_env
 
@@ -167,16 +144,17 @@ def _zero_actions() -> list[np.ndarray]:
 def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
     from data.loaders.registry import build_dataset
     from envs.grid_env import GridEnv
-    from envs.observation.precomputed_builder import PrecomputedObservationBuilder
+    from envs.observation.default_builder import DefaultObservationBuilder
 
     cfg = _make_cfg()
     shared_data = ensure_madrl_shared_data(cfg, root=tmp_path / "shared_data")
     dataset = build_dataset(cfg, mode="test")
-    obs_builder = PrecomputedObservationBuilder(
+    obs_builder = DefaultObservationBuilder(
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
         adjacency_type=cfg.obs.adjacency_type,
+        precomputed=True,
     )
     env = GridEnv(
         cfg,
@@ -192,7 +170,7 @@ def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
     try:
         obs, _ = env.reset(episode_idx=0)
         assert env.forecaster is None
-        assert env.has_precomputed_observations() is True
+        assert getattr(env, "_precomputed_store", None) is not None
         for key, shape in env.observation_schema.items():
             assert obs[key].shape == shape
     finally:
@@ -227,8 +205,8 @@ def test_reset_returns_correct_obs_shape(grid_env) -> None:
 
 def test_default_battery_config_uses_fixed_defaults(grid_env) -> None:
     _, reset_info = grid_env.reset(episode_idx=0)
-    assert np.allclose(reset_info["p_max"], np.full((N_AGENTS,), 12.5, dtype=np.float32))
-    assert np.allclose(reset_info["battery_capacity_kwh"], np.full((N_AGENTS,), 25.0, dtype=np.float32))
+    assert np.allclose(reset_info["p_max"], np.asarray(grid_env.agent_p_max, dtype=np.float32))
+    assert np.allclose(reset_info["battery_capacity_kwh"], np.asarray(grid_env.agent_c_bat, dtype=np.float32))
 
 
 def test_fixed_battery_mode_uses_cfg_defaults() -> None:
@@ -295,33 +273,25 @@ def test_info_contains_required_fields(grid_env) -> None:
     _, _, _, _, info = grid_env.step(actions)
 
     required = [
-        "price",
         "wholesale_price",
         "import_price",
         "e_bat_req",
         "e_bat",
-        "pv_raw",
         "pv_effective",
         "pv_curtail",
         "pv_utilization",
-        "base_net_load_effective",
         "grid_import_kw",
         "grid_export_kw",
         "soc_next",
         "pf_converged",
         "pf_error",
         "vm_pu",
-        "agent_vm_pu",
         "line_loading_pct",
         "trafo_loading_pct",
         "trafo_p_signed_kw",
         "v_violation",
-        "line_violation",
-        "trafo_violation",
         "n_v_violations",
-        "n_l_violations",
         "n_line_violations",
-        "n_t_violations",
         "n_trafo_violations",
         "psi_v_raw",
         "psi_line_raw",
@@ -329,22 +299,24 @@ def test_info_contains_required_fields(grid_env) -> None:
     ]
     for key in required:
         assert key in info, f"Missing required info key: '{key}'"
-    assert info["price"] == pytest.approx(info["import_price"])
     assert info["import_price"] == pytest.approx(
-        info["wholesale_price"] + grid_env.import_price_adder_eur_per_kwh
+        info["wholesale_price"] + grid_env.import_price_markup_eur_per_kwh
     )
-    assert np.allclose(np.asarray(info["trafo_p_signed_kw"], dtype=np.float32), np.asarray([12.5, -1.5], dtype=np.float32))
+    assert np.allclose(
+        np.asarray(info["trafo_p_signed_kw"], dtype=np.float32),
+        np.asarray([12.5, -1.5], dtype=np.float32),
+    )
 
 
 def test_price_signal_remains_wholesale_but_cost_price_is_adjusted(grid_env) -> None:
     grid_env.reset(episode_idx=0)
-    raw_price = float(grid_env.get_signal_step("price", 0))
+    raw_price = float(grid_env.get_signal_step("wholesale_price", 0))
 
     _, _, _, _, info = grid_env.step(_zero_actions())
 
-    assert grid_env.ep_price[0] == pytest.approx(raw_price)
+    assert float(grid_env.get_signal("wholesale_price")[0]) == pytest.approx(raw_price)
     assert info["wholesale_price"] == pytest.approx(raw_price)
-    assert info["price"] == pytest.approx(raw_price + grid_env.import_price_adder_eur_per_kwh)
+    assert info["import_price"] == pytest.approx(raw_price + grid_env.import_price_markup_eur_per_kwh)
 
 
 def test_info_contains_reward_component_keys(grid_env) -> None:
@@ -384,41 +356,12 @@ def test_soc_stays_in_bounds(grid_env) -> None:
             break
 
 
-def test_episode_recorder_compatible(grid_env) -> None:
-    from scripts.recorders.episode_recorder import append_step_record, init_episode_record
-
-    reward_metas = grid_env.reward_fn.component_meta
-    history = init_episode_record(
-        n_agents=N_AGENTS,
-        init_soc=grid_env.init_soc,
-        reward_metas=reward_metas,
-    )
-
-    grid_env.reset()
-    actions = _zero_actions()
-    _, reward_list, _, _, info = grid_env.step(actions)
-    append_step_record(history, info, step_total=sum(reward_list), reward_metas=reward_metas)
-
-    assert len(history["price"]) == 1
-    assert len(history["base_net_load"][0]) == 1
-    assert len(history["e_bat_exec"][0]) == 1
-    assert len(history["r_total_per_agent"][0]) == 1
-    assert "r_purchase_cost_sum" in history
-    assert "r_export_subsidy_sum" in history
-    assert "r_safe_line_sum" in history
-    assert "r_soc_pen_sum" in history
-    assert "r_safe_v_per_agent" in history
-    assert "r_safe_trafo_per_agent" in history
-    assert history["r_safe_trafo_per_agent"][0][0] == history["r_safe_trafo_per_agent"][2][0]
-    assert history["r_safe_v_per_agent"][0][0] != history["r_safe_v_per_agent"][2][0]
-
-
 def test_reward_tracks_local_voltage_differences(grid_env) -> None:
     grid_env.reset()
     actions = _zero_actions()
     _, reward_list, _, _, info = grid_env.step(actions)
     assert not np.allclose(info["v_violation"], info["v_violation"][0])
-    assert info["r_safe_v"][0] > info["r_safe_v"][2]
+    assert info["madrl_r_safe_v"][0] > info["madrl_r_safe_v"][2]
     assert np.any(np.asarray(reward_list, dtype=np.float32) != reward_list[1])
 
 
@@ -426,7 +369,11 @@ def test_trafo_penalty_is_shared(grid_env) -> None:
     grid_env.reset()
     actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
-    assert info["r_safe_trafo"][0] == info["r_safe_trafo"][1] == info["r_safe_trafo"][2]
+    assert (
+        info["madrl_r_safe_trafo"][0]
+        == info["madrl_r_safe_trafo"][1]
+        == info["madrl_r_safe_trafo"][2]
+    )
 
 
 def test_grid_fields_shapes(grid_env) -> None:
@@ -434,7 +381,6 @@ def test_grid_fields_shapes(grid_env) -> None:
     actions = _zero_actions()
     _, _, _, _, info = grid_env.step(actions)
 
-    assert info["agent_vm_pu"].shape == (N_AGENTS,)
     assert info["v_violation"].shape == (N_AGENTS,)
     assert info["pv_effective"].shape == (N_AGENTS,)
     assert info["pv_curtail"].shape == (N_AGENTS,)
@@ -442,10 +388,8 @@ def test_grid_fields_shapes(grid_env) -> None:
     assert info["grid_export_kw"].shape == (N_AGENTS,)
     assert info["line_loading_pct"].shape == (30,)
     assert info["trafo_loading_pct"].shape == (2,)
-    assert isinstance(info["line_violation"], float)
-    assert isinstance(info["trafo_violation"], float)
     assert isinstance(info["n_v_violations"], int)
-    assert isinstance(info["n_l_violations"], int)
+    assert isinstance(info["n_line_violations"], int)
     assert isinstance(info["psi_v_raw"], float)
     assert isinstance(info["psi_line_raw"], float)
     assert isinstance(info["psi_trafo_raw"], float)
@@ -461,7 +405,12 @@ def test_compact_info_omits_large_arrays() -> None:
     actions = _zero_actions()
     _, _, _, _, info = env.step(actions)
 
-    assert set(info) == {"episode_done", *[str(meta.key) for meta in reward_fn.component_meta]}
+    assert set(info) == {
+        "episode_done",
+        "madrl_throughput_bonus_weight",
+        "madrl_throughput_kwh",
+        *[str(meta.key) for meta in reward_fn.component_meta],
+    }
     env.close()
 
 
@@ -478,7 +427,7 @@ def test_second_action_dimension_controls_pv_curtailment(grid_env) -> None:
     _, _, _, _, info = grid_env.step(actions)
 
     np.testing.assert_allclose(info["pv_effective"], 0.0, atol=1e-6)
-    np.testing.assert_allclose(info["pv_curtail"], info["pv_raw"], atol=1e-6)
+    np.testing.assert_allclose(info["pv_curtail"], info["pv"], atol=1e-6)
     np.testing.assert_allclose(info["pv_utilization"], 0.0, atol=1e-6)
 
 

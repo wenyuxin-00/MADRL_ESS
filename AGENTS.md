@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **MADRL_ESS** (3009 symbols, 9122 relationships, 260 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **MADRL_ESS** (2270 symbols, 7047 relationships, 197 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -108,6 +108,32 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 - If the goal is clear but the requested path is not the shortest, safest, or highest-leverage approach, say so explicitly and recommend a better alternative.
 - Prefer the simplest path that achieves the real goal with clear tradeoffs.
 - Be cautious about hidden assumptions, especially when the user sounds confident but key constraints are still missing.
+
+## Encoding Hygiene
+
+- Treat repository text files and notebooks as UTF-8. When editing Chinese comments, markdown, or notebook cells, use UTF-8-aware tooling and verify the result by reading it back with `encoding="utf-8"`.
+- Never leave corrupted placeholders or mojibake in comments, markdown, notebook source, or saved notebook outputs. Check for repeated question-mark placeholders, Unicode replacement characters, and obvious mojibake sequences.
+- If the exact Chinese wording cannot be recovered, replace the damaged text with concise correct Chinese or plain English. Do not preserve unreadable placeholders.
+- After editing notebooks or documentation with non-ASCII text, run `C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe -m pytest tests/test_encoding_hygiene.py` before finishing.
+
+## Codebase Hard Rules
+
+- Optimize first for owner purity, explicit contracts, and low complexity; prefer fewer lines and shorter chains only after those are preserved.
+- Treat `owner` at the Python module or package level: one owner should hold one concept's full lifecycle, including input contract, core logic, state or artifacts, and public entrypoint.
+- Treat the `mainline` as the actual runtime path behind the current canonical CLI, notebook, or documented entrypoint; history paths, compatibility paths, and backup flows do not count.
+- Rule priority is fixed: task constraints and correctness > owner purity > explicit failure without fallback > mainline length > code size > file count.
+- Apply the strictest rules to `envs/`, `predictors/`, `controllers/`, `models/`, and `data/loaders/`; allow thin entrypoints in `scripts/`; allow test helpers in `tests/`; treat `configs/` as configuration data, not business-logic wrappers.
+- Thin wrappers are only allowed when they have one concrete value: stable API, narrowed type or boundary, naming alignment, protocol isolation, or CLI or notebook entrypoint. Otherwise delete them.
+- Do not keep transition layers for old and new contracts together. No deprecated aliases, bridge adapters, auto dual-path dispatch, or hidden migrations.
+- When old schema, keys, artifact names, cache packages, or directory layouts are encountered, fail explicitly. No fallback, sibling scan, latest-compatible lookup, or prefix fuzzy matching.
+- Compatibility and version checks belong at the first boundary that admits data into an owner, such as a loader, parser, manifest reader, or public owner entrypoint. Do not duplicate compatibility logic across outer wrappers.
+- Every contract failure must name the old object that was hit, the new contract that is expected, and the exact entrypoint or notebook that must be rerun.
+- Explicit versioning such as `SCHEMA_VERSION` is allowed only as explicit mismatch-to-failure. Silent acceptance of old aliases or old field names is forbidden.
+- High-cost reproducible artifacts may remain on disk, but they must be reached only through exact locators such as a manifest, explicit path, or upstream-produced identifier. Never degrade to fuzzy discovery after a miss.
+- Validation, debug, diagnostics, and export code must belong to a clear owner, usually in adjacent `validation/`, `reports/`, `artifacts/`, or subsystem-specific export modules, not inside core runtime files.
+- Large files are acceptable only when they are still a pure core owner. Files over 800 lines must not be wrappers, compatibility buckets, or `utils` junk drawers; files over 1200 lines must be reviewed as reduction targets.
+- `scripts/utils/` must not become a general dumping ground. Shared code stays only when multiple scripts truly depend on the same stable owner.
+- Task-specific exceptions are allowed only when written explicitly with scope, affected objects, and exit conditions. Outside that scope, the default hard rules apply.
 
 ## Environment
 

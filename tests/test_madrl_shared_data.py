@@ -1,20 +1,30 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 
 import pytest
 
-from scripts.utils.madrl_shared_data import (
+from predictors.shared_data import (
+    PRICE_OBSERVATION_CONTRACT,
+    SHARED_DATA_CACHE_LAYOUT,
+    SHARED_DATA_SCHEMA_VERSION,
+    WHOLESALE_PRICE_RANK_SEQ_FIELD,
+    WHOLESALE_PRICE_RELATIVE_SEQ_FIELD,
+    WHOLESALE_PRICE_SPREAD_SEQ_FIELD,
     build_shared_data_status_summary,
     ensure_madrl_shared_data,
     select_shared_data_episode_indices,
 )
+from scripts.utils.price_protocol import PRICE_PROTOCOL_VERSION
 from tests.support.helpers import make_smoke_config, write_prosumer_processed_dataset
 
 
 def _make_multiday_cfg(tmp_path, *, evaluation_days: int = 5):
     cfg = make_smoke_config(tmp_path, algorithm="MATD3")
     cfg.env.episode_limit = 96
+    cfg.env.train_window_days = 1
+    cfg.env.window_stride_days = 1
     cfg.env.future_horizon = 1
     cfg.train.max_train_steps = cfg.train.train_episodes * cfg.env.episode_limit
     write_prosumer_processed_dataset(
@@ -67,9 +77,18 @@ def test_ensure_madrl_shared_data_reuses_existing_directory(tmp_path) -> None:
     assert second.reused is True
     assert first.signature_hash == second.signature_hash
     assert first.shared_data_dir == second.shared_data_dir
+    assert first.manifest["schema_version"] == SHARED_DATA_SCHEMA_VERSION
+    assert first.manifest["cache_layout"] == SHARED_DATA_CACHE_LAYOUT
+    assert first.manifest["price_observation_contract"] == PRICE_OBSERVATION_CONTRACT
+    assert WHOLESALE_PRICE_RANK_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
+    assert WHOLESALE_PRICE_RANK_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
+    assert WHOLESALE_PRICE_RELATIVE_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
+    assert WHOLESALE_PRICE_RELATIVE_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
+    assert WHOLESALE_PRICE_SPREAD_SEQ_FIELD in first.manifest["splits"]["train"]["files"]
+    assert WHOLESALE_PRICE_SPREAD_SEQ_FIELD in first.manifest["splits"]["test"]["files"]
 
 
-def test_ensure_madrl_shared_data_cross_year_reuses_signature_when_test_window_changes(tmp_path) -> None:
+def test_ensure_madrl_shared_data_cross_year_keeps_signature_when_test_window_changes(tmp_path) -> None:
     cfg = _make_multiday_cfg(tmp_path / "case", evaluation_days=5)
     first = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
@@ -79,7 +98,10 @@ def test_ensure_madrl_shared_data_cross_year_reuses_signature_when_test_window_c
 
     assert first.signature_hash == second.signature_hash
     assert first.shared_data_dir == second.shared_data_dir
-    assert first.manifest["data_controls"]["test_window_strategy"] == "full_year_runtime_slice"
+    assert second.reused is True
+    assert first.manifest["data_controls"]["test_manifest_scope"] == "full_year"
+    assert first.manifest["splits"]["test"]["split_controls"]["start_date"] is None
+    assert first.manifest["splits"]["test"]["split_controls"]["end_date"] is None
     selected = select_shared_data_episode_indices(
         second.manifest["splits"]["test"],
         start_date="2020-01-02",
@@ -88,22 +110,16 @@ def test_ensure_madrl_shared_data_cross_year_reuses_signature_when_test_window_c
     assert selected == [1, 2, 3]
 
 
-def test_ensure_madrl_shared_data_same_year_implicit_exclusion_changes_signature_with_test_window(tmp_path) -> None:
+def test_ensure_madrl_shared_data_same_year_implicit_exclusion_is_rejected(tmp_path) -> None:
     cfg = _make_multiday_cfg(tmp_path / "same_year_implicit", evaluation_days=5)
     cfg.data.train_year = 2020
     cfg.data.test_year = 2020
-    first = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
-    cfg.data.test_start_date = "2020-01-02"
-    cfg.data.test_end_date = "2020-01-03"
-    second = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
-
-    assert first.signature_hash != second.signature_hash
-    assert first.shared_data_dir != second.shared_data_dir
-    assert second.manifest["data_controls"]["test_window_strategy"] == "cfg_window"
+    with pytest.raises(ValueError, match="explicit cfg\\.data\\.train_start_date/cfg\\.data\\.train_end_date"):
+        ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
 
 
-def test_ensure_madrl_shared_data_same_year_explicit_train_range_reuses_signature_when_test_window_changes(tmp_path) -> None:
+def test_ensure_madrl_shared_data_same_year_explicit_train_range_keeps_signature_when_test_window_changes(tmp_path) -> None:
     cfg = _make_multiday_cfg(tmp_path / "same_year_explicit", evaluation_days=5)
     cfg.data.train_year = 2020
     cfg.data.test_year = 2020
@@ -117,7 +133,83 @@ def test_ensure_madrl_shared_data_same_year_explicit_train_range_reuses_signatur
 
     assert first.signature_hash == second.signature_hash
     assert first.shared_data_dir == second.shared_data_dir
-    assert second.manifest["data_controls"]["test_window_strategy"] == "full_year_runtime_slice"
+    assert second.reused is True
+    assert second.manifest["data_controls"]["test_manifest_scope"] == "full_year"
+
+
+def test_ensure_madrl_shared_data_accepts_shared_artifact_meta_without_agent_index(tmp_path, monkeypatch) -> None:
+    cfg = make_smoke_config(tmp_path / "case", algorithm="MATD3")
+    cfg.forecast.type = "lstm"
+    artifact_dir = tmp_path / "artifacts"
+    model_path = artifact_dir / "model.pt"
+    meta_path = artifact_dir / "model_meta.json"
+    scaler_path = artifact_dir / "model_scaler.pkl"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for path in (model_path, meta_path, scaler_path):
+        path.write_bytes(b"stub")
+
+    monkeypatch.setattr(
+        "predictors.shared_data.ensure_lstm_artifacts",
+        lambda cfg, device: {
+            "artifacts": {
+                "wholesale_price": (str(model_path), str(meta_path), str(scaler_path)),
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "predictors.shared_data.load_lstm_forecaster_artifacts",
+        lambda *args, **kwargs: (
+            {
+                "signal_name": "wholesale_price",
+                "pred_len": 1,
+                "future_horizon": 1,
+                "seq_len": 2,
+                "hidden_size": 4,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "input_size": 1,
+                "time_feature_mode": "none",
+                "model_mode": "shared",
+                "normalization_mode": "none",
+                "postprocess_mode": "none",
+                "baseline_mode": "none",
+                "blend_weight": None,
+                "component": None,
+                "agent_index": None,
+                "agent_profile": None,
+            },
+            object(),
+        ),
+    )
+
+    def _fake_write_split_shared_data(cfg, *, split: str, split_dir):
+        split_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema_version": SHARED_DATA_SCHEMA_VERSION,
+            "cache_layout": SHARED_DATA_CACHE_LAYOUT,
+            "price_protocol_version": int(PRICE_PROTOCOL_VERSION),
+            "price_observation_contract": PRICE_OBSERVATION_CONTRACT,
+            "split": split,
+            "num_episodes": 0,
+            "episode_length": int(cfg.env.episode_limit),
+            "num_agents": int(cfg.env.num_agents),
+            "sequence_length": int(cfg.env.future_horizon) + 1,
+            "split_controls": {"split": split},
+            "episodes": [],
+            "files": {
+                WHOLESALE_PRICE_RANK_SEQ_FIELD: f"{WHOLESALE_PRICE_RANK_SEQ_FIELD}.npy",
+                WHOLESALE_PRICE_RELATIVE_SEQ_FIELD: f"{WHOLESALE_PRICE_RELATIVE_SEQ_FIELD}.npy",
+                WHOLESALE_PRICE_SPREAD_SEQ_FIELD: f"{WHOLESALE_PRICE_SPREAD_SEQ_FIELD}.npy",
+            },
+        }
+        (split_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr("predictors.shared_data._write_split_shared_data", _fake_write_split_shared_data)
+
+    result = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+
+    assert result.manifest["artifact_inventory"]["wholesale_price"][0]["meta"]["agent_index"] is None
 
 
 def test_select_shared_data_episode_indices_requires_fully_contained_episodes() -> None:
@@ -148,6 +240,43 @@ def test_select_shared_data_episode_indices_requires_fully_contained_episodes() 
     )
 
     assert selected == [1, 2]
+
+
+def test_select_shared_data_episode_indices_supports_different_runtime_windows() -> None:
+    manifest = {
+        "episodes": [
+            {"episode_idx": 0, "first_local_date": "2020-04-01", "last_local_date": "2020-04-01"},
+            {"episode_idx": 1, "first_local_date": "2020-04-02", "last_local_date": "2020-04-02"},
+            {"episode_idx": 2, "first_local_date": "2020-06-10", "last_local_date": "2020-06-10"},
+            {"episode_idx": 3, "first_local_date": "2020-06-11", "last_local_date": "2020-06-11"},
+        ]
+    }
+
+    assert select_shared_data_episode_indices(manifest, start_date="2020-04-01", end_date="2020-04-02") == [0, 1]
+    assert select_shared_data_episode_indices(manifest, start_date="2020-06-10", end_date="2020-06-11") == [2, 3]
+
+
+def test_select_shared_data_episode_indices_rejects_non_contiguous_window() -> None:
+    manifest = {
+        "episodes": [
+            {"episode_idx": 0, "first_local_date": "2020-04-01", "last_local_date": "2020-04-01"},
+            {"episode_idx": 2, "first_local_date": "2020-04-02", "last_local_date": "2020-04-02"},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="non-contiguous episode indices"):
+        select_shared_data_episode_indices(manifest, start_date="2020-04-01", end_date="2020-04-02")
+
+
+def test_shared_data_future_horizon_48_writes_sequence_length_49(tmp_path) -> None:
+    cfg = _make_multiday_cfg(tmp_path / "h48", evaluation_days=3)
+    cfg.env.future_horizon = 48
+
+    result = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+
+    assert result.manifest["data_controls"]["future_horizon"] == 48
+    assert result.manifest["splits"]["train"]["sequence_length"] == 49
+    assert result.manifest["splits"]["test"]["sequence_length"] == 49
 
 
 def test_select_shared_data_episode_indices_raises_on_empty_selection() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+import multiprocessing as mp
 from pathlib import Path
 
 import pytest
@@ -27,4 +28,6 @@ def tmp_path():
 def pytest_sessionfinish(session, exitstatus):
     """Remove the shared temporary root after the test session finishes."""
     _ = session, exitstatus
+    if mp.current_process().name != "MainProcess":
+        return
     shutil.rmtree(TEST_TMP_ROOT, ignore_errors=True)

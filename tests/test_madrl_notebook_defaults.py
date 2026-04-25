@@ -1,17 +1,42 @@
 from __future__ import annotations
 
-from configs.experiment_config import ExperimentConfig
+from configs.experiment_config import ExperimentConfig, MADRL_NOTEBOOK_SPECS
 from scripts.utils.grid_notebook_workflow import apply_notebook_experiment_settings
 
 
 def test_experiment_config_defaults_align_with_madrl_notebooks() -> None:
     cfg = ExperimentConfig()
 
-    assert list(cfg.data.agent_profiles) == ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]
-    assert list(cfg.grid.agent_bus_ids) == [10, 6, 12, 4, 2]
+    assert list(cfg.data.agent_profiles) == ["SFH12", "SFH18", "SFH20"]
+    assert list(cfg.grid.agent_bus_ids) == [12, 4, 2]
     assert int(cfg.data.train_year) == 2019
     assert int(cfg.data.test_year) == 2020
-    assert int(cfg.env.future_horizon) == 24
+    assert cfg.data.test_start_date == "2020-04-01"
+    assert cfg.data.test_end_date == "2020-04-15"
+    assert int(cfg.env.num_agents) == 3
+    assert int(cfg.env.episode_limit) == 96
+    assert int(cfg.train.train_episodes) == 50
+    assert int(cfg.env.train_window_days) == 7
+    assert int(cfg.env.window_stride_days) == 1
+    assert int(cfg.env.resolved_train_episode_limit()) == 96 * 7
+    assert int(cfg.env.future_horizon) == 48
+    assert cfg.algo.gamma == 0.999
+    assert int(cfg.train.n_step_return) == 96
+    assert int(cfg.train.resolved_actor_learning_starts_transitions(cfg.env.resolved_train_episode_limit())) == 96 * 7 * cfg.train.num_envs * 3
+    assert cfg.train.feasible_random_exploration_start == 0.50
+    assert cfg.train.feasible_random_exploration_end == 0.05
+    assert int(cfg.train.feasible_random_exploration_decay_steps) == 50_000
+    assert cfg.env.max_charge_rate == 0.1
+    assert cfg.env.init_soc == 0.5
+    assert cfg.env.train_init_soc_low == 0.20
+    assert cfg.env.train_init_soc_high == 0.80
+    assert cfg.env.soc_target == 0.5
+
+    train_base_battery = MADRL_NOTEBOOK_SPECS["train_base"]["battery"]
+    assert train_base_battery["max_charge_rate"] == 0.5
+    assert train_base_battery["init_soc"] == 0.05
+    assert train_base_battery["train_init_soc_low"] == 0.05
+    assert train_base_battery["train_init_soc_high"] == 0.05
 
 
 def test_data_config_resolved_scale_defaults_follow_global_values() -> None:
@@ -41,10 +66,14 @@ def test_apply_notebook_experiment_settings_uses_cfg_defaults_when_optional_valu
         test_year=None,
     )
 
-    assert list(cfg.data.agent_profiles) == ["SFH12", "SFH14", "SFH16", "SFH18", "SFH20"]
-    assert list(cfg.grid.agent_bus_ids) == [10, 6, 12, 4, 2]
+    assert list(cfg.data.agent_profiles) == ["SFH12", "SFH18", "SFH20"]
+    assert list(cfg.grid.agent_bus_ids) == [12, 4, 2]
+    assert cfg.data.test_start_date == "2020-04-01"
+    assert cfg.data.test_end_date == "2020-04-15"
     assert list(cfg.data.load_scale) == [float(value) for value in ExperimentConfig().data.load_scale]
     assert list(cfg.data.pv_scale) == [float(value) for value in ExperimentConfig().data.pv_scale]
-    assert controls["agent_bus_ids"] == [10, 6, 12, 4, 2]
+    assert controls["agent_bus_ids"] == [12, 4, 2]
     assert controls["load_scale"] == [float(value) for value in ExperimentConfig().data.load_scale]
     assert controls["pv_scale"] == [float(value) for value in ExperimentConfig().data.pv_scale]
+    assert controls["test_start_date"] == "2020-04-01"
+    assert controls["test_end_date"] == "2020-04-15"
