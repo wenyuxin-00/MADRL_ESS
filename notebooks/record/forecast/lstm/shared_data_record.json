@@ -1,0 +1,9 @@
+{
+  "shared_data_dir": "artifacts/training/shared_data/mainline/6be0cd6f08bc0369",
+  "signature_hash": "6be0cd6f08bc0369",
+  "reused": false,
+  "train_split_episodes": 356,
+  "test_split_episodes": 364,
+  "schema_version": 8,
+  "price_protocol_version": 1
+}
