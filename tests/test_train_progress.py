@@ -31,6 +31,35 @@ class DummyTqdm:
         return None
 
 
+def test_power_flow_summary_counts_training_nonconvergence():
+    class Runner:
+        pass
+
+    runner = Runner()
+    train_module.init_power_flow_tracking(runner)
+
+    train_module.record_power_flow_diagnostics(
+        runner,
+        [
+            {"pf_converged": True, "pf_error": ""},
+            {"pf_converged": False, "pf_error": "solver failed"},
+            {"episode_done": False},
+            {"pf_converged": False, "pf_error": "solver failed"},
+        ],
+    )
+
+    summary = train_module.build_power_flow_summary(runner)
+
+    assert summary["tracked"] is True
+    assert summary["steps"] == 3
+    assert summary["nonconverged_steps"] == 2
+    assert summary["nonconverged_fraction"] == 2 / 3
+    assert summary["all_converged"] is False
+    assert summary["first_pf_error"] == "solver failed"
+    assert summary["last_pf_error"] == "solver failed"
+    assert summary["pf_error_counts"] == {"solver failed": 2}
+
+
 def test_train_runner_batches_progress_updates_by_episode_interval(monkeypatch, tmp_path):
     case_dir = make_case_dir(tmp_path, "train_progress")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
@@ -62,6 +91,8 @@ def test_train_runner_batches_progress_updates_by_episode_interval(monkeypatch, 
     assert "sample_time_s" in runner.perf_summary
     assert "history_time_s" in runner.perf_summary
     assert "agent_update_time_s" in runner.perf_summary
+    assert runner.perf_summary["power_flow_summary"]["tracked"] is True
+    assert runner.perf_summary["power_flow_summary"]["steps"] == runner.total_steps
 
 
 def test_train_runner_emits_final_progress_for_partial_episode_batch(monkeypatch, tmp_path):

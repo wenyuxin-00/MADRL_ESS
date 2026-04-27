@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from controllers.madrl.safety_projector import JointGridSafetyProjector
-from envs.grid.core.grid_core import GridStepResult
+from envs.grid.grid_core import GridStepResult
 
 
 def _make_projector(*, base_power_kw: float, limit_kw: float, mode: str = "joint_linearized") -> JointGridSafetyProjector:

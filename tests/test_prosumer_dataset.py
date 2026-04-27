@@ -36,7 +36,7 @@ class TinyGridCore:
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
-        from envs.grid.core.grid_core import GridStepResult
+        from envs.grid.grid_core import GridStepResult
 
         n = len(p_batt_kw)
         return GridStepResult(
@@ -56,7 +56,6 @@ def _build_obs_builder(cfg):
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
-        adjacency_type=cfg.obs.adjacency_type,
         normalizer=build_observation_normalizer(cfg),
     )
 
@@ -117,6 +116,27 @@ def test_prosumer_dataset_filters_year_and_profiles(tmp_path):
     assert episode["meta"]["pv_reference"] == "east"
     assert episode["meta"]["signal_names"] == ["wholesale_price", "load", "pv"]
     assert episode["meta"]["timestamps"][0].startswith("2019-01-01 00:00:00")
+
+
+def test_prosumer_dataset_rejects_processed_dir_as_data_root(tmp_path):
+    case_dir = make_case_dir(tmp_path, "prosumer_loader_contract")
+    data_dir = case_dir / "data"
+    processed_dir = write_prosumer_processed_dataset(
+        data_dir,
+        agent_profiles=["SFH12", "SFH14"],
+        train_steps=8,
+        test_steps=8,
+    )
+
+    with pytest.raises(FileNotFoundError, match="Missing processed prosumer file"):
+        ProsumerDataset(
+            data_dir=processed_dir,
+            episode_length=4,
+            n_agents=2,
+            agent_profiles=["SFH12", "SFH14"],
+            year=2019,
+            node_ids=[10, 6],
+        )
 
 
 def test_prosumer_dataset_combines_heatpump_and_scales_pv_and_ess(tmp_path):
@@ -238,7 +258,7 @@ def test_prosumer_dataset_validates_inputs_and_build_dataset_lengths(tmp_path):
         test_steps=8,
     )
 
-    with pytest.raises(ValueError, match="Unknown agent profiles"):
+    with pytest.raises(KeyError, match="BAD_PROFILE"):
         ProsumerDataset(
             data_dir=data_dir,
             episode_length=4,
@@ -303,7 +323,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq"} <= set(obs.keys())
         assert reset_info["episode_meta"]["node_ids"] == cfg.grid.agent_bus_ids
 
         next_obs, reward, terminated, truncated, info = env.step(
@@ -317,6 +337,8 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
             "episode_done",
             "madrl_throughput_bonus_weight",
             "madrl_throughput_kwh",
+            "pf_converged",
+            "pf_error",
             *[str(meta.key) for meta in env.reward_fn.component_meta],
         }
     finally:
@@ -333,7 +355,7 @@ def test_prosumer_build_dataset_and_grid_env_smoke(tmp_path):
     )
     try:
         obs, reset_info = fallback_env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq"} <= set(obs.keys())
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
 
         _, reward, terminated, truncated, info = fallback_env.step(

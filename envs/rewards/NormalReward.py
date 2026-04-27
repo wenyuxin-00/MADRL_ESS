@@ -7,6 +7,7 @@ import numpy as np
 from scripts.utils.storage_profit import compute_storage_profit_components
 
 
+# 作用：描述 reward 分项在训练摘要和 notebook 可视化中的展示信息。
 @dataclass(frozen=True)
 class ComponentMeta:
     key: str
@@ -15,213 +16,112 @@ class ComponentMeta:
     sign: int
 
 
+NON_NEGATIVE_REWARD_FIELDS = (
+    "action_boundary_penalty_weight",
+    "soc_boundary_regularization_weight",
+    "throughput_bonus_eur_per_kwh_max",
+    "soc_boundary_epsilon",
+    "soc_boundary_margin",
+    "w_voltage_pen",
+    "w_line_pen",
+    "w_trafo_pen",
+)
+COMPONENT_META = (
+    ComponentMeta("madrl_r_inc", "+ madrl_r_inc", "blue", 1),
+    ComponentMeta("madrl_r_action_penalty", "- madrl_r_action_penalty", "amber", -1),
+    ComponentMeta("madrl_r_soc_regularization", "- madrl_r_soc_regularization", "green", -1),
+    ComponentMeta("madrl_r_throughput_bonus", "+ madrl_r_throughput_bonus", "teal", 1),
+    ComponentMeta("madrl_r_safe_v", "- madrl_r_safe_v", "red", -1),
+    ComponentMeta("madrl_r_safe_line", "- madrl_r_safe_line", "purple", -1),
+    ComponentMeta("madrl_r_safe_trafo", "- madrl_r_safe_trafo", "maroon", -1),
+    ComponentMeta("madrl_r_safe_total", "- madrl_r_safe_total", "rose", -1),
+    ComponentMeta("madrl_r_total_internal", "+ madrl_r_total_internal", "slate", 1),
+)
+
+
+# 作用：计算 MADRL 每一步的 storage profit、边界惩罚、探索 bonus 和电网安全惩罚。
 class NormalReward:
+    # 作用：读取并校验 reward 配置，旧字段和缺失字段在边界处直接失败。
     def __init__(self, cfg: object) -> None:
-        if hasattr(cfg.reward, "w_action_pen"):
-            raise AttributeError(
-                "cfg.reward.w_action_pen is no longer supported. NormalReward now uses "
-                "action_boundary_penalty_weight. Re-run notebooks/madrl/train_base.ipynb "
-                "after updating configs/experiment_config.py."
-            )
-        if hasattr(cfg.reward, "w_soc_pen"):
-            raise AttributeError(
-                "cfg.reward.w_soc_pen is no longer supported. New NormalReward contract splits "
-                "the old SoC shaping into action_boundary_penalty_weight and "
-                "soc_boundary_regularization_weight. Re-run notebooks/madrl/train_base.ipynb "
-                "after updating configs/experiment_config.py."
-            )
-        if hasattr(cfg.reward, "action_feasibility_regularization_weight"):
-            raise AttributeError(
-                "cfg.reward.action_feasibility_regularization_weight belongs to the reverted "
-                "SoC-aware mapping experiment. Expected cfg.reward.action_boundary_penalty_weight "
-                "for the restored MADRL baseline contract. Re-run notebooks/madrl/train_base.ipynb after updating "
-                "configs/experiment_config.py."
-            )
-        if hasattr(cfg.reward, "terminal_soc_value_weight"):
-            raise AttributeError(
-                "cfg.reward.terminal_soc_value_weight is no longer supported. New NormalReward "
-                "contract removes terminal SoC shaping entirely. Re-run notebooks/madrl/"
-                "train_base.ipynb after updating configs/experiment_config.py."
-            )
-        if hasattr(cfg.reward, "local_action_penalty_mode") or hasattr(cfg.reward, "local_action_penalty_weight"):
-            raise AttributeError(
-                "local_action_penalty_mode / local_action_penalty_weight were removed in "
-                "fixMADRL section 5.3. Local action feasibility is now projected in rollout, "
-                "target-Q, and actor-loss; reward-level local action regularization uses "
-                "action_boundary_penalty_weight. "
-                "Re-run notebooks/madrl/train_base.ipynb after updating configs/experiment_config.py."
-            )
+        reward_cfg = cfg.reward
+        if str(reward_cfg.storage_objective_mode) != "max_storage_profit":
+            raise ValueError(f"storage_objective_mode must be 'max_storage_profit', got {reward_cfg.storage_objective_mode!r}.")
+        if str(reward_cfg.storage_price_mode) != "real_time_price":
+            raise ValueError(f"storage_price_mode must be 'real_time_price', got {reward_cfg.storage_price_mode!r}.")
+        if not np.isclose(float(reward_cfg.storage_profit_weight), 1.0):
+            raise ValueError(f"storage_profit_weight must be 1.0, got {reward_cfg.storage_profit_weight!r}.")
 
-        self.storage_objective_mode = str(getattr(cfg.reward, "storage_objective_mode", "max_storage_profit"))
-        if self.storage_objective_mode != "max_storage_profit":
-            raise ValueError(
-                "NormalReward received old reward objective "
-                f"storage_objective_mode={self.storage_objective_mode!r}. Expected the new contract "
-                "storage_objective_mode='max_storage_profit'. Re-run notebooks/madrl/train_base.ipynb "
-                "after updating configs/experiment_config.py."
-            )
-        self.storage_price_mode = str(getattr(cfg.reward, "storage_price_mode", "real_time_price"))
-        if self.storage_price_mode != "real_time_price":
-            raise ValueError(
-                "NormalReward received old reward price contract "
-                f"storage_price_mode={self.storage_price_mode!r}. Expected storage_price_mode='real_time_price'. "
-                "Re-run notebooks/madrl/train_base.ipynb after updating configs/experiment_config.py."
-            )
+        for field_name in NON_NEGATIVE_REWARD_FIELDS:
+            value = float(getattr(reward_cfg, field_name))
+            if value < 0.0:
+                raise ValueError(f"{field_name} must be non-negative, got {value}.")
+            setattr(self, field_name, value)
 
-        missing_fields = [
-            field_name
-            for field_name in (
-                "action_boundary_penalty_weight",
-                "soc_boundary_regularization_weight",
-                "throughput_bonus_eur_per_kwh_max",
-                "soc_boundary_epsilon",
-                "soc_boundary_margin",
-            )
-            if not hasattr(cfg.reward, field_name)
-        ]
-        if missing_fields:
-            raise AttributeError(
-                "NormalReward received an old reward config without the new MADRL shaping fields "
-                f"{missing_fields}. Expected action_boundary_penalty_weight, "
-                "soc_boundary_regularization_weight, throughput_bonus_eur_per_kwh_max, "
-                "soc_boundary_epsilon, and soc_boundary_margin. Re-run notebooks/madrl/train_base.ipynb "
-                "after updating configs/experiment_config.py."
-            )
-
-        self.storage_profit_weight = float(getattr(cfg.reward, "storage_profit_weight", 1.0))
-        if not np.isclose(self.storage_profit_weight, 1.0):
-            raise ValueError(
-                "NormalReward no longer supports storage_profit_weight != 1.0. The new MADRL reward "
-                "contract uses unscaled madrl_r_inc. Re-run notebooks/madrl/train_base.ipynb after "
-                "resetting storage_profit_weight to 1.0."
-            )
-        self.action_boundary_penalty_weight = float(cfg.reward.action_boundary_penalty_weight)
-        self.soc_boundary_regularization_weight = float(cfg.reward.soc_boundary_regularization_weight)
-        self.throughput_bonus_eur_per_kwh_max = float(cfg.reward.throughput_bonus_eur_per_kwh_max)
-        self.soc_boundary_epsilon = float(cfg.reward.soc_boundary_epsilon)
-        self.soc_boundary_margin = float(cfg.reward.soc_boundary_margin)
-        self.w_voltage_pen = float(cfg.reward.w_voltage_pen)
-        self.w_line_pen = float(getattr(cfg.reward, "w_line_pen", 0.0))
-        self.w_trafo_pen = float(cfg.reward.w_trafo_pen)
-        if self.action_boundary_penalty_weight < 0.0:
-            raise ValueError("action_boundary_penalty_weight must be non-negative.")
-        if self.soc_boundary_regularization_weight < 0.0:
-            raise ValueError("soc_boundary_regularization_weight must be non-negative.")
-        if self.throughput_bonus_eur_per_kwh_max < 0.0:
-            raise ValueError("throughput_bonus_eur_per_kwh_max must be non-negative.")
-        if self.soc_boundary_epsilon < 0.0:
-            raise ValueError("soc_boundary_epsilon must be non-negative.")
-        if self.soc_boundary_margin < 0.0:
-            raise ValueError("soc_boundary_margin must be non-negative.")
-
+    # 作用：返回 reward 分项的稳定顺序和展示元数据。
     @property
     def component_meta(self) -> list[ComponentMeta]:
-        return [
-            ComponentMeta("madrl_r_inc", "+ madrl_r_inc", "blue", 1),
-            ComponentMeta("madrl_r_action_penalty", "- madrl_r_action_penalty", "amber", -1),
-            ComponentMeta("madrl_r_soc_regularization", "- madrl_r_soc_regularization", "green", -1),
-            ComponentMeta("madrl_r_throughput_bonus", "+ madrl_r_throughput_bonus", "teal", 1),
-            ComponentMeta("madrl_r_safe_v", "- madrl_r_safe_v", "red", -1),
-            ComponentMeta("madrl_r_safe_line", "- madrl_r_safe_line", "purple", -1),
-            ComponentMeta("madrl_r_safe_trafo", "- madrl_r_safe_trafo", "maroon", -1),
-            ComponentMeta("madrl_r_safe_total", "- madrl_r_safe_total", "rose", -1),
-            ComponentMeta("madrl_r_total_internal", "+ madrl_r_total_internal", "slate", 1),
-        ]
+        return list(COMPONENT_META)
 
+    # 作用：按照训练进度把 throughput bonus 从早期最大值线性退火到 0。
     def _throughput_bonus_weight(self, env_state: dict) -> float:
-        if "throughput_bonus_weight_t" in env_state:
-            return float(env_state["throughput_bonus_weight_t"])
-        progress = float(env_state.get("training_progress", 1.0))
+        progress = float(env_state["training_progress"])
         progress = float(np.clip(progress, 0.0, 1.0))
-        if progress < 0.20:
-            return self.throughput_bonus_eur_per_kwh_max
-        if progress < 0.80:
-            decay_ratio = (progress - 0.20) / 0.60
-            return self.throughput_bonus_eur_per_kwh_max * max(0.0, 1.0 - decay_ratio)
-        return 0.0
+        return self.throughput_bonus_eur_per_kwh_max * float(np.clip((0.80 - progress) / 0.60, 0.0, 1.0))
 
+    # 作用：基于当前环境状态计算每个 agent 的 MADRL reward 和分项明细。
     def compute(self, env_state: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        required_keys = ("battery_power_t", "storage_price_t", "soc_t", "soc_min", "soc_max")
-        missing_keys = [key for key in required_keys if key not in env_state]
-        if missing_keys:
-            raise KeyError(
-                "NormalReward requires env_state keys "
-                f"{missing_keys} under the Step 3 MADRL reward contract. Re-run the caller through "
-                "GridEnv.step or update notebooks/madrl/train_base.ipynb."
-            )
-
         battery_power_t = np.asarray(env_state["battery_power_t"], dtype=np.float32)
-        price_t = float(env_state["storage_price_t"])
-        dt = float(env_state.get("dt", 1.0))
         soc_t = np.asarray(env_state["soc_t"], dtype=np.float32)
-        soc_min = float(env_state["soc_min"])
-        soc_max = float(env_state["soc_max"])
-        v_violation = np.asarray(env_state.get("v_violation", np.zeros_like(battery_power_t)), dtype=np.float32)
-        psi_v_raw = float(env_state.get("psi_v_raw", 0.0))
-        psi_line_raw = float(env_state.get("psi_line_raw", 0.0))
-        psi_trafo_raw = float(env_state.get("psi_trafo_raw", 0.0))
+        v_violation = np.asarray(env_state["v_violation"], dtype=np.float32)
+        price_t, dt = float(env_state["storage_price_t"]), float(env_state["dt"])
+        soc_min, soc_max = float(env_state["soc_min"]), float(env_state["soc_max"])
+        psi_v_raw, psi_line_raw, psi_trafo_raw = float(env_state["psi_v_raw"]), float(env_state["psi_line_raw"]), float(env_state["psi_trafo_raw"])
         throughput_bonus_weight_t = self._throughput_bonus_weight(env_state)
 
-        if soc_t.shape != battery_power_t.shape:
-            raise ValueError(
-                f"NormalReward expects soc_t and battery_power_t to share shape, got {soc_t.shape} "
-                f"vs {battery_power_t.shape}."
-            )
+        if battery_power_t.ndim != 1 or soc_t.shape != battery_power_t.shape or v_violation.shape != battery_power_t.shape:
+            raise ValueError(f"Reward arrays must be 1D with matching shapes, got battery_power_t={battery_power_t.shape}, soc_t={soc_t.shape}, v_violation={v_violation.shape}.")
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}.")
         if not 0.0 <= soc_min <= soc_max <= 1.0:
-            raise ValueError(f"NormalReward received invalid SoC bounds [{soc_min}, {soc_max}].")
+            raise ValueError(f"soc bounds must satisfy 0 <= soc_min <= soc_max <= 1, got [{soc_min}, {soc_max}].")
+
         soc_lower_soft = soc_min + self.soc_boundary_margin
         soc_upper_soft = soc_max - self.soc_boundary_margin
         if soc_lower_soft > soc_upper_soft:
-            raise ValueError(
-                "soc_boundary_margin is too large for the configured SoC interval: "
-                f"soft bounds [{soc_lower_soft}, {soc_upper_soft}] are invalid."
-            )
+            raise ValueError(f"soc_boundary_margin makes soft bounds invalid: [{soc_lower_soft}, {soc_upper_soft}].")
 
-        storage_components = compute_storage_profit_components(
-            battery_power_kw=battery_power_t,
-            price_eur_per_kwh=price_t,
-            dt_hours=dt,
-        )
+        storage_components = compute_storage_profit_components(battery_power_kw=battery_power_t, price_eur_per_kwh=price_t, dt_hours=dt)
         madrl_r_inc = storage_components["storage_profit_eur"].astype(np.float32)
-
+        # 电池按实时价格充放电的增量利润：充电是成本，放电是收益。
         pushes_lower = (battery_power_t < 0.0) & (soc_t <= soc_min + self.soc_boundary_epsilon)
         pushes_upper = (battery_power_t > 0.0) & (soc_t >= soc_max - self.soc_boundary_epsilon)
         boundary_push = np.logical_or(pushes_lower, pushes_upper)
-        madrl_r_action_penalty = (
-            self.action_boundary_penalty_weight
-            * np.abs(battery_power_t)
-            * boundary_push.astype(np.float32)
-        ).astype(np.float32)
+        madrl_r_action_penalty = (self.action_boundary_penalty_weight * np.abs(battery_power_t) * boundary_push.astype(np.float32)).astype(np.float32)
+        # SOC 已在硬边界附近时，如果动作继续把电池往边界外推，就扣这项。
 
         below = np.maximum(0.0, soc_lower_soft - soc_t).astype(np.float32)
         above = np.maximum(0.0, soc_t - soc_upper_soft).astype(np.float32)
-        madrl_r_soc_regularization = (
-            self.soc_boundary_regularization_weight * (below * below + above * above)
-        ).astype(np.float32)
+        madrl_r_soc_regularization = (self.soc_boundary_regularization_weight * (below * below + above * above)).astype(np.float32)
+        # SOC 落在软安全带外的二次惩罚；越偏离软边界，惩罚增长越快。
 
         throughput_kwh = (np.abs(battery_power_t) * np.float32(dt)).astype(np.float32)
         madrl_r_throughput_bonus = (throughput_bonus_weight_t * throughput_kwh).astype(np.float32)
+        # 训练早期鼓励电池产生有效吞吐，随 training_progress 线性退火到 0。
 
         n_agents = int(battery_power_t.shape[0])
-        voltage_total = self.w_voltage_pen * psi_v_raw
         v_sum = float(np.sum(v_violation))
-        if v_sum > 0.0:
-            v_weights = (v_violation / v_sum).astype(np.float32)
-        elif psi_v_raw > 0.0:
-            v_weights = np.full((n_agents,), 1.0 / max(n_agents, 1), dtype=np.float32)
-        else:
-            v_weights = np.zeros((n_agents,), dtype=np.float32)
-        madrl_r_safe_v = (n_agents * voltage_total * v_weights).astype(np.float32)
+        # 非 agent 节点触发电压违约时，没有局部归因信号，只能按 agent 均摊。
+        v_weights = (v_violation / v_sum).astype(np.float32) if v_sum > 0.0 else np.full((n_agents,), 1.0 / max(n_agents, 1), dtype=np.float32) if psi_v_raw > 0.0 else np.zeros((n_agents,), dtype=np.float32)
+        madrl_r_safe_v = (n_agents * self.w_voltage_pen * psi_v_raw * v_weights).astype(np.float32)
+        # 电压越限惩罚按 agent 本地违约占比分摊；没有本地归因时均摊。
         madrl_r_safe_line = np.full((n_agents,), self.w_line_pen * psi_line_raw, dtype=np.float32)
+        # 线路越限是全局安全成本，所有 agent 承担同一份惩罚。
         madrl_r_safe_trafo = np.full((n_agents,), self.w_trafo_pen * psi_trafo_raw, dtype=np.float32)
+        # 变压器越限是全局安全成本，所有 agent 承担同一份惩罚。
         madrl_r_safe_total = (madrl_r_safe_v + madrl_r_safe_line + madrl_r_safe_trafo).astype(np.float32)
-        madrl_r_total_internal = (
-            madrl_r_inc
-            - madrl_r_action_penalty
-            - madrl_r_soc_regularization
-            + madrl_r_throughput_bonus
-            - madrl_r_safe_total
-        ).astype(np.float32)
+        # 安全惩罚合计，会从最终 MADRL reward 中扣除。
+        madrl_r_total_internal = (madrl_r_inc - madrl_r_action_penalty - madrl_r_soc_regularization + madrl_r_throughput_bonus - madrl_r_safe_total).astype(np.float32)
+        # 最终每个 agent 的训练 reward：储能收益 - 边界/安全惩罚 + 早期探索 bonus。
 
         components = {
             "madrl_r_inc": madrl_r_inc,

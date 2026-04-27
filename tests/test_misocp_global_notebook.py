@@ -11,6 +11,7 @@ import pytest
 from controllers.mpc.global_socp_mpc import GlobalMISOCPProblem
 from scripts.builder import build_env
 from scripts.mainline_compare import (
+    _misocp_line_positions_in_pandapower_order,
     build_chunk_boundary_soc_df,
     build_full_horizon_step_df,
     build_root_q_diagnostic_df,
@@ -358,6 +359,33 @@ def test_validation_helpers_return_expected_tables():
     assert validation_df.loc[0, "within_tolerance"]
     assert validation_summary["steps_outside_tolerance"] == 0
     assert validation_summary["pp_root_p_available_ratio"] == pytest.approx(1.0)
+
+
+def test_misocp_line_positions_align_tree_branches_to_pandapower_rows():
+    env = SimpleNamespace(
+        _grid_core=SimpleNamespace(
+            net=SimpleNamespace(
+                line=pd.DataFrame(
+                    {
+                        "from_bus": [1, 0, 2],
+                        "to_bus": [3, 1, 1],
+                    }
+                )
+            )
+        )
+    )
+    problem = SimpleNamespace(
+        network=SimpleNamespace(
+            bus_ids=np.asarray([0, 1, 2, 3], dtype=np.int32),
+            branch_parent_pos=np.asarray([0, 1, 1], dtype=np.int32),
+            branch_child_pos=np.asarray([1, 2, 3], dtype=np.int32),
+            line_branch_indices=np.asarray([1, 2], dtype=np.int32),
+        )
+    )
+
+    positions = _misocp_line_positions_in_pandapower_order(env, problem)
+
+    assert tuple(positions.tolist()) == (2, 0)
 
 
 def test_validation_summary_reports_fit_and_gap_metrics():

@@ -47,8 +47,7 @@ def _make_env_state(
     psi_v_raw: float = 0.0,
     psi_line_raw: float = 0.0,
     psi_trafo_raw: float = 0.0,
-    throughput_bonus_weight_t: float | None = None,
-    training_progress: float | None = None,
+    training_progress: float = 1.0,
 ):
     if battery_power_t is None:
         battery_power_t = np.zeros(n_agents, dtype=np.float32)
@@ -68,11 +67,8 @@ def _make_env_state(
         "psi_v_raw": float(psi_v_raw),
         "psi_line_raw": float(psi_line_raw),
         "psi_trafo_raw": float(psi_trafo_raw),
+        "training_progress": float(training_progress),
     }
-    if throughput_bonus_weight_t is not None:
-        env_state["throughput_bonus_weight_t"] = float(throughput_bonus_weight_t)
-    if training_progress is not None:
-        env_state["training_progress"] = float(training_progress)
     return env_state
 
 
@@ -96,7 +92,7 @@ def test_incremental_profit_follows_battery_power_direction() -> None:
     rf = NormalReward(_make_cfg())
     env_state = _make_env_state(
         battery_power_t=np.array([2.0, -1.0, 0.0], dtype=np.float32),
-        throughput_bonus_weight_t=0.0,
+        training_progress=1.0,
     )
 
     total, components = rf.compute(env_state)
@@ -115,7 +111,7 @@ def test_negative_price_makes_charging_profitable() -> None:
         _make_env_state(
             storage_price_t=-0.3,
             battery_power_t=np.array([2.0, 0.0, -1.0], dtype=np.float32),
-            throughput_bonus_weight_t=0.0,
+            training_progress=1.0,
         )
     )
 
@@ -124,27 +120,11 @@ def test_negative_price_makes_charging_profitable() -> None:
     np.testing.assert_allclose(total, expected_profit, rtol=1e-6)
 
 
-def test_terminal_soc_value_config_is_rejected() -> None:
+def test_missing_reward_contract_field_is_rejected() -> None:
     cfg = _make_cfg()
-    cfg.reward.terminal_soc_value_weight = 0.5
+    delattr(cfg.reward.__class__, "action_boundary_penalty_weight")
 
-    with pytest.raises(AttributeError, match="terminal_soc_value_weight"):
-        NormalReward(cfg)
-
-
-def test_legacy_w_soc_pen_config_is_rejected() -> None:
-    cfg = _make_cfg()
-    cfg.reward.w_soc_pen = 0.5
-
-    with pytest.raises(AttributeError, match="w_soc_pen"):
-        NormalReward(cfg)
-
-
-def test_action_feasibility_regularization_config_is_rejected() -> None:
-    cfg = _make_cfg()
-    cfg.reward.action_feasibility_regularization_weight = 0.05
-
-    with pytest.raises(AttributeError, match="action_feasibility_regularization_weight"):
+    with pytest.raises(AttributeError, match="action_boundary_penalty_weight"):
         NormalReward(cfg)
 
 
@@ -154,7 +134,7 @@ def test_action_boundary_penalty_uses_executed_power_at_soc_edges() -> None:
         _make_env_state(
             battery_power_t=np.array([-1.0, 0.5, 1.5], dtype=np.float32),
             soc_t=np.array([0.01, 0.50, 0.99], dtype=np.float32),
-            throughput_bonus_weight_t=0.0,
+            training_progress=1.0,
         )
     )
 
@@ -177,7 +157,7 @@ def test_soc_regularization_is_flat_inside_soft_band() -> None:
         _make_env_state(
             battery_power_t=np.zeros(3, dtype=np.float32),
             soc_t=np.array([0.05, 0.50, 0.95], dtype=np.float32),
-            throughput_bonus_weight_t=0.0,
+            training_progress=1.0,
         )
     )
 
@@ -222,7 +202,7 @@ def test_voltage_penalty_splits_by_local_violation_proportion() -> None:
     env_state = _make_env_state(
         v_violation=np.array([0.02, 0.0, 0.01], dtype=np.float32),
         psi_v_raw=0.005,
-        throughput_bonus_weight_t=0.0,
+        training_progress=1.0,
     )
 
     _, components = rf.compute(env_state)
@@ -238,7 +218,7 @@ def test_voltage_penalty_falls_back_to_uniform_split_for_non_agent_violations() 
     env_state = _make_env_state(
         v_violation=np.zeros(3, dtype=np.float32),
         psi_v_raw=0.005,
-        throughput_bonus_weight_t=0.0,
+        training_progress=1.0,
     )
 
     _, components = rf.compute(env_state)
@@ -249,7 +229,7 @@ def test_voltage_penalty_falls_back_to_uniform_split_for_non_agent_violations() 
 
 def test_transformer_penalty_is_shared() -> None:
     rf = NormalReward(_make_cfg())
-    _, components = rf.compute(_make_env_state(psi_trafo_raw=0.02, throughput_bonus_weight_t=0.0))
+    _, components = rf.compute(_make_env_state(psi_trafo_raw=0.02, training_progress=1.0))
 
     expected = np.full(3, 7.0 * 0.02, dtype=np.float32)
     np.testing.assert_allclose(components["madrl_r_safe_trafo"], expected, rtol=1e-5)
@@ -257,7 +237,7 @@ def test_transformer_penalty_is_shared() -> None:
 
 def test_line_penalty_is_shared() -> None:
     rf = NormalReward(_make_cfg())
-    _, components = rf.compute(_make_env_state(psi_line_raw=0.5, throughput_bonus_weight_t=0.0))
+    _, components = rf.compute(_make_env_state(psi_line_raw=0.5, training_progress=1.0))
 
     expected = np.full(3, 3.0 * 0.5, dtype=np.float32)
     np.testing.assert_allclose(components["madrl_r_safe_line"], expected, rtol=1e-5)
@@ -268,7 +248,7 @@ def test_objective_combines_increment_penalty_regularization_bonus_and_safety() 
     env_state = _make_env_state(
         battery_power_t=np.array([2.0, -1.0, 0.5], dtype=np.float32),
         soc_t=np.array([0.99, 0.01, 0.05], dtype=np.float32),
-        throughput_bonus_weight_t=0.001,
+        training_progress=0.5,
         v_violation=np.array([0.01, 0.0, 0.0], dtype=np.float32),
         psi_v_raw=0.002,
         psi_line_raw=0.1,

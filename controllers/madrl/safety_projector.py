@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any
 import numpy as np,torch
 from torch import nn
-from envs.grid.core.grid_core import GridCore
+from envs.grid.grid_core import GridCore
 from envs.grid.deployments import build_agent_deployments
 SAFE_POC_ALGO_NAME='MATD3_SAFE_POC'
 SAFETY_LOCAL_FIELD_NAMES='soc_raw','load_raw','pv_raw','battery_capacity_kwh','p_max_kw'

@@ -529,7 +529,7 @@ def test_lstm_source_signature_ignores_downstream_test_window(tmp_path) -> None:
     assert sliced_signature["test_date_range"] == {"start_date": None, "end_date": None}
 
 
-def test_lstm_source_signature_keeps_same_year_exclusion(tmp_path) -> None:
+def test_lstm_source_signature_keeps_full_same_year_train_split(tmp_path) -> None:
     cfg = make_smoke_config(tmp_path)
     cfg.data.train_year = 2020
     cfg.data.test_year = 2020
@@ -541,10 +541,8 @@ def test_lstm_source_signature_keeps_same_year_exclusion(tmp_path) -> None:
     signature = build_lstm_source_signature(cfg, "pv")
 
     assert signature["test_date_range"] == {"start_date": None, "end_date": None}
-    assert signature["train_excluded_date_range"] == {
-        "start_date": "2020-08-01",
-        "end_date": "2020-08-05",
-    }
+    assert signature["train_date_range"] == {"start_date": None, "end_date": None}
+    assert "train_excluded_date_range" not in signature
 
 
 def test_blend_weight_search_can_fallback_to_conservative_baseline() -> None:
@@ -764,7 +762,6 @@ def test_grid_env_reset_passes_episode_meta_to_forecaster(tmp_path) -> None:
             local_features=cfg.obs.local_features,
             sequence_features=cfg.obs.sequence_features,
             future_horizon=cfg.env.future_horizon,
-            adjacency_type=cfg.obs.adjacency_type,
             normalizer=build_observation_normalizer(cfg),
         ),
         grid_core=PassiveGridCore(cfg.env.num_agents),

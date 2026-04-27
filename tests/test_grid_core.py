@@ -7,7 +7,7 @@ import pytest
 
 
 def test_grid_step_result_import() -> None:
-    from envs.grid.core.grid_core import GridStepResult
+    from envs.grid.grid_core import GridStepResult
 
     result = GridStepResult(
         converged=True,
@@ -29,7 +29,7 @@ N_AGENTS = 3
 
 @pytest.fixture(scope="module")
 def agent_deployments():
-    from envs.grid.core.net_builder import build_simbench_net
+    from envs.grid.net_builder import build_simbench_net
     from envs.grid.deployments import AgentDeployment
 
     net = build_simbench_net(SB_CODE)
@@ -68,7 +68,7 @@ def _assert_non_agent_power_zero(core) -> None:
 
 @pytest.mark.slow
 def test_simbench_net_loads(agent_deployments) -> None:
-    from envs.grid.core.net_builder import build_simbench_net
+    from envs.grid.net_builder import build_simbench_net
 
     net = build_simbench_net(SB_CODE)
     assert len(net.bus) > 0
@@ -79,7 +79,7 @@ def test_simbench_net_loads(agent_deployments) -> None:
 
 @pytest.mark.slow
 def test_grid_core_zeroes_non_agent_static_power(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     _assert_non_agent_power_zero(core)
@@ -93,7 +93,7 @@ def test_grid_core_zeroes_non_agent_static_power(agent_deployments, grid_cfg) ->
 
 @pytest.mark.slow
 def test_grid_core_step_power_exists_only_on_agent_buses(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
@@ -108,8 +108,32 @@ def test_grid_core_step_power_exists_only_on_agent_buses(agent_deployments, grid
 
 
 @pytest.mark.slow
+def test_grid_core_reset_clears_agent_injections(agent_deployments, grid_cfg) -> None:
+    from envs.grid.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
+    core.step(p_batt_kw=np.zeros(N_AGENTS, dtype=np.float32), base_load_kw=base_load)
+
+    agent_mask_load = core.net.load["bus"].isin(core.agent_bus_ids)
+    assert float(core.net.load.loc[agent_mask_load, "p_mw"].sum()) > 0.0
+
+    core.reset(
+        np.zeros(N_AGENTS, dtype=np.float32),
+        np.zeros(N_AGENTS, dtype=np.float32),
+    )
+
+    for table_name in ("load", "sgen"):
+        table = getattr(core.net, table_name)
+        agent_mask = table["bus"].isin(core.agent_bus_ids)
+        for column in ("p_mw", "q_mvar"):
+            values = table.loc[agent_mask, column].to_numpy(dtype=np.float64)
+            assert np.allclose(values, 0.0)
+
+
+@pytest.mark.slow
 def test_grid_core_zero_injection(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.zeros(N_AGENTS, dtype=np.float32)
@@ -130,7 +154,7 @@ def test_grid_core_zero_injection(agent_deployments, grid_cfg) -> None:
 
 @pytest.mark.slow
 def test_grid_core_shapes(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
@@ -146,8 +170,30 @@ def test_grid_core_shapes(agent_deployments, grid_cfg) -> None:
 
 
 @pytest.mark.slow
+def test_grid_core_rejects_bad_battery_shape(agent_deployments, grid_cfg) -> None:
+    from envs.grid.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5
+
+    with pytest.raises(ValueError, match=r"p_batt_kw shape"):
+        core.step(p_batt_kw=np.zeros(N_AGENTS - 1, dtype=np.float32), base_load_kw=base_load)
+
+
+@pytest.mark.slow
+def test_grid_core_rejects_bad_base_load_shape(agent_deployments, grid_cfg) -> None:
+    from envs.grid.grid_core import GridCore
+
+    core = GridCore(agent_deployments, grid_cfg)
+    p_batt = np.zeros(N_AGENTS, dtype=np.float32)
+
+    with pytest.raises(ValueError, match=r"base_load_kw shape"):
+        core.step(p_batt_kw=p_batt, base_load_kw=np.ones(N_AGENTS + 1, dtype=np.float32))
+
+
+@pytest.mark.slow
 def test_grid_core_violation_nonneg(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.zeros(N_AGENTS, dtype=np.float32)
@@ -162,7 +208,7 @@ def test_grid_core_violation_nonneg(agent_deployments, grid_cfg) -> None:
 
 @pytest.mark.slow
 def test_psi_fields_shapes_and_nonneg(agent_deployments, grid_cfg) -> None:
-    from envs.grid.core.grid_core import GridCore
+    from envs.grid.grid_core import GridCore
 
     core = GridCore(agent_deployments, grid_cfg)
     base_load = np.ones(N_AGENTS, dtype=np.float32) * 0.5

@@ -6,7 +6,7 @@ import numpy as np
 try:import gurobipy as gp;from gurobipy import GRB
 except ModuleNotFoundError:gp=None;GRB=None
 from controllers.madrl.safety_projector import build_safety_local_numpy,compute_action_gap_metrics_numpy
-from envs.grid.core.net_builder import build_simbench_net,zero_static_power_elements
+from envs.grid.net_builder import build_simbench_net,zero_static_power_elements
 from scripts.utils.price_protocol import IMPORT_PRICE_MARKUP_KEY,WHOLESALE_PRICE_SEQ_FIELD,derive_import_price_seq,get_import_price_markup
 _GUROBI_ERROR_PREFIX='Global SOCP-MPC requires a working Gurobi installation/license'
 _ROOT_VM_EPS=1e-06

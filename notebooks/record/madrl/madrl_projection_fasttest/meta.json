@@ -30,9 +30,9 @@
     0.05000000074505806
   ],
   "final_soc_by_agent": [
-    0.05507916584610939,
-    0.05000000074505806,
-    0.05003447085618973
+    0.49943411350250244,
+    0.949999988079071,
+    0.8252663612365723
   ],
   "selected_episode_indices": [
     89,
@@ -82,8 +82,8 @@
     "2020-04-14T00:45:00+02:00",
     "2020-04-15T00:45:00+02:00"
   ],
-  "model_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3_SAFE_POC\\normal\\train_projection_fasttest\\matd3_safe_poc_normal_train_projection_fasttest_ep500_20260425_144855",
-  "result_json_path": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3_SAFE_POC\\normal\\train_projection_fasttest\\matd3_safe_poc_normal_train_projection_fasttest_ep500_20260425_144855\\_meta\\train_result.json",
-  "shared_data_signature": "816fd0a95f7415d3",
+  "model_root": "D:\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3_SAFE_POC\\normal\\train_projection_fasttest\\matd3_safe_poc_normal_train_projection_fasttest_ep500_20260427_155300",
+  "result_json_path": "D:\\GithubProject\\MADRL_ESS\\artifacts\\training\\checkpoints\\MATD3_SAFE_POC\\normal\\train_projection_fasttest\\matd3_safe_poc_normal_train_projection_fasttest_ep500_20260427_155300\\_meta\\train_result.json",
+  "shared_data_signature": "0e65146bb6a67927",
   "storage_price_mode": "real_time_price"
 }

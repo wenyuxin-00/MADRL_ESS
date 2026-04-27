@@ -301,13 +301,20 @@ def _write_json(path:str|Path,payload:Mapping[str,object])->Path:
 	target_path=Path(path).resolve();target_path.parent.mkdir(parents=True,exist_ok=True);target_path.write_text(json.dumps(dict(payload),indent=2,default=_json_default),encoding='utf-8');return target_path
 
 
+def _parquet_ready_frame(frame:pd.DataFrame)->pd.DataFrame:
+	ready=frame.copy()
+	for column in ready.columns:
+		if ready[column].dtype==object:ready[column]=ready[column].map(lambda value:json.dumps(value,default=_json_default)if isinstance(value,(np.ndarray,list,tuple,dict))else value)
+	return ready
+
+
 def save_rollout_record(rollout:RolloutResult,*,category:str,scheme_name:str,root:str|Path|None=None,config_snapshot:Mapping[str,object]|None=None,extra_meta:Mapping[str,object]|None=None)->dict[str,object]:
 	from scripts.mainline_compare import compare_rollout_metrics
 	record_dir=get_notebook_record_dir(category=category,scheme_name=scheme_name,root=root);record_dir.mkdir(parents=True,exist_ok=True);step_path,agent_path,grid_path,summary_path,metrics_path,meta_path,manifest_path=(record_dir/name for name in('step.parquet','agent.parquet','grid.parquet','summary.parquet','metrics.parquet','meta.json','manifest.json'));markup_eur_per_kwh=require_import_price_markup(rollout.meta,context=f"Rollout '{scheme_name}' metadata");normalized_step_df=canonicalize_step_price_frame(rollout.step_df,markup_eur_per_kwh=markup_eur_per_kwh,context=f"Rollout '{scheme_name}' step_df",require_actual=not rollout.step_df.empty,require_prediction=False);normalized_rollout=RolloutResult(step_df=normalized_step_df,agent_df=rollout.agent_df.copy(),grid_df=rollout.grid_df.copy(),summary=rollout.summary.copy(),meta=dict(rollout.meta));reject_legacy_storage_profit_tables({'step_df':normalized_rollout.step_df,'agent_df':normalized_rollout.agent_df,'grid_df':normalized_rollout.grid_df,'summary_df':normalized_rollout.summary},context=f"Rollout '{category}/{scheme_name}'",rerun_hint='Regenerate the rollout with the current notebook before saving.');reject_legacy_storage_profit_meta(normalized_rollout.meta,context=f"Rollout '{category}/{scheme_name}' metadata",rerun_hint='Regenerate the rollout with the current notebook before saving.');normalized_rollout.step_df.to_parquet(step_path,index=False);normalized_rollout.agent_df.to_parquet(agent_path,index=False);normalized_rollout.grid_df.to_parquet(grid_path,index=False);normalized_rollout.summary.to_parquet(summary_path,index=False);metrics_df=compare_rollout_metrics(normalized_rollout);metrics_df.to_parquet(metrics_path,index=False);meta_payload=dict(normalized_rollout.meta);meta_tables={key:value for(key,value)in list(meta_payload.items())if isinstance(value,pd.DataFrame)};meta_series={key:value for(key,value)in list(meta_payload.items())if isinstance(value,pd.Series)}
 	for key in list(meta_tables)+list(meta_series):meta_payload.pop(key,None)
 	if extra_meta:meta_payload.update(dict(extra_meta))
 	meta_table_files={}
-	for(key,value)in meta_tables.items():table_name=f"meta_{key}.parquet";value.to_parquet(record_dir/table_name,index=False);meta_table_files[str(key)]=table_name
+	for(key,value)in meta_tables.items():table_name=f"meta_{key}.parquet";_parquet_ready_frame(value).to_parquet(record_dir/table_name,index=False);meta_table_files[str(key)]=table_name
 	meta_series_files={}
 	for(key,value)in meta_series.items():series_name=f"meta_{key}.json";_write_json(record_dir/series_name,value.to_dict());meta_series_files[str(key)]=series_name
 	meta_payload.setdefault('economics_scope','storage_only');meta_payload.setdefault('objective_mode','max_storage_profit');meta_payload.setdefault('storage_price_mode','real_time_price')

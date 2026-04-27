@@ -43,7 +43,6 @@ TEST_TRAINING_CONTRACT = {
     "observation_feature_set": {
         "local": ["calendar_time", "soc"],
         "sequence": ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"],
-        "adjacency_type": "identity",
     },
     "observation_normalization_signature": None,
     "wholesale_price_spread_scale_eur_per_kwh": 0.2,

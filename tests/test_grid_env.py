@@ -25,6 +25,7 @@ class FakeGridCore:
         self.n_lines = 30
         self.n_trafos = 2
         self.last_pf_error = ""
+        self.converged = True
         self._return_violations = True
 
     def reset(self, base_load_kw, base_pv_kw) -> None:
@@ -32,7 +33,7 @@ class FakeGridCore:
 
     def step(self, p_batt_kw, base_load_kw):
         del base_load_kw
-        from envs.grid.core.grid_core import GridStepResult
+        from envs.grid.grid_core import GridStepResult
 
         n = len(p_batt_kw)
         line_loading_pct = np.zeros(self.n_lines, dtype=np.float32)
@@ -51,7 +52,7 @@ class FakeGridCore:
             psi_trafo_raw = 0.0
 
         return GridStepResult(
-            converged=True,
+            converged=bool(self.converged),
             vm_pu=np.ones(self.n_buses, dtype=np.float32),
             line_loading_pct=line_loading_pct,
             trafo_loading_pct=trafo_loading_pct,
@@ -120,7 +121,6 @@ def _build_env(cfg=None, *, mode: str = "test", grid_core: FakeGridCore | None =
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
-        adjacency_type=cfg.obs.adjacency_type,
     )
 
     env = GridEnv(
@@ -153,7 +153,6 @@ def test_grid_env_accepts_precomputed_data_dir(tmp_path) -> None:
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
-        adjacency_type=cfg.obs.adjacency_type,
         precomputed=True,
     )
     env = GridEnv(
@@ -409,9 +408,28 @@ def test_compact_info_omits_large_arrays() -> None:
         "episode_done",
         "madrl_throughput_bonus_weight",
         "madrl_throughput_kwh",
+        "pf_converged",
+        "pf_error",
         *[str(meta.key) for meta in reward_fn.component_meta],
     }
     env.close()
+
+
+def test_train_info_reports_power_flow_convergence() -> None:
+    cfg = _make_cfg()
+    grid_core = FakeGridCore(n_agents=int(cfg.env.num_agents))
+    grid_core.converged = False
+    grid_core.last_pf_error = "fake solver failed"
+    env = _build_env(cfg, mode="train", grid_core=grid_core)
+
+    try:
+        env.reset()
+        _, _, _, _, info = env.step(_zero_actions())
+
+        assert info["pf_converged"] is False
+        assert info["pf_error"] == "fake solver failed"
+    finally:
+        env.close()
 
 
 def test_single_dim_actions_raise_fail_fast(grid_env) -> None:

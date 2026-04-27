@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 
 from configs.experiment_config import ExperimentConfig
-from data.loaders.constants import TZ_LOCAL
+from data.loaders.prosumer import TZ_LOCAL
 
 DEFAULT_TEST_BUSES = [10, 6, 12, 7, 8]
 DEFAULT_PROSUMER_TEST_PROFILES = ["SFH12", "SFH14", "SFH16", "SFH18"]

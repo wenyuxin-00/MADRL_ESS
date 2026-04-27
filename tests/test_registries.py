@@ -1,7 +1,7 @@
 from controllers.madrl.base_agent import get_agent_cls
 from configs.experiment_config import ExperimentConfig
 from data.loaders.prosumer import ProsumerDataset
-from data.loaders.registry import build_dataset, get_dataset_cls
+from data.loaders.registry import build_dataset
 from envs.grid_env import GridEnv
 from envs.observation.default_builder import DefaultObservationBuilder
 from envs.observation.normalization import build_observation_normalizer
@@ -12,14 +12,13 @@ def test_grid_env_direct_import_exposes_mainline_env():
     assert GridEnv.__name__ == "GridEnv"
 
 
-def test_dataset_registry_builds_default_dataset(tmp_path):
+def test_build_dataset_builds_default_prosumer_dataset(tmp_path):
     case_dir = make_case_dir(tmp_path, "dataset_registry")
     cfg = make_smoke_config(case_dir, algorithm="MADDPG")
 
     dataset = build_dataset(cfg, mode="train")
 
     assert isinstance(dataset, ProsumerDataset)
-    assert get_dataset_cls("prosumer") is ProsumerDataset
 
 
 def test_default_observation_builder_builds_from_config(tmp_path):
@@ -30,7 +29,6 @@ def test_default_observation_builder_builds_from_config(tmp_path):
         local_features=cfg.obs.local_features,
         sequence_features=cfg.obs.sequence_features,
         future_horizon=cfg.env.future_horizon,
-        adjacency_type=cfg.obs.adjacency_type,
         normalizer=build_observation_normalizer(cfg),
     )
 

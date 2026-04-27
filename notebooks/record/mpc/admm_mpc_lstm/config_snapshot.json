@@ -34,7 +34,7 @@
     "device": "cuda:0",
     "runtime_mode": "performance",
     "seed": 0,
-    "data_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\data",
+    "data_dir": "D:\\GithubProject\\MADRL_ESS\\data",
     "grid_sb_code": "1-LV-rural1--0-sw",
     "grid_agent_bus_ids": [
       12,
@@ -102,7 +102,7 @@
       "pv"
     ],
     "history_window": 192,
-    "artifact_root": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\artifacts\\forecast\\lstm"
+    "artifact_root": "D:\\GithubProject\\MADRL_ESS\\artifacts\\forecast\\lstm"
   },
   "prediction_mode": "normal"
 }

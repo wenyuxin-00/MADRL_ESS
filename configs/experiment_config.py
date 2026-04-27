@@ -371,7 +371,6 @@ class RewardConfig:
 class ObsConfig:
     local_features: list[str] = field(default_factory=lambda: ["calendar_time", "soc"])
     sequence_features: list[str] = field(default_factory=lambda: ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"])
-    adjacency_type: str = "identity"
     normalization_enabled: bool = True
     wholesale_price_normalization: str = "robust_tanh"
     load_normalization: str = "robust_tanh"

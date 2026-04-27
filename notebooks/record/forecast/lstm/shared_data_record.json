@@ -1,9 +1,9 @@
 {
-  "shared_data_dir": "artifacts/training/shared_data/mainline/6be0cd6f08bc0369",
-  "signature_hash": "6be0cd6f08bc0369",
+  "shared_data_dir": "D:\\GithubProject\\MADRL_ESS\\artifacts\\training\\shared_data\\mainline\\af34c9ec2d617e88",
+  "signature_hash": "af34c9ec2d617e88",
   "reused": false,
   "train_split_episodes": 356,
   "test_split_episodes": 364,
-  "schema_version": 8,
+  "schema_version": 9,
   "price_protocol_version": 1
 }

@@ -42,7 +42,6 @@ def test_resolve_madrl_model_root_supports_auto_discovery_and_algo_dir(tmp_path)
             "observation_feature_set": {
                 "local": ["calendar_time", "soc"],
                 "sequence": ["wholesale_price_relative", "wholesale_price_spread", "load", "pv"],
-                "adjacency_type": "identity",
             },
             "observation_normalization_signature": None,
             "wholesale_price_spread_scale_eur_per_kwh": 0.2,

@@ -1889,6 +1889,32 @@ def test_save_and_load_rollout_record_materializes_import_price_from_wholesale(t
     np.testing.assert_allclose(loaded.step_df["import_price_pred"].to_numpy(dtype=np.float32), np.array([0.32, 0.39], dtype=np.float32))
 
 
+def test_save_rollout_record_serializes_meta_table_array_columns(tmp_path):
+    timestamps = pd.date_range("2020-01-01", periods=1, freq="15min")
+    rollout = RolloutResult(
+        step_df=pd.DataFrame({"timestamp": timestamps, "episode_idx": [0], "step": [0], "wholesale_price": [0.10], "battery_power_kw": [0.0]}),
+        agent_df=pd.DataFrame(),
+        grid_df=pd.DataFrame(),
+        summary=pd.DataFrame(),
+        meta={
+            "controller": "MISOCP",
+            "agent_profiles": ["A"],
+            "agent_bus_ids": [1],
+            "v_min_pu": 0.95,
+            "v_max_pu": 1.05,
+            "import_price_markup_eur_per_kwh": 0.2,
+            "dt_hours": 1.0,
+            "misocp_validation_df": pd.DataFrame({"timestamp": timestamps, "misocp_vm_pu": [np.asarray([1.0, 0.99], dtype=np.float32)], "max_line_loading_abs_err_pct": [0.1]}),
+        },
+    )
+
+    save_rollout_record(rollout, category="mpc", scheme_name="meta_array_roundtrip", root=tmp_path)
+    loaded = load_rollout_record(category="mpc", scheme_name="meta_array_roundtrip", root=tmp_path)
+
+    encoded = loaded.meta["misocp_validation_df"].loc[0, "misocp_vm_pu"]
+    assert json.loads(encoded) == pytest.approx([1.0, 0.99])
+
+
 def test_build_compare_tables_use_final_dispatch_costs():
     metrics_df = pd.DataFrame(
         {

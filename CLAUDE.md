@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **MADRL_ESS** (2184 symbols, 6977 relationships, 190 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **MADRL_ESS** (1627 symbols, 4368 relationships, 137 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -102,28 +102,25 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 
 ## Codebase Hard Rules
 
-- Optimize first for owner purity, explicit contracts, and low complexity; prefer fewer lines and shorter chains only after those are preserved.
-- Treat `owner` at the Python module or package level: one owner should hold one concept's full lifecycle, including input contract, core logic, state or artifacts, and public entrypoint.
-- Treat the `mainline` as the actual runtime path behind the current canonical CLI, notebook, or documented entrypoint; history paths, compatibility paths, and backup flows do not count.
-- Rule priority is fixed: task constraints and correctness > owner purity > explicit failure without fallback > mainline length > code size > file count.
-- Apply the strictest rules to `envs/`, `predictors/`, `controllers/`, `models/`, and `data/loaders/`; allow thin entrypoints in `scripts/`; allow test helpers in `tests/`; treat `configs/` as configuration data, not business-logic wrappers.
-- Thin wrappers are only allowed when they have one concrete value: stable API, narrowed type or boundary, naming alignment, protocol isolation, or CLI or notebook entrypoint. Otherwise delete them.
-- Do not keep transition layers for old and new contracts together. No deprecated aliases, bridge adapters, auto dual-path dispatch, or hidden migrations.
-- When old schema, keys, artifact names, cache packages, or directory layouts are encountered, fail explicitly. No fallback, sibling scan, latest-compatible lookup, or prefix fuzzy matching.
-- Compatibility and version checks belong at the first boundary that admits data into an owner, such as a loader, parser, manifest reader, or public owner entrypoint. Do not duplicate compatibility logic across outer wrappers.
-- Every contract failure must name the old object that was hit, the new contract that is expected, and the exact entrypoint or notebook that must be rerun.
-- Explicit versioning such as `SCHEMA_VERSION` is allowed only as explicit mismatch-to-failure. Silent acceptance of old aliases or old field names is forbidden.
-- High-cost reproducible artifacts may remain on disk, but they must be reached only through exact locators such as a manifest, explicit path, or upstream-produced identifier. Never degrade to fuzzy discovery after a miss.
-- Validation, debug, diagnostics, and export code must belong to a clear owner, usually in adjacent `validation/`, `reports/`, `artifacts/`, or subsystem-specific export modules, not inside core runtime files.
-- Large files are acceptable only when they are still a pure core owner. Files over 800 lines must not be wrappers, compatibility buckets, or `utils` junk drawers; files over 1200 lines must be reviewed as reduction targets.
-- `scripts/utils/` must not become a general dumping ground. Shared code stays only when multiple scripts truly depend on the same stable owner.
-- Task-specific exceptions are allowed only when written explicitly with scope, affected objects, and exit conditions. Outside that scope, the default hard rules apply.
+- Rule priority is fixed: correctness > explicit contracts > owner purity > minimal code > tests and docs.
+- One owner owns one concept end to end, including input contract, core logic, state or artifacts, and public entrypoint.
+- Mainline only. Do not keep compatibility paths, deprecated aliases, bridge adapters, auto dual-path dispatch, hidden migrations, or backup flows.
+- Fail early at the first data or API boundary. Version checks belong at that boundary and should only produce explicit mismatch failures.
+- Use exact paths and contracts only. Do not fall back to sibling scans, latest-compatible lookup, prefix fuzzy matching, or silent old-key acceptance.
+- Keep wrappers only when they protect a real boundary: stable API, narrowed type or boundary, naming alignment, protocol isolation, or CLI or notebook entrypoint.
+- Inline single-use private helpers when they only wrap one obvious operation and do not protect a real boundary; fewer jumps and more direct code are preferred over naming every step.
+- Prefer the shortest code that preserves correctness and explicit contracts. When two designs are equally correct, choose fewer branches, fewer helpers, fewer files, and shorter error messages.
+- Use compact code layout for all code writing, modification, and reformatting: keep simple expressions, return statements, function calls, short dict/list literals, and short signatures on one line when they remain readable. Do not introduce unnecessary line breaks just to satisfy broad formatting habits. Keep multiline layout for long error messages, complex nested structures, or expressions that would become hard to scan. Do not compress unrelated statements onto one line.
+- Comments must explain business purpose, data meaning, or non-obvious constraints. Do not write comments that merely restate syntax, such as "check condition", "return result", "save intermediate value", or "execute current step".
+- Contract failures should identify what was expected and what was received. Do not include recovery instructions unless the caller cannot infer the fix.
+- If a wrapper, branch, option, or helper has no current mainline caller and no test asserting its contract, delete it.
+- Run GitNexus impact before changing public functions, classes, methods, or shared runtime paths. For private single-use helpers, impact is recommended but not required unless behavior changes.
 
 ## Environment
 
 - Default to the `MADRL_ESS` Python environment for all repo work.
 - Treat the named Conda environment `MADRL_ESS` as the repository default state.
-- For Python, pytest, notebook inspection, and dependency checks, prefer the `MADRL_ESS` interpreter first, for example `C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe` or `conda run -n MADRL_ESS ...`.
+- For Python, pytest, notebook inspection, and dependency checks, prefer the named `MADRL_ESS` Conda environment through `conda run -n MADRL_ESS python ...`; if that environment is already active, use `python ...`. Do not hard-code a user-profile interpreter path.
 - Do not use the system `python` by default for this repository unless the user explicitly asks for it.
 - Do not prefer the repo-local `.\.conda\python.exe` as the default anymore; treat it only as a legacy fallback when the named `MADRL_ESS` environment is unavailable or the user explicitly asks for it.
 - If a dependency appears missing under the system interpreter, retry with the `MADRL_ESS` interpreter before concluding that the dependency is unavailable.

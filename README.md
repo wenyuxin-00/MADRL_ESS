@@ -8,13 +8,14 @@
 
 | 入口 | 作用 |
 | --- | --- |
-| `notebooks/forecast/forecast_lstm.ipynb` | 生成 LSTM 预测结果和 shared-data 缓存。perfect forecast 场景可以不依赖 LSTM 权重，但仍可使用 shared-data 加速。 |
-| `notebooks/madrl/train_base.ipynb` | 当前默认 MADRL 训练入口：`MATD3`，perfect data，无遮挡安全惩罚，使用 SoC-aware actor action mapping。 |
-| `notebooks/madrl/train_base_safe.ipynb` | `MATD3` 加安全 reward penalty，不做 projection。 |
-| `notebooks/madrl/train_projection_safe.ipynb` | `MATD3_SAFE_POC`，actor action 先做 SoC-aware mapping，再做 grid safety projection。 |
+| `notebooks/forecast/forecast_lstm.ipynb` | 生成 LSTM 预测 artifact 和 normal/LSTM shared-data 缓存；perfect forecast 路径不依赖 LSTM 权重。 |
+| `notebooks/madrl/train_base.ipynb` | 当前默认 MADRL 训练入口：`MATD3`，normal/LSTM forecast，无安全 reward/projection，使用 SoC-aware actor action mapping。 |
+| `notebooks/madrl/train_base perfect.ipynb` | `MATD3` perfect forecast 上限训练入口，无安全 reward/projection，当前 spec 训练 `350` episodes。 |
+| `notebooks/madrl/train_base_safe.ipynb` | `MATD3`，normal/LSTM forecast，加安全 reward penalty，不做 projection。 |
+| `notebooks/madrl/train_projection_safe.ipynb` | `MATD3_SAFE_POC`，normal/LSTM forecast，actor action 先做 SoC-aware mapping，再做 grid safety projection。 |
 | `notebooks/madrl/local_MPC.ipynb` | 本地 MPC rollout，每个 agent 用本地预测和本地储能约束独立求解。 |
 | `notebooks/madrl/global_MISOCP.ipynb` | 全局网络约束 MPC / oracle rollout。 |
-| `notebooks/madrl/ADMM_mpc.ipynb` | ADMM MPC rollout，默认面向 LSTM forecast workflow。 |
+| `notebooks/madrl/ADMM_mpc.ipynb` | ADMM MPC rollout，默认面向 LSTM forecast workflow 和 canonical test window。 |
 | `notebooks/madrl/compare.ipynb` | 汇总 MADRL、MPC、ADMM 记录并做横向对比。 |
 
 代码化入口主要在：
@@ -36,24 +37,27 @@
 - battery capacity: `100 kWh` per agent
 - test window: `2020-04-01` 到 `2020-04-15`
 - control time step: `dt = 0.25 h`
-- one episode: `96` steps，也就是一天
-- train window: 默认 `7` 天滚动窗口
+- test rollout episode: `96` steps，也就是一天
+- train rollout window: 默认 `7` 天滚动窗口，也就是 `96 * 7 = 672` steps
+- forecast horizon: `48` steps
 - MADRL action per agent: `[battery_action, pv_action]`
 - environment action range: 每个维度仍是 `[-1, 1]`
 
 `train_base` 当前 notebook spec 的关键设置：
 
 - algorithm: `MATD3`
-- prediction mode: `perfect`
+- prediction mode: `normal` / LSTM forecast
 - parallel envs: `4`
-- training episodes: 当前配置里默认 `50`
-- initial SoC: 固定 `0.05`
+- training episodes: 当前配置里默认 `1000`
+- initial SoC / train initial SoC: 固定 `0.05`
 - SoC range: `[0.05, 0.95]`
 - battery max charge/discharge rate: `0.5 C`
 - discount factor: `gamma = 0.999`
 - actor / critic learning rate: `1e-4`
 - replay batch size: `512`
 - n-step return: `96`
+
+`train_base_perfect` 是单独的 notebook spec：`prediction_mode = "perfect"`，`train_episodes = 350`，输出 scheme 是 `madrl_base_perfect`。它用于 perfect forecast 上限训练，不是当前 `COMPARE_SCHEME_ORDER` 里的默认横向对比项。
 
 这些默认值都集中在 `configs/experiment_config.py`。如果 notebook 里覆盖了配置，以 notebook spec 为准。
 
@@ -422,6 +426,8 @@ notebooks/madrl/train_base.ipynb
 |   |-- compose_experiment_config(...)
 |   |-- apply_notebook_experiment_settings(...)
 |   |-- cfg.algo.name = "MATD3"
+|   |-- cfg.forecast.type = "lstm"
+|   |-- cfg.train.train_episodes = 1000
 |   |-- cfg.train.num_envs = 4
 |   |-- cfg.train.vec_env_type = "subproc"
 |   |-- cfg.reward.* = spec["reward"]
@@ -430,7 +436,7 @@ notebooks/madrl/train_base.ipynb
 `-- Cell 5: resolve_madrl_notebook_training(...)
     |-- if force_retrain_madrl is False
     |   `-- load_madrl_training_result(...)
-    |       |-- find_latest_training_run(...)
+    |       |-- find_latest_training_run(...) under exact algorithm/prediction_mode/experiment_name
     |       |-- validate training_contract
     |       `-- return model_root + train_result
     |
@@ -463,8 +469,8 @@ notebooks/madrl/train_base.ipynb
                 `-- build_train_runner(cfg)
                     |-- build_env(cfg, mode="train")
                     |   |-- ProsumerDataset
-                    |   |-- PerfectForecaster or LSTM forecaster
-                    |   |-- PrecomputedObservationStore if shared-data is enabled
+                    |   |-- LSTM forecaster for train_base
+                    |   |-- PrecomputedObservationStore from canonical shared-data
                     |   |-- DefaultObservationBuilder
                     |   |-- GridCore
                     |   |-- GridEnv
@@ -489,8 +495,9 @@ notebooks/madrl/train_base.ipynb
 ```text
 TrainRunner.run()
 |-- resolve train budget
-|   |-- train_episode_limit = 96
-|   |-- target_total_steps = train_episodes * episode_limit
+|   |-- train_episode_limit = cfg.env.episode_limit * cfg.env.train_window_days = 96 * 7 = 672
+|   |-- target_total_steps = train_episodes * train_episode_limit
+|   |-- target_parallel_iterations = target_total_steps // num_envs
 |   |-- learning_starts_transitions
 |   `-- actor_learning_starts_transitions
 |
@@ -804,6 +811,7 @@ rollout 记录 owner 是 `scripts/utils/grid_notebook_workflow.py`。
 典型输出目录：
 
 - `notebooks/record/madrl/madrl_base`
+- `notebooks/record/madrl/madrl_base_perfect`
 - `notebooks/record/madrl/madrl_base_safe`
 - `notebooks/record/madrl/madrl_projection_safe`
 - `notebooks/record/mpc/local_mpc_perfect`
@@ -914,13 +922,13 @@ rollout 记录 owner 是 `scripts/utils/grid_notebook_workflow.py`。
 优先使用 `MADRL_ESS` conda 环境：
 
 ```powershell
-C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe -m pytest tests/test_normal_reward.py
+conda run -n MADRL_ESS python -m pytest tests/test_normal_reward.py
 ```
 
 运行一组主线测试：
 
 ```powershell
-C:\Users\10856\miniconda3\envs\MADRL_ESS\python.exe -m pytest tests/test_model_assembly.py tests/test_train_mainline_launcher.py tests/test_grid_notebook_workflow.py tests/test_checkpoints.py tests/test_normal_reward.py
+conda run -n MADRL_ESS python -m pytest tests/test_model_assembly.py tests/test_train_mainline_launcher.py tests/test_grid_notebook_workflow.py tests/test_checkpoints.py tests/test_normal_reward.py
 ```
 
 查看当前 Git 改动：
@@ -931,6 +939,14 @@ git status --short
 
 提交前检查 GitNexus 影响范围：
 
+在 Codex / GitNexus MCP 里用：
+
+```text
+detect_changes({scope: "all", repo: "MADRL_ESS"})
+```
+
+如果本机已经安装 GitNexus CLI，也可以在命令行里用：
+
 ```powershell
-.\node_modules\.bin\gitnexus.cmd detect_changes --scope all --json --repo MADRL_ESS
+gitnexus detect_changes --scope all --repo MADRL_ESS
 ```

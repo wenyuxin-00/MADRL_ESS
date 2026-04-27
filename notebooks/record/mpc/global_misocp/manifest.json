@@ -2,7 +2,7 @@
   "schema_version": 1,
   "category": "mpc",
   "scheme_name": "global_misocp",
-  "record_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\notebooks\\record\\mpc\\global_misocp",
+  "record_dir": "D:\\GithubProject\\MADRL_ESS\\notebooks\\record\\mpc\\global_misocp",
   "files": {
     "step_df": "step.parquet",
     "agent_df": "agent.parquet",

@@ -40,13 +40,12 @@ def test_env_returns_structured_observation_schema(tmp_path):
     obs, reset_info = env.reset(episode_idx=0)
     expected_local_dim = env.observation_schema["local"][1]
 
-    assert set(obs.keys()) == {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency", "safety_local"}
+    assert set(obs.keys()) == {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "safety_local"}
     assert obs["local"].shape == (cfg.env.num_agents, expected_local_dim)
     assert obs["wholesale_price_relative_seq"].shape == (cfg.env.future_horizon + 1,)
     assert obs["wholesale_price_spread_seq"].shape == (cfg.env.future_horizon + 1,)
     assert obs["load_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
     assert obs["pv_seq"].shape == (cfg.env.num_agents, cfg.env.future_horizon + 1)
-    assert obs["adjacency"].shape == (cfg.env.num_agents, cfg.env.num_agents)
     assert obs["safety_local"].shape == (cfg.env.num_agents, 5)
     assert env.observation_layout["safety_local"]["scope"] == "per_agent"
     assert env.observation_layout["wholesale_price_relative_seq"]["scope"] == "shared"

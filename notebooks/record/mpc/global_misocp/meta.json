@@ -51,7 +51,7 @@
   "soc_mode": "continuous",
   "solve_mode": "chunked_window",
   "global_oracle_time_limit_sec": 600.0,
-  "global_oracle_runtime_sec": 2.3550000190734863,
+  "global_oracle_runtime_sec": 2.438000202178955,
   "global_oracle_gap": 0.004964191847844908,
   "global_oracle_target_gap": 0.005,
   "global_oracle_status_label": "optimal",

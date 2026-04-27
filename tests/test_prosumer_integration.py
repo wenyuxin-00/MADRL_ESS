@@ -4,7 +4,7 @@ import numpy as np
 
 from configs.experiment_config import ExperimentConfig
 from data.loaders.prosumer import ProsumerDataset
-from data.loaders.registry import build_dataset, get_dataset_cls
+from data.loaders.registry import build_dataset
 from scripts.builder import build_env
 from tests.support.helpers import make_smoke_config, write_prosumer_processed_dataset
 
@@ -39,14 +39,13 @@ def _make_prosumer_cfg(tmp_path) -> ExperimentConfig:
     return cfg
 
 
-def test_dataset_registry_builds_prosumer_dataset(tmp_path):
+def test_build_dataset_builds_prosumer_dataset(tmp_path):
     cfg = _make_prosumer_cfg(tmp_path)
 
     dataset = build_dataset(cfg, mode="train")
     episode = dataset.get_episode(0)
 
     assert isinstance(dataset, ProsumerDataset)
-    assert get_dataset_cls("prosumer") is ProsumerDataset
     assert set(episode["signals"].keys()) == {
         "wholesale_price",
         "load",
@@ -68,7 +67,7 @@ def test_build_env_smoke_uses_processed_prosumer_dataset(tmp_path):
 
     try:
         obs, reset_info = env.reset(episode_idx=0)
-        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq", "adjacency"} <= set(obs.keys())
+        assert {"local", "wholesale_price_relative_seq", "wholesale_price_spread_seq", "load_seq", "pv_seq"} <= set(obs.keys())
         assert reset_info["episode_meta"]["agent_profiles"] == ["SFH12", "SFH14"]
         assert reset_info["episode_meta"]["year"] == cfg.data.test_year
     finally:

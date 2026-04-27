@@ -57,7 +57,6 @@ def test_shared_data_signature_normalizes_float_fields(tmp_path) -> None:
 def test_shared_data_signature_ignores_obs_fields_that_do_not_change_payload(tmp_path) -> None:
     cfg_base = make_smoke_config(tmp_path / "base", algorithm="MATD3")
     cfg_variant = deepcopy(cfg_base)
-    cfg_variant.obs.adjacency_type = "ring"
     cfg_variant.obs.local_features = ["calendar_time", "soc", "time"]
 
     base_result = ensure_madrl_shared_data(cfg_base, root=tmp_path / "shared")
@@ -110,13 +109,19 @@ def test_ensure_madrl_shared_data_cross_year_keeps_signature_when_test_window_ch
     assert selected == [1, 2, 3]
 
 
-def test_ensure_madrl_shared_data_same_year_implicit_exclusion_is_rejected(tmp_path) -> None:
-    cfg = _make_multiday_cfg(tmp_path / "same_year_implicit", evaluation_days=5)
+def test_ensure_madrl_shared_data_same_year_full_train_split_is_allowed(tmp_path) -> None:
+    cfg = _make_multiday_cfg(tmp_path / "same_year_full_train", evaluation_days=5)
     cfg.data.train_year = 2020
     cfg.data.test_year = 2020
 
-    with pytest.raises(ValueError, match="explicit cfg\\.data\\.train_start_date/cfg\\.data\\.train_end_date"):
-        ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+    result = ensure_madrl_shared_data(cfg, root=tmp_path / "shared")
+    split_controls = result.manifest["splits"]["train"]["split_controls"]
+
+    assert result.reused is False
+    assert split_controls["start_date"] is None
+    assert split_controls["end_date"] is None
+    assert "exclude_start_date" not in split_controls
+    assert "exclude_end_date" not in split_controls
 
 
 def test_ensure_madrl_shared_data_same_year_explicit_train_range_keeps_signature_when_test_window_changes(tmp_path) -> None:

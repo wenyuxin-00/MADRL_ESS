@@ -340,6 +340,7 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     combined_output = f"{completed.stdout}\n{completed.stderr}"
     assert "Training:" in combined_output
     assert "avg_reward=" in combined_output
+    assert "[power-flow] training convergence:" in combined_output
     for token in ("Training log:", "\"episode_idx\"", "\"shared_data_metadata\"", "\"agent_profiles\""):
         assert token not in combined_output
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -401,6 +402,8 @@ def test_run_train_mainline_cli_smoke_with_subproc(tmp_path):
     ]
     assert "training_health" in result
     assert "training_health" in reward_summary
+    assert result["power_flow_summary"] == result["perf_summary"]["power_flow_summary"]
+    assert result["power_flow_summary"]["tracked"] is True
     assert result["checkpoint_info"]["training_contract_signature"] == result["training_contract_signature"]
     assert "steps_per_sec" in result["perf_summary"]
     assert "avg_env_ms_per_iter" in result["perf_summary"]

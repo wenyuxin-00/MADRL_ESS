@@ -2,7 +2,7 @@
   "schema_version": 1,
   "category": "madrl",
   "scheme_name": "madrl_projection_fasttest",
-  "record_dir": "C:\\Users\\10856\\Desktop\\GithubProject\\MADRL_ESS\\notebooks\\record\\madrl\\madrl_projection_fasttest",
+  "record_dir": "D:\\GithubProject\\MADRL_ESS\\notebooks\\record\\madrl\\madrl_projection_fasttest",
   "files": {
     "step_df": "step.parquet",
     "agent_df": "agent.parquet",
