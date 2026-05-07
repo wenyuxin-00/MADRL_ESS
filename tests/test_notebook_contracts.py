@@ -26,8 +26,16 @@ def test_notebooks_use_promoted_imports_and_root_marker() -> None:
 
 
 def test_cached_notebooks_pin_complete_run() -> None:
-    for name in ("madrl.ipynb", "madrl_base.ipynb", "madrl_base_safe.ipynb", "madrl_projection_safe.ipynb", "misocp.ipynb", "mpc.ipynb", "compare.ipynb"):
+    for name in ("madrl_base.ipynb", "madrl_base_safe.ipynb", "madrl_projection_safe.ipynb", "misocp.ipynb", "mpc.ipynb", "compare.ipynb"):
         assert RUN_ID in _notebook_text(name)
+
+
+def test_madrl_notebooks_train_directly_without_record_cache() -> None:
+    for name in ("madrl_base.ipynb", "madrl_base_safe.ipynb", "madrl_projection_safe.ipynb"):
+        text = _notebook_text(name)
+        assert "result = run_madrl_scheme_experiment(cfg, run_dir, share_data, spec, episodes=train_episodes)" in text
+        for token in ("retrain =", "if retrain", "load_madrl_record"):
+            assert token not in text
 
 
 def test_madrl_base_safe_defaults_to_cached_penalty_run() -> None:
@@ -35,8 +43,8 @@ def test_madrl_base_safe_defaults_to_cached_penalty_run() -> None:
     required = [
         f'run_dir = Path("artifacts/runs/{RUN_ID}")',
         'scheme_name = "madrl_base_safe"',
-        "retrain = False",
         "train_episodes = 500",
+        "result = run_madrl_scheme_experiment(cfg, run_dir, share_data, spec, episodes=train_episodes)",
         'display(Markdown("# MADRL + Safety Penalty + LSTM Forecast"))',
         '"w_voltage_pen": float(w_voltage)',
         '"w_line_pen": float(w_line)',
@@ -44,3 +52,5 @@ def test_madrl_base_safe_defaults_to_cached_penalty_run() -> None:
     ]
     for token in required:
         assert token in text
+    for token in ("retrain =", "if retrain", "load_madrl_record"):
+        assert token not in text

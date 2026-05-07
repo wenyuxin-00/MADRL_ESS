@@ -11,7 +11,7 @@ from controllers.protocol import CONTROLLER_NAMES, Controller, build_controller
 from data.share_data import ShareData
 from envs.grid_env import build_env
 from utils.records import controller_window_from_obs
-from utils.run_artifacts import eval_result_exists, load_eval_metrics, save_eval_result, save_eval_summary
+from utils.run_artifacts import save_eval_result, save_eval_summary
 
 
 def eval_controller(cfg: Cfg, controller: Controller, forecast_mode: str = "perfect", n_episodes: int | None = None, share_data: ShareData | None = None) -> dict:
@@ -28,7 +28,7 @@ def eval_controller(cfg: Cfg, controller: Controller, forecast_mode: str = "perf
             start = time.perf_counter()
             if callable(controller):
                 action, _, solve_meta = controller(env, controller_window_from_obs(obs))
-                act_times.append(float(solve_meta.get("solve_time_sec", time.perf_counter() - start)))
+                act_times.append(float(solve_meta["solve_time_sec"]))
             else:
                 action = controller.act(obs); act_times.append(time.perf_counter() - start)
             obs, reward, done, _, info = env.step(action)
@@ -47,12 +47,12 @@ def eval_and_save_controller(cfg: Cfg, controller: Controller, run_dir: Path, fo
     return result
 
 
-def eval_all(cfg: Cfg, madrl_models: dict[str, Path], run_dir: Path, forecast_modes: tuple[str, ...] | None = None, n_episodes: int | None = None, controller_names: tuple[str, ...] = CONTROLLER_NAMES, share_data: ShareData | None = None, overwrite: bool = False) -> pd.DataFrame:
+def eval_all(cfg: Cfg, madrl_models: dict[str, Path], run_dir: Path, forecast_modes: tuple[str, ...] | None = None, n_episodes: int | None = None, controller_names: tuple[str, ...] = CONTROLLER_NAMES, share_data: ShareData | None = None) -> pd.DataFrame:
     rows = []; modes = tuple(cfg.eval.forecast_modes if forecast_modes is None else forecast_modes)
     for fm in tqdm(modes, desc="forecast modes", unit="mode", ascii=True):
         for name in tqdm([x for x in ("MISOCP", "LOCAL_MPC", "ADMM_MPC") if x in controller_names], desc=f"controllers {fm}", unit="controller", leave=False, ascii=True):
-            rows.append(load_eval_metrics(run_dir, cfg, fm, name) if (not overwrite and eval_result_exists(run_dir, fm, name)) else eval_and_save_controller(cfg, build_controller(name, cfg), run_dir, fm, n_episodes, share_data))
+            rows.append(eval_and_save_controller(cfg, build_controller(name, cfg), run_dir, fm, n_episodes, share_data))
         for name, model_path in tqdm(tuple(madrl_models.items()), desc=f"MADRL eval {fm}", unit="controller", leave=False, ascii=True):
             if name in controller_names:
-                rows.append(load_eval_metrics(run_dir, cfg, fm, name) if (not overwrite and eval_result_exists(run_dir, fm, name)) else eval_and_save_controller(cfg, build_controller(name, cfg, model_path), run_dir, fm, n_episodes, share_data))
+                rows.append(eval_and_save_controller(cfg, build_controller(name, cfg, model_path), run_dir, fm, n_episodes, share_data))
     df = pd.DataFrame(rows); save_eval_summary(run_dir, df); return df

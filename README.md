@@ -26,9 +26,9 @@
    - 写入 forecast artifacts
    - 构造 `share_data`
    - 导出预测质量表和图
-2. `notebooks/madrl.ipynb`
+2. `notebooks/madrl_base.ipynb`、`notebooks/madrl_base_safe.ipynb`、`notebooks/madrl_projection_safe.ipynb`
    - 读取同一个 `run_dir`
-   - 训练三种 MADRL 方案
+   - 按方案单独训练 MADRL
    - 保存模型、训练曲线、rollout record
 3. `notebooks/misocp.ipynb`
    - 运行全局 MISOCP perfect-forecast 基线
@@ -61,7 +61,7 @@ LSTM 预测 owner。`lstm_training.py` 训练价格、负荷、PV 模型；`lstm
 
 `envs/`
 
-`grid_core.py` 封装 SimBench/pandapower 潮流计算。`grid_env.py` 是强化学习环境：生成 observation、执行动作、更新 SoC、计算储能收益和安全惩罚。`vec_env.py` 提供同步多环境采样，用于 MADRL 训练。
+`grid_core.py` 封装 SimBench/pandapower 潮流计算。`grid_env.py` 是强化学习环境：生成 observation、执行动作、更新 SoC、计算储能收益和安全惩罚。`vec_env.py` 提供多进程同步采样，用于 MADRL 训练。
 
 `models/`
 
@@ -189,13 +189,14 @@ notebook 之外，也可以用 Python 串起主线：
 
 ```python
 from dataclasses import replace
+from pathlib import Path
 
 from configs.cfg import Cfg
 from data.share_data import build_share_data, load_share_data
 from predictors.lstm_training import train_forecasters
 from scripts.compare import compare_all
 from scripts.eval import eval_all
-from scripts.train import train_all
+from scripts.madrl import SCHEMES, train_madrl_scheme
 from utils.run_artifacts import create_run_dir, write_config_json
 
 cfg = Cfg()
@@ -208,7 +209,7 @@ write_config_json(cfg, run_dir)
 share_dir = build_share_data(cfg, run_dir, forecast["artifact_dir"], overwrite=True)
 share_data = load_share_data(share_dir, cfg)
 
-madrl_models = train_all(cfg, run_dir, share_data)
+madrl_models = {str(spec["controller"]): Path(train_madrl_scheme(cfg, run_dir, share_data, spec)["model_path"]) for spec in SCHEMES}
 eval_all(cfg, madrl_models, run_dir, share_data=share_data)
 compare_all(cfg, run_dir)
 ```

@@ -12,8 +12,7 @@ from data.share_data import build_share_data, load_share_data
 from predictors.lstm_training import train_forecasters
 from scripts.compare import compare_all
 from scripts.eval import eval_all
-from scripts.madrl import REWARD_COMPONENT_COLUMNS, _plot_reward_curves
-from scripts.train import train_all
+from scripts.madrl import REWARD_COMPONENT_COLUMNS, SCHEMES, _plot_reward_curves, train_madrl_scheme
 from utils.run_artifacts import write_config_json
 
 
@@ -41,10 +40,12 @@ def test_remake_end_to_end_writes_cached_results(tmp_path: Path) -> None:
     share_data = load_share_data(share_dir, cfg)
     assert share_data.eval["pv"].ndim == 2
     assert share_data.eval["lstm_pv_seq"].ndim == 3
-    ckpts = train_all(cfg, run_dir, share_data, episodes=1)
+    madrl_models = {str(spec["controller"]): Path(train_madrl_scheme(cfg, run_dir, share_data, spec, episodes=1)["model_path"]) for spec in SCHEMES}
+    table_dir = run_dir / "tables"
+    pd.concat([pd.read_csv(table_dir / f"learning_curve_{spec['scheme']}.csv") for spec in SCHEMES], ignore_index=True).to_csv(table_dir / "learning_curves.csv", index=False)
     reward_df = pd.read_csv(run_dir / "tables" / "madrl_reward_curves_madrl_base.csv")
     assert {"total_reward", *REWARD_COMPONENT_COLUMNS} <= set(reward_df.columns)
-    eval_df = eval_all(cfg, ckpts, run_dir, share_data=share_data, overwrite=True)
+    eval_df = eval_all(cfg, madrl_models, run_dir, share_data=share_data)
     assert eval_df.shape[0] == len(CONTROLLER_NAMES) * len(cfg.eval.forecast_modes)
     compare_df = compare_all(cfg, run_dir)
     assert compare_df.shape[0] == 7
@@ -53,7 +54,7 @@ def test_remake_end_to_end_writes_cached_results(tmp_path: Path) -> None:
     assert (run_dir / "results" / "perfect" / "MISOCP" / "metrics.json").exists()
 
 
-def test_madrl_reward_curve_plot_handles_components_and_legacy_cache(tmp_path: Path) -> None:
+def test_madrl_reward_curve_plot_handles_components(tmp_path: Path) -> None:
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
@@ -62,12 +63,6 @@ def test_madrl_reward_curve_plot_handles_components_and_legacy_cache(tmp_path: P
     fig = _plot_reward_curves(rewards, tmp_path, "madrl_base")
     assert len(fig.axes) == 2
     assert (tmp_path / "figures" / "madrl_base_learning_curve.png").exists()
-    plt.close(fig)
-    legacy = pd.DataFrame({"scheme": ["madrl_base", "madrl_base"], "episode": [1, 2], "total_reward": [1.0, 2.0]})
-    fig = _plot_reward_curves(legacy, tmp_path, "legacy")
-    assert len(fig.axes) == 1
-    assert "component columns missing" in fig.axes[0].get_title()
-    assert (tmp_path / "figures" / "legacy_learning_curve.png").exists()
     plt.close(fig)
 
 

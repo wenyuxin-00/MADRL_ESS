@@ -21,7 +21,7 @@ class MADRLController:
         self.projector = JointGridSafetyProjector(cfg).to(self.device) if self.projection else None
 
     def reset(self, env_state: dict) -> None:
-        self.env_state = dict(env_state)
+        pass
 
     def _raw_actor_action(self, obs_t: dict[str, torch.Tensor]) -> torch.Tensor:
         return torch.stack([actor(obs_t) for actor in self.actors], dim=1)
@@ -46,4 +46,4 @@ class MADRLController:
         for actor, state in zip(actors, payload["actors"], strict=True):
             actor.load_state_dict(state); actor.eval()
         meta = dict(payload["meta"])
-        return cls(cfg, actors, name=str(meta.get("controller", cfg.algo.name)), projection=bool(meta["projection"]))
+        return cls(cfg, actors, name=str(meta["controller"]), projection=bool(meta["projection"]))

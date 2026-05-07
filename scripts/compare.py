@@ -32,12 +32,10 @@ def _plot_all(run_dir: Path, df: pd.DataFrame, results: list[dict]) -> None:
     fig, ax = plt.subplots(figsize=(8, 3))
     for item in results: ax.plot(np.asarray(item["trafo_trace"]).reshape(-1), label=f"{item['controller']}/{item['forecast_mode']}", alpha=0.7)
     ax.legend(fontsize=7); ax.set_ylabel("trafo %"); fig.tight_layout(); fig.savefig(fig_dir / "trafo_loading.png", dpi=140); plt.close(fig)
-    curve_path = run_dir / "tables" / "learning_curves.csv"
     fig, ax = plt.subplots(figsize=(8, 3))
-    if curve_path.exists():
-        curves = pd.read_csv(curve_path)
-        for algo, group in curves.groupby("algo"): ax.plot(group["episode"], group["reward"], label=algo)
-        ax.legend(fontsize=7)
+    curves = pd.read_csv(run_dir / "tables" / "learning_curves.csv")
+    for algo, group in curves.groupby("algo"): ax.plot(group["episode"], group["reward"], label=algo)
+    ax.legend(fontsize=7)
     ax.set_ylabel("episode reward"); fig.tight_layout(); fig.savefig(fig_dir / "reward_curves.png", dpi=140); plt.close(fig)
 
 

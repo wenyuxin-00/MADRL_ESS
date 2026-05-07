@@ -97,7 +97,7 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 raw_action, _, solve_meta = controller(env, window)
                 action = np.asarray(raw_action, dtype=np.float32).reshape(n, int(cfg.model.action_dim))
             else:
-                solve_meta = {}
+                solve_meta = {"solve_time_sec": 0.0}
                 action = np.asarray(controller.act(obs), dtype=np.float32).reshape(n, int(cfg.model.action_dim))
             charge_kw = action[:, 0] * pmax
             pv_effective_req = np.clip(local[:, 2] * (np.float32(0.5) * (action[:, 1] + np.float32(1.0))), 0.0, local[:, 2])
@@ -134,7 +134,7 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 "trafo_penalty_total": float(np.sum(info["madrl_r_safe_trafo"])), "voltage_violation_count": int(info["voltage_violation_count"]),
                 "min_vm_pu": float(info["min_vm_pu"]), "max_vm_pu": float(info["max_vm_pu"]),
                 "trafo_loading_pct_max": float(np.max(info["trafo_loading_pct"])), "n_trafo_violations": int(np.max(info["trafo_loading_pct"]) > 100.0),
-                "solve_time_sec": float(solve_meta.get("solve_time_sec", 0.0)), "returned_primary_objective_eur": -storage_profit,
+                "solve_time_sec": float(solve_meta["solve_time_sec"]), "returned_primary_objective_eur": -storage_profit,
             })
             for agent_id in range(n):
                 profile = profiles[agent_id] if agent_id < len(profiles) else f"agent_{agent_id}"

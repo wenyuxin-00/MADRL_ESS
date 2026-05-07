@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import multiprocessing as mp
+import traceback
 from dataclasses import dataclass
-from typing import Callable, Any
+from typing import Any, Callable
+
 import numpy as np
 
 
@@ -35,47 +38,106 @@ class ParallelEpisodeSampler:
         return indices
 
 
-class SyncVecEnv:
+def _subproc_worker(conn: Any, env_factory: Callable[[], Any]) -> None:
+    env = None
+    try:
+        env = env_factory()
+        conn.send(("ready", {"num_available_episodes": int(env.num_available_episodes), "episode_length": int(env.episode_length), "num_agents": int(env.n)}))
+        while True:
+            command, payload = conn.recv()
+            if command == "reset":
+                conn.send(("ok", env.reset(episode_index=int(payload))))
+            elif command == "step":
+                conn.send(("ok", env.step(payload)))
+            elif command == "close":
+                conn.send(("ok", None)); break
+            else:
+                raise RuntimeError(f"SubprocVecEnv worker received unknown command {command!r}.")
+    except BaseException:
+        conn.send(("error", traceback.format_exc()))
+    finally:
+        if env is not None:
+            env.close()
+        conn.close()
+
+
+class SubprocVecEnv:
     def __init__(self, num_envs: int, env_factory: Callable[[], Any], *, seed: int, parallel_episode_sampling: str = "unique_active") -> None:
         validate_parallel_episode_sampling_mode(parallel_episode_sampling)
         self.num_envs = int(num_envs)
         if self.num_envs <= 0:
-            raise ValueError(f"SyncVecEnv expected num_envs > 0, got {num_envs}.")
-        self.envs = [env_factory() for _ in range(self.num_envs)]
-        self.num_available_episodes = int(self.envs[0].num_available_episodes); self.episode_length = int(self.envs[0].episode_length)
-        for idx, env in enumerate(self.envs):
-            if int(env.num_available_episodes) != self.num_available_episodes or int(env.episode_length) != self.episode_length:
-                raise RuntimeError(f"SyncVecEnv env {idx} has inconsistent episode contract.")
+            raise ValueError(f"SubprocVecEnv expected num_envs > 0, got {num_envs}.")
+        self._closed = False; self._ctx = mp.get_context("spawn")
+        self.parents, self.processes = [], []
+        for _ in range(self.num_envs):
+            parent, child = self._ctx.Pipe()
+            proc = self._ctx.Process(target=_subproc_worker, args=(child, env_factory), daemon=True)
+            proc.start(); child.close(); self.parents.append(parent); self.processes.append(proc)
+        try:
+            specs = [self._recv(parent) for parent in self.parents]
+        except BaseException:
+            self.close()
+            raise
+        self.num_available_episodes = int(specs[0]["num_available_episodes"]); self.episode_length = int(specs[0]["episode_length"]); self.n = int(specs[0]["num_agents"])
+        for idx, spec in enumerate(specs):
+            if int(spec["num_available_episodes"]) != self.num_available_episodes or int(spec["episode_length"]) != self.episode_length or int(spec["num_agents"]) != self.n:
+                raise RuntimeError(f"SubprocVecEnv worker {idx} has inconsistent episode contract.")
         self.sampler = ParallelEpisodeSampler(self.num_available_episodes, int(seed), self.num_envs)
 
+    def _recv(self, parent: Any) -> Any:
+        status, payload = parent.recv()
+        if status == "error":
+            raise RuntimeError(f"SubprocVecEnv worker failed:\n{payload}")
+        return payload
+
     def reset(self) -> tuple[dict[str, np.ndarray], list[dict[str, Any]]]:
-        obs, info = [], []
-        for env, episode_idx in zip(self.envs, self.sampler.next_wave(), strict=True):
-            env_obs, env_info = env.reset(episode_index=int(episode_idx)); obs.append(env_obs); info.append(env_info)
-        return _stack_obs(obs), info
+        episodes = self.sampler.next_wave()
+        for parent, episode_idx in zip(self.parents, episodes, strict=True):
+            parent.send(("reset", int(episode_idx)))
+        rows = [self._recv(parent) for parent in self.parents]
+        obs, info = zip(*rows, strict=True)
+        return _stack_obs(list(obs)), [dict(item) for item in info]
 
     def step(self, action_batch: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         actions = np.asarray(action_batch, dtype=np.float32)
-        if actions.shape[:2] != (self.num_envs, int(self.envs[0].n)):
-            raise ValueError(f"SyncVecEnv action batch expected first dims {(self.num_envs, int(self.envs[0].n))}, got {actions.shape}.")
-        obs, rewards, done_flags, infos = [], [], [], []
-        for env, action in zip(self.envs, actions, strict=True):
-            next_obs, reward, done, truncated, info = env.step(action)
-            if bool(truncated):
-                raise RuntimeError("SyncVecEnv does not support truncated episodes.")
-            obs.append(next_obs); rewards.append(np.asarray(reward, dtype=np.float32)); done_flags.append(bool(done)); infos.append(dict(info))
+        if actions.shape[:2] != (self.num_envs, self.n):
+            raise ValueError(f"SubprocVecEnv action batch expected first dims {(self.num_envs, self.n)}, got {actions.shape}.")
+        for parent, action in zip(self.parents, actions, strict=True):
+            parent.send(("step", action))
+        rows = [self._recv(parent) for parent in self.parents]
+        obs, rewards, done_flags, truncated_flags, infos = zip(*rows, strict=True)
+        if any(bool(flag) for flag in truncated_flags):
+            raise RuntimeError("SubprocVecEnv does not support truncated episodes.")
+        done_flags = [bool(flag) for flag in done_flags]
         done_count = sum(done_flags)
         if done_count not in {0, self.num_envs}:
-            raise RuntimeError(f"SyncVecEnv requires synchronized episode boundaries, got {done_count}/{self.num_envs} done.")
+            raise RuntimeError(f"SubprocVecEnv requires synchronized episode boundaries, got {done_count}/{self.num_envs} done.")
+        obs_list, infos_list = list(obs), [dict(info) for info in infos]
         if done_count == self.num_envs:
-            reset_obs, reset_info = [], []
-            for env, episode_idx, info in zip(self.envs, self.sampler.next_wave(), infos, strict=True):
-                info["terminal_observation"] = obs[len(reset_obs)]
-                env_obs, env_info = env.reset(episode_index=int(episode_idx)); reset_obs.append(env_obs); reset_info.append(env_info)
-            obs = reset_obs
+            terminal_obs = obs_list
+            episodes = self.sampler.next_wave()
+            for parent, episode_idx in zip(self.parents, episodes, strict=True):
+                parent.send(("reset", int(episode_idx)))
+            reset_rows = [self._recv(parent) for parent in self.parents]
+            obs_list = []
+            for idx, (env_obs, _) in enumerate(reset_rows):
+                infos_list[idx]["terminal_observation"] = terminal_obs[idx]
+                obs_list.append(env_obs)
         terminated = np.asarray(done_flags, dtype=bool)
-        return _stack_obs(obs), np.stack(rewards).astype(np.float32), terminated, np.zeros((self.num_envs,), dtype=bool), infos
+        return _stack_obs(obs_list), np.stack(rewards).astype(np.float32), terminated, np.zeros((self.num_envs,), dtype=bool), infos_list
 
     def close(self) -> None:
-        for env in self.envs:
-            env.close()
+        if self._closed:
+            return
+        self._closed = True
+        for parent in self.parents:
+            try:
+                parent.send(("close", None)); self._recv(parent)
+            except (BrokenPipeError, EOFError, RuntimeError):
+                pass
+            finally:
+                parent.close()
+        for proc in self.processes:
+            proc.join(timeout=2.0)
+            if proc.is_alive():
+                proc.terminate(); proc.join(timeout=2.0)

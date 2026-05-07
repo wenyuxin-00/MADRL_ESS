@@ -10,7 +10,7 @@ TEXT_SUFFIXES = {".py", ".md", ".ipynb"}
 
 def _text_paths() -> list[Path]:
     repo = Path(__file__).resolve().parents[1]
-    paths: list[Path] = [repo / "README.md", repo / "remake_test.md"]
+    paths: list[Path] = [repo / "README.md", *repo.glob("*.md")]
     for root_name in TEXT_ROOTS:
         root = repo / root_name
         if root.exists():
@@ -43,6 +43,6 @@ def test_text_files_do_not_contain_mojibake_markers() -> None:
 
 def test_notebooks_parse_as_json_and_have_text_cells() -> None:
     notebooks = sorted((Path(__file__).resolve().parents[1] / "notebooks").glob("*.ipynb"))
-    assert {path.name for path in notebooks} == {"compare.ipynb", "madrl.ipynb", "madrl_base.ipynb", "madrl_base_safe.ipynb", "madrl_projection_safe.ipynb", "misocp.ipynb", "mpc.ipynb", "predict.ipynb"}
+    assert {path.name for path in notebooks} == {"compare.ipynb", "madrl_base.ipynb", "madrl_base_safe.ipynb", "madrl_projection_safe.ipynb", "misocp.ipynb", "mpc.ipynb", "predict.ipynb"}
     for path in notebooks:
         assert _notebook_text(path).strip()
