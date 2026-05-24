@@ -153,7 +153,7 @@ class GridEnv:
             "wholesale_price_spread_seq": _price_spread(price_window, float(self.cfg.obs.wholesale_price_spread_scale_eur_per_kwh)),
             "load_seq": self.obs_stats.load_seq(load_seq_raw), "pv_seq": self.obs_stats.pv_seq(pv_seq_raw),
         }
-
+#定义观测空间的终止状态，当智能体完成一个episode时，返回全零的观测，表示环境已经重置或结束。这样可以让智能体在训练过程中更快地识别episode的边界，并且在评估过程中也能清晰地区分不同的episode。
     def _terminal_obs(self) -> dict[str, np.ndarray]:
         s = int(self.cfg.obs.sequence_length)
         return {

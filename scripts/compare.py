@@ -9,7 +9,7 @@ from configs.cfg import Cfg
 from utils.records import build_compare_economic_table, build_compare_safety_table, compare_rollout_metrics, load_record, plot_aligned_records
 from utils.run_artifacts import load_eval_result, save_compare_summary
 
-COMPARE_SCHEMES = (("perfect", "MISOCP"), ("perfect", "LOCAL_MPC"), ("lstm", "LOCAL_MPC"), ("lstm", "ADMM_MPC"), ("lstm", "MADRL_BASE"), ("lstm", "MADRL_PENALTY"), ("lstm", "MADRL_PROJECTION"))
+COMPARE_SCHEMES = (("lstm", "MADRL_BASE"), ("lstm", "MADRL_PENALTY"), ("lstm", "MADRL_PROJECTION"))
 
 def compare_all(cfg: Cfg, run_dir: Path, forecast_modes: tuple[str, ...] | None = None, controller_names: tuple[str, ...] | None = None) -> pd.DataFrame:
     rows, results = [], []
