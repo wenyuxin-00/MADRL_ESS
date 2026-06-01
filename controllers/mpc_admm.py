@@ -28,6 +28,16 @@ class AdmmMpcWindowData:
     energy_min_kwh: np.ndarray
     energy_max_kwh: np.ndarray
     dt_hours: float
+    ev_enabled: bool = False
+    ev_capacity_kwh: np.ndarray | None = None
+    ev_p_max_kw: np.ndarray | None = None
+    ev_efficiency: float = 0.95
+    ev_energy_init_kwh: np.ndarray | None = None
+    ev_energy_min_kwh: np.ndarray | None = None
+    ev_energy_max_kwh: np.ndarray | None = None
+    start_step: int = 0
+    ev_departure_soc_req: float = 0.90
+    ev_departure_penalty_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -68,12 +78,29 @@ def _project_contribution_copies(values: np.ndarray, lower_bound_kw: np.ndarray,
     return projected.astype(np.float32)
 
 
+def _ev_available(cfg: Cfg, step: int) -> bool:
+    daily_step = int(step) % int(cfg.env.episode_steps)
+    arr, dep = int(cfg.env.ev_arrival_step), int(cfg.env.ev_departure_step)
+    return bool(daily_step >= arr or daily_step < dep) if arr > dep else bool(arr <= daily_step < dep)
+
+
+def _ev_departure_offset(cfg: Cfg, start_step: int, horizon: int) -> int | None:
+    dep = int(cfg.env.ev_departure_step)
+    for offset in range(1, int(horizon) + 1):
+        if (int(start_step) + offset) % int(cfg.env.episode_steps) == dep:
+            return int(offset)
+    return None
+
+
 class ReusableAdmmLocalSolver:
-    def __init__(self, *, agent_idx: int, horizon: int, p_max_kw: float, dt_hours: float, efficiency: float, energy_min_kwh: float, energy_max_kwh: float) -> None:
+    def __init__(self, *, cfg: Cfg, agent_idx: int, horizon: int, p_max_kw: float, dt_hours: float, efficiency: float, energy_min_kwh: float, energy_max_kwh: float, ev_capacity_kwh: float, ev_p_max_kw: float) -> None:
         import gurobipy as gp
 
+        self.cfg = cfg
         self.agent_idx = int(agent_idx)
         self.horizon = int(horizon)
+        self.ev_capacity = float(ev_capacity_kwh)
+        self.ev_power_limit = float(ev_p_max_kw)
         self.gp = gp
         self.grb = gp.GRB
         self.model = gp.Model(f"remake_admm_mpc_agent_{self.agent_idx}")
@@ -81,16 +108,25 @@ class ReusableAdmmLocalSolver:
         self.charge = self.model.addVars(self.horizon, lb=0.0, ub=float(p_max_kw), name="charge_kw")
         self.discharge = self.model.addVars(self.horizon, lb=0.0, ub=float(p_max_kw), name="discharge_kw")
         self.pv_curtail = self.model.addVars(self.horizon, lb=0.0, name="pv_curtail_kw")
+        self.ev_charge = self.model.addVars(self.horizon, lb=0.0, ub=self.ev_power_limit, name="ev_charge_kw")
         self.net_load = self.model.addVars(self.horizon, lb=-self.grb.INFINITY, name="net_load_kw")
         self.energy = self.model.addVars(self.horizon + 1, lb=float(energy_min_kwh), ub=float(energy_max_kwh), name="energy_kwh")
+        self.ev_energy = self.model.addVars(self.horizon + 1, lb=float(cfg.env.ev_soc_min) * self.ev_capacity, ub=float(cfg.env.ev_soc_max) * self.ev_capacity, name="ev_energy_kwh")
+        self.ev_departure_gap = self.model.addVar(lb=0.0, ub=1.0, name="ev_departure_gap_soc")
         self.energy_init = self.model.addConstr(self.energy[0] == 0.0, name="energy_init")
+        self.ev_energy_init = self.model.addConstr(self.ev_energy[0] == 0.0, name="ev_energy_init")
+        self.ev_departure_gap_constr = self.model.addConstr(self.ev_departure_gap >= 0.0, name="ev_departure_gap")
+        self.ev_departure_energy_coeffs = np.zeros((self.horizon + 1,), dtype=np.float32)
         self.pv_curtail_upper = []
+        self.ev_charge_upper = []
         self.net_load_balance = []
         self.energy_reserve_floor = []
         for step_idx in range(self.horizon):
             self.pv_curtail_upper.append(self.model.addConstr(self.pv_curtail[step_idx] <= 0.0, name=f"curtail_ub_{step_idx}"))
-            self.net_load_balance.append(self.model.addConstr(self.net_load[step_idx] - self.pv_curtail[step_idx] - self.charge[step_idx] + self.discharge[step_idx] == 0.0, name=f"net_load_balance_{step_idx}"))
+            self.ev_charge_upper.append(self.model.addConstr(self.ev_charge[step_idx] <= 0.0, name=f"ev_charge_ub_{step_idx}"))
+            self.net_load_balance.append(self.model.addConstr(self.net_load[step_idx] - self.pv_curtail[step_idx] - self.charge[step_idx] + self.discharge[step_idx] - self.ev_charge[step_idx] == 0.0, name=f"net_load_balance_{step_idx}"))
             self.model.addConstr(self.energy[step_idx + 1] == self.energy[step_idx] + float(efficiency) * float(dt_hours) * self.charge[step_idx] - float(dt_hours) / float(efficiency) * self.discharge[step_idx], name=f"energy_balance_{step_idx}")
+            self.model.addConstr(self.ev_energy[step_idx + 1] == self.ev_energy[step_idx] + float(cfg.env.ev_efficiency) * float(dt_hours) * self.ev_charge[step_idx], name=f"ev_energy_balance_{step_idx}")
             self.energy_reserve_floor.append(self.model.addConstr(self.energy[step_idx + 1] >= float(energy_min_kwh), name=f"energy_reserve_floor_{step_idx}"))
         self.model.ModelSense = self.grb.MINIMIZE
         self.model.update()
@@ -98,30 +134,47 @@ class ReusableAdmmLocalSolver:
     def dispose(self) -> None:
         self.model.dispose()
 
-    def solve(self, *, window_data: AdmmMpcWindowData, alpha_kw: np.ndarray, z_kw: np.ndarray, u_kw: np.ndarray, rho: float) -> tuple[np.ndarray, np.float32, np.float32]:
+    def solve(self, *, window_data: AdmmMpcWindowData, alpha_kw: np.ndarray, z_kw: np.ndarray, u_kw: np.ndarray, rho: float) -> tuple[np.ndarray, np.float32, np.float32, np.float32]:
         alpha = np.asarray(alpha_kw, dtype=np.float32).reshape(-1)
         z = np.asarray(z_kw, dtype=np.float32).reshape(-1)
         u = np.asarray(u_kw, dtype=np.float32).reshape(-1)
         self.energy_init.RHS = float(window_data.energy_init_kwh[self.agent_idx])
+        ev_energy_init = np.zeros_like(window_data.energy_init_kwh) if window_data.ev_energy_init_kwh is None else np.asarray(window_data.ev_energy_init_kwh, dtype=np.float32)
+        self.ev_energy_init.RHS = float(ev_energy_init[self.agent_idx])
+        for idx, coeff in enumerate(self.ev_departure_energy_coeffs):
+            if abs(float(coeff)) > 0.0:
+                self.model.chgCoeff(self.ev_departure_gap_constr, self.ev_energy[idx], 0.0)
+                self.ev_departure_energy_coeffs[idx] = np.float32(0.0)
+        dep_offset = _ev_departure_offset(self.cfg, int(window_data.start_step), self.horizon)
+        if bool(window_data.ev_enabled) and dep_offset is not None:
+            self.ev_departure_gap_constr.RHS = float(window_data.ev_departure_soc_req)
+            coeff = np.float32(1.0 / max(self.ev_capacity, 1e-6))
+            self.model.chgCoeff(self.ev_departure_gap_constr, self.ev_energy[int(dep_offset)], float(coeff))
+            self.ev_departure_energy_coeffs[int(dep_offset)] = coeff
+        else:
+            self.ev_departure_gap_constr.RHS = 0.0
         reserve_floor = float(_planning_energy_min_kwh(window_data)[self.agent_idx])
         objective = self.gp.QuadExpr()
+        objective += float(window_data.ev_departure_penalty_weight) * self.ev_departure_gap * self.ev_departure_gap
         for step_idx in range(self.horizon):
             price_t = float(window_data.import_price_eur_per_kwh[step_idx])
             self.pv_curtail_upper[step_idx].RHS = float(window_data.pv_seq[self.agent_idx, step_idx])
+            self.ev_charge_upper[step_idx].RHS = self.ev_power_limit if bool(window_data.ev_enabled) and _ev_available(self.cfg, int(window_data.start_step) + step_idx) else 0.0
             self.net_load_balance[step_idx].RHS = float(window_data.load_seq[self.agent_idx, step_idx] - window_data.pv_seq[self.agent_idx, step_idx])
             self.energy_reserve_floor[step_idx].RHS = reserve_floor
             objective += float(window_data.dt_hours * price_t) * self.charge[step_idx]
             objective += float(window_data.dt_hours * -price_t) * self.discharge[step_idx]
+            objective += float(window_data.dt_hours * price_t) * self.ev_charge[step_idx]
             objective += float(window_data.dt_hours * _THROUGHPUT_TIEBREAKER_EUR_PER_KWH) * (self.charge[step_idx] + self.discharge[step_idx])
             objective += float(0.5 * rho * alpha[step_idx] * alpha[step_idx]) * (self.net_load[step_idx] * self.net_load[step_idx])
             objective += float(rho * alpha[step_idx] * (u[step_idx] - z[step_idx])) * self.net_load[step_idx]
         self.model.setObjective(objective, self.grb.MINIMIZE)
         self.model.optimize()
         net_load_kw = np.asarray([self.net_load[t].X for t in range(self.horizon)], dtype=np.float32)
-        return ((alpha * net_load_kw).astype(np.float32), np.float32(float(self.charge[0].X) - float(self.discharge[0].X)), np.float32(float(self.pv_curtail[0].X)))
+        return ((alpha * net_load_kw).astype(np.float32), np.float32(float(self.charge[0].X) - float(self.discharge[0].X)), np.float32(float(self.pv_curtail[0].X)), np.float32(float(self.ev_charge[0].X)))
 
 
-def _first_step_action(env, *, battery_power_kw: np.ndarray, pv_curtail_kw: np.ndarray, pv_step_kw: np.ndarray) -> np.ndarray:
+def _first_step_action(env, *, battery_power_kw: np.ndarray, pv_curtail_kw: np.ndarray, pv_step_kw: np.ndarray, ev_charge_kw: np.ndarray | None = None) -> np.ndarray:
     requested_battery_power_kw = np.asarray(battery_power_kw, dtype=np.float32).reshape(-1)
     battery_action = project_action_to_soc(env.cfg, env.soc, requested_battery_power_kw / np.maximum(np.asarray(env.pmax, dtype=np.float32), 1e-6))
     pv_raw_kw = np.maximum(np.asarray(pv_step_kw, dtype=np.float32).reshape(-1), 0.0)
@@ -129,7 +182,15 @@ def _first_step_action(env, *, battery_power_kw: np.ndarray, pv_curtail_kw: np.n
     pv_utilization = np.ones_like(pv_raw_kw, dtype=np.float32)
     valid_mask = pv_raw_kw > 1e-6
     pv_utilization[valid_mask] = pv_effective_kw[valid_mask] / pv_raw_kw[valid_mask]
-    return np.stack([battery_action, np.clip(2.0 * pv_utilization - 1.0, -1.0, 1.0).astype(np.float32)], axis=-1).astype(np.float32)
+    if ev_charge_kw is None:
+        ev_action = np.full_like(battery_action, -1.0, dtype=np.float32)
+    else:
+        ev_pmax = np.asarray(env.ev_pmax, dtype=np.float32)
+        ev_action = np.clip(2.0 * np.clip(np.asarray(ev_charge_kw, dtype=np.float32).reshape(-1) / np.maximum(ev_pmax, np.float32(1e-6)), 0.0, 1.0) - 1.0, -1.0, 1.0).astype(np.float32)
+    components = [battery_action, np.clip(2.0 * pv_utilization - 1.0, -1.0, 1.0).astype(np.float32)]
+    if int(env.cfg.model.action_dim) >= 3:
+        components.append(ev_action)
+    return np.stack(components, axis=-1).astype(np.float32)
 
 
 def _planning_energy_min_kwh(window_data: AdmmMpcWindowData) -> np.ndarray:
@@ -137,7 +198,7 @@ def _planning_energy_min_kwh(window_data: AdmmMpcWindowData) -> np.ndarray:
     return np.minimum(np.asarray(window_data.energy_min_kwh, dtype=np.float32) + one_step_reserve, np.asarray(window_data.energy_max_kwh, dtype=np.float32)).astype(np.float32)
 
 
-def _project_first_step_action(env, window_data: AdmmMpcWindowData, coordination_cache: AdmmMpcCoordinationCache, battery_power_kw: np.ndarray, pv_curtail_kw: np.ndarray, target_contribution_kw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _project_first_step_action(env, window_data: AdmmMpcWindowData, coordination_cache: AdmmMpcCoordinationCache, battery_power_kw: np.ndarray, pv_curtail_kw: np.ndarray, ev_charge_kw: np.ndarray, target_contribution_kw: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     import gurobipy as gp
 
     n = int(window_data.load_seq.shape[0]); grb = gp.GRB
@@ -146,11 +207,13 @@ def _project_first_step_action(env, window_data: AdmmMpcWindowData, coordination
     charge = model.addVars(n, lb=0.0, name="charge_kw")
     discharge = model.addVars(n, lb=0.0, name="discharge_kw")
     curtail = model.addVars(n, lb=0.0, name="pv_curtail_kw")
+    ev_charge = model.addVars(n, lb=0.0, name="ev_charge_kw")
     net = model.addVars(n, lb=-grb.INFINITY, name="net_load_kw")
     objective = gp.QuadExpr()
     baseline = np.asarray(window_data.load_seq[:, 0] - window_data.pv_seq[:, 0], dtype=np.float32)
     desired_power = np.asarray(battery_power_kw, dtype=np.float32).reshape(n)
     desired_curtail = np.asarray(pv_curtail_kw, dtype=np.float32).reshape(n)
+    desired_ev = np.asarray(ev_charge_kw, dtype=np.float32).reshape(n)
     target = np.asarray(target_contribution_kw, dtype=np.float32).reshape(n)
     lower = -float(coordination_cache.trafo_limit_kw) - float(coordination_cache.trafo_base_kw)
     upper = float(coordination_cache.trafo_limit_kw) - float(coordination_cache.trafo_base_kw)
@@ -158,20 +221,27 @@ def _project_first_step_action(env, window_data: AdmmMpcWindowData, coordination
         model.addConstr(charge[idx] <= float(window_data.p_max_kw[idx]), name=f"charge_ub_{idx}")
         model.addConstr(discharge[idx] <= float(window_data.p_max_kw[idx]), name=f"discharge_ub_{idx}")
         model.addConstr(curtail[idx] <= float(max(window_data.pv_seq[idx, 0], 0.0)), name=f"curtail_ub_{idx}")
+        ev_pmax = 0.0 if window_data.ev_p_max_kw is None else float(np.asarray(window_data.ev_p_max_kw, dtype=np.float32)[idx])
+        model.addConstr(ev_charge[idx] <= ev_pmax if bool(window_data.ev_enabled) and _ev_available(env.cfg, int(window_data.start_step)) else 0.0, name=f"ev_charge_ub_{idx}")
+        if window_data.ev_energy_init_kwh is not None and window_data.ev_energy_max_kwh is not None:
+            next_ev_energy = float(np.asarray(window_data.ev_energy_init_kwh, dtype=np.float32)[idx]) + float(window_data.ev_efficiency * window_data.dt_hours) * ev_charge[idx]
+            model.addConstr(next_ev_energy <= float(np.asarray(window_data.ev_energy_max_kwh, dtype=np.float32)[idx]), name=f"ev_energy_ub_{idx}")
         next_energy = float(window_data.energy_init_kwh[idx]) + float(window_data.efficiency * window_data.dt_hours) * charge[idx] - float(window_data.dt_hours / window_data.efficiency) * discharge[idx]
         model.addConstr(next_energy >= float(window_data.energy_min_kwh[idx]), name=f"energy_lb_{idx}")
         model.addConstr(next_energy <= float(window_data.energy_max_kwh[idx]), name=f"energy_ub_{idx}")
-        model.addConstr(net[idx] == float(baseline[idx]) + curtail[idx] + charge[idx] - discharge[idx], name=f"net_balance_{idx}")
+        model.addConstr(net[idx] == float(baseline[idx]) + curtail[idx] + charge[idx] - discharge[idx] + ev_charge[idx], name=f"net_balance_{idx}")
         objective += (charge[idx] - discharge[idx] - float(desired_power[idx])) * (charge[idx] - discharge[idx] - float(desired_power[idx]))
         objective += (curtail[idx] - float(desired_curtail[idx])) * (curtail[idx] - float(desired_curtail[idx]))
+        objective += (ev_charge[idx] - float(desired_ev[idx])) * (ev_charge[idx] - float(desired_ev[idx]))
         objective += np.float32(1e-6) * (net[idx] - float(target[idx])) * (net[idx] - float(target[idx]))
     model.addConstr(gp.quicksum(net[idx] for idx in range(n)) >= lower, name="trafo_lower")
     model.addConstr(gp.quicksum(net[idx] for idx in range(n)) <= upper, name="trafo_upper")
     model.setObjective(objective, grb.MINIMIZE); model.optimize()
     signed = np.asarray([charge[idx].X - discharge[idx].X for idx in range(n)], dtype=np.float32)
     curtailed = np.asarray([curtail[idx].X for idx in range(n)], dtype=np.float32)
+    ev = np.asarray([ev_charge[idx].X for idx in range(n)], dtype=np.float32)
     model.dispose()
-    return signed, curtailed
+    return signed, curtailed, ev
 
 
 def run_admm_mpc_step(
@@ -200,6 +270,7 @@ def run_admm_mpc_step(
     use_residual_balancing = str(rho_adaptation or "").strip().lower() == "residual_balancing"
     local_solvers = tuple(
         ReusableAdmmLocalSolver(
+            cfg=env.cfg,
             agent_idx=agent_idx,
             horizon=horizon,
             p_max_kw=float(window_data.p_max_kw[agent_idx]),
@@ -207,11 +278,14 @@ def run_admm_mpc_step(
             efficiency=float(window_data.efficiency),
             energy_min_kwh=float(window_data.energy_min_kwh[agent_idx]),
             energy_max_kwh=float(window_data.energy_max_kwh[agent_idx]),
+            ev_capacity_kwh=float(np.asarray(window_data.ev_capacity_kwh, dtype=np.float32)[agent_idx]) if window_data.ev_capacity_kwh is not None else 1.0,
+            ev_p_max_kw=float(np.asarray(window_data.ev_p_max_kw, dtype=np.float32)[agent_idx]) if window_data.ev_p_max_kw is not None else 0.0,
         )
         for agent_idx in range(n_agents)
     )
     final_battery_power = np.zeros((n_agents,), dtype=np.float32)
     final_pv_curtail = np.zeros((n_agents,), dtype=np.float32)
+    final_ev_charge = np.zeros((n_agents,), dtype=np.float32)
     final_primal = final_dual = float("inf")
     converged = False
     started_at = perf_counter()
@@ -221,6 +295,7 @@ def run_admm_mpc_step(
         contribution_kw = np.asarray([result[0] for result in local_results], dtype=np.float32)
         final_battery_power = np.asarray([result[1] for result in local_results], dtype=np.float32)
         final_pv_curtail = np.asarray([result[2] for result in local_results], dtype=np.float32)
+        final_ev_charge = np.asarray([result[3] for result in local_results], dtype=np.float32)
         z_next = _project_contribution_copies(contribution_kw + u_kw, contribution_lower_bound_kw, contribution_upper_bound_kw)
         u_kw = (u_kw + contribution_kw - z_next).astype(np.float32)
         final_primal = float(np.linalg.norm((contribution_kw - z_next).reshape(-1), ord=2))
@@ -240,9 +315,9 @@ def run_admm_mpc_step(
     for solver in local_solvers:
         solver.dispose()
     first_target = z_kw[:, 0].astype(np.float32)
-    final_battery_power, final_pv_curtail = _project_first_step_action(env, window_data, coordination_cache, final_battery_power, final_pv_curtail, first_target)
+    final_battery_power, final_pv_curtail, final_ev_charge = _project_first_step_action(env, window_data, coordination_cache, final_battery_power, final_pv_curtail, final_ev_charge, first_target)
     return AdmmMpcStepResult(
-        executed_action_array=_first_step_action(env, battery_power_kw=final_battery_power, pv_curtail_kw=final_pv_curtail, pv_step_kw=window_data.pv_seq[:, 0]),
+        executed_action_array=_first_step_action(env, battery_power_kw=final_battery_power, pv_curtail_kw=final_pv_curtail, pv_step_kw=window_data.pv_seq[:, 0], ev_charge_kw=final_ev_charge),
         converged=bool(converged),
         iterations=int(iteration),
         final_primal_residual=float(final_primal),
@@ -263,7 +338,21 @@ class AdmmMpcController:
 
     def __call__(self, env, window: dict[str, np.ndarray]) -> tuple[list[np.ndarray], dict[str, np.ndarray], dict[str, object]]:
         capacity = np.asarray(env.cap, dtype=np.float32)
-        data = AdmmMpcWindowData(import_price_eur_per_kwh=derive_import_price_seq(window["price_seq"], markup_eur_per_kwh=get_import_price_markup(env.cfg)), load_seq=np.asarray(window["load_seq"], dtype=np.float32), pv_seq=np.asarray(window["pv_seq"], dtype=np.float32), battery_capacity_kwh=capacity, p_max_kw=np.asarray(env.pmax, dtype=np.float32), efficiency=float(env.cfg.env.efficiency), energy_init_kwh=(env.soc * capacity).astype(np.float32), energy_min_kwh=(float(env.cfg.env.soc_min) * capacity).astype(np.float32), energy_max_kwh=(float(env.cfg.env.soc_max) * capacity).astype(np.float32), dt_hours=float(env.cfg.env.dt_hours))
+        ev_cap = np.asarray(env.ev_cap, dtype=np.float32) if hasattr(env, "ev_cap") else np.ones_like(capacity, dtype=np.float32)
+        data = AdmmMpcWindowData(
+            import_price_eur_per_kwh=derive_import_price_seq(window["price_seq"], markup_eur_per_kwh=get_import_price_markup(env.cfg)),
+            load_seq=np.asarray(window["load_seq"], dtype=np.float32), pv_seq=np.asarray(window["pv_seq"], dtype=np.float32),
+            battery_capacity_kwh=capacity, p_max_kw=np.asarray(env.pmax, dtype=np.float32), efficiency=float(env.cfg.env.efficiency),
+            energy_init_kwh=(env.soc * capacity).astype(np.float32), energy_min_kwh=(float(env.cfg.env.soc_min) * capacity).astype(np.float32),
+            energy_max_kwh=(float(env.cfg.env.soc_max) * capacity).astype(np.float32), dt_hours=float(env.cfg.env.dt_hours),
+            ev_enabled=bool(getattr(env.cfg.env, "ev_enabled", False)) and int(env.cfg.model.action_dim) >= 3,
+            ev_capacity_kwh=ev_cap, ev_p_max_kw=np.asarray(getattr(env, "ev_pmax", np.zeros_like(capacity)), dtype=np.float32),
+            ev_efficiency=float(getattr(env.cfg.env, "ev_efficiency", 0.95)), ev_energy_init_kwh=(np.asarray(env.ev_soc, dtype=np.float32) * ev_cap).astype(np.float32),
+            ev_energy_min_kwh=(float(getattr(env.cfg.env, "ev_soc_min", 0.10)) * ev_cap).astype(np.float32),
+            ev_energy_max_kwh=(float(getattr(env.cfg.env, "ev_soc_max", 0.95)) * ev_cap).astype(np.float32),
+            start_step=int(env.cur_step), ev_departure_soc_req=float(getattr(env.cfg.env, "ev_departure_soc_req", 0.90)),
+            ev_departure_penalty_weight=float(getattr(env.cfg.reward, "ev_departure_penalty_weight", 0.0)),
+        )
         coordination_cache = build_admm_mpc_coordination_cache(self.cfg, env, horizon_steps=int(np.asarray(window["price_seq"]).size))
         rho = compute_default_rho(data, coordination_cache)
         result = run_admm_mpc_step(env, data, coordination_cache=coordination_cache, rho_init=rho, rho_min=1e-3, rho_max=1e3, rho_adaptation="residual_balancing", max_iters=int(self.cfg.mpc.admm_max_iter), max_iters_first_step=max(int(self.cfg.mpc.admm_max_iter), 2), primal_tol=1e-3, dual_tol=1e-3)

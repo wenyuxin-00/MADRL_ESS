@@ -78,6 +78,79 @@ def _storage_step_columns(step_df: pd.DataFrame, dt_hours: float) -> pd.DataFram
     return frame
 
 
+def _local_load_pv(local: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(local, dtype=np.float32)
+    return (arr[:, 3], arr[:, 4]) if int(arr.shape[1]) >= 6 else (arr[:, 1], arr[:, 2])
+
+
+def _agent_vector(info: dict[str, Any], key: str, n: int, default: float = 0.0) -> np.ndarray:
+    value = info.get(key, np.full((n,), default, dtype=np.float32))
+    arr = np.asarray(value, dtype=np.float32)
+    return np.full((n,), float(arr), dtype=np.float32) if arr.ndim == 0 else arr.reshape(n).astype(np.float32)
+
+
+def _series_or_zero(frame: pd.DataFrame, column: str) -> pd.Series:
+    return frame[column].astype(float) if column in frame.columns else pd.Series(0.0, index=frame.index, dtype=float)
+
+
+def compute_ev_cost_summary(rollout: RolloutResult, cfg: Cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
+    agent = rollout.agent_df.copy()
+    if agent.empty:
+        cost_ts = pd.DataFrame(columns=["episode_idx", "step", "timestamp", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
+        return cost_ts, pd.DataFrame([{"battery_total_cost_eur": 0.0, "ev_total_cost_eur": 0.0, "pv_total_cost_eur": 0.0, "total_cost_eur": 0.0}])
+    dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
+    step_price = rollout.step_df[[c for c in ("episode_idx", "step", "timestamp", IMPORT_PRICE_COLUMN, WHOLESALE_PRICE_SIGNAL) if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
+    if IMPORT_PRICE_COLUMN not in agent.columns and IMPORT_PRICE_COLUMN in step_price.columns:
+        agent = agent.merge(step_price[["episode_idx", "step", IMPORT_PRICE_COLUMN]], on=["episode_idx", "step"], how="left")
+    if "timestamp" not in agent.columns and "timestamp" in step_price.columns:
+        agent = agent.merge(step_price[["episode_idx", "step", "timestamp"]], on=["episode_idx", "step"], how="left")
+    if "storage_profit_eur" in agent.columns:
+        battery_cost = -agent["storage_profit_eur"].astype(float)
+    elif "madrl_r_inc" in agent.columns:
+        battery_cost = -agent["madrl_r_inc"].astype(float)
+    elif {"e_bat", IMPORT_PRICE_COLUMN}.issubset(agent.columns):
+        battery_cost = agent["e_bat"].astype(float) * agent[IMPORT_PRICE_COLUMN].astype(float) * dt
+    else:
+        battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
+    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
+    per_agent = agent[[c for c in ("episode_idx", "step", "timestamp", "agent_id") if c in agent.columns]].copy()
+    per_agent["battery_cost_eur"] = battery_cost
+    per_agent["ev_cost_eur"] = ev_cost
+    per_agent["pv_cost_eur"] = _series_or_zero(agent, "pv_cost_eur")
+    per_agent["total_cost_eur"] = per_agent[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
+    group_cols = [c for c in ("episode_idx", "step", "timestamp") if c in per_agent.columns]
+    cost_ts = per_agent.groupby(group_cols, as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1).sort_values([c for c in ("episode_idx", "step") if c in group_cols]).reset_index(drop=True)
+    return cost_ts, pd.DataFrame([{
+        "battery_total_cost_eur": float(cost_ts["battery_cost_eur"].sum()),
+        "ev_total_cost_eur": float(cost_ts["ev_cost_eur"].sum()),
+        "pv_total_cost_eur": float(cost_ts["pv_cost_eur"].sum()),
+        "total_cost_eur": float(cost_ts["total_cost_eur"].sum()),
+        "pv_cost_note": "PV cost currently set to zero unless curtailment price/penalty is configured.",
+    }])
+
+
+def compute_ev_agent_cost_summary(rollout: RolloutResult, cfg: Cfg) -> pd.DataFrame:
+    agent = rollout.agent_df.copy()
+    if agent.empty or "agent_id" not in agent.columns:
+        return pd.DataFrame(columns=["agent", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
+    step_price = rollout.step_df[[c for c in ("episode_idx", "step", IMPORT_PRICE_COLUMN) if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
+    if IMPORT_PRICE_COLUMN not in agent.columns and IMPORT_PRICE_COLUMN in step_price.columns:
+        agent = agent.merge(step_price, on=["episode_idx", "step"], how="left")
+    dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
+    if "storage_profit_eur" in agent.columns:
+        battery_cost = -agent["storage_profit_eur"].astype(float)
+    elif "madrl_r_inc" in agent.columns:
+        battery_cost = -agent["madrl_r_inc"].astype(float)
+    elif {"e_bat", IMPORT_PRICE_COLUMN}.issubset(agent.columns):
+        battery_cost = agent["e_bat"].astype(float) * agent[IMPORT_PRICE_COLUMN].astype(float) * dt
+    else:
+        battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
+    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
+    frame = pd.DataFrame({"agent": agent["agent_id"].astype(int), "battery_cost_eur": battery_cost, "ev_cost_eur": ev_cost, "pv_cost_eur": _series_or_zero(agent, "pv_cost_eur")})
+    frame["total_cost_eur"] = frame[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
+    return frame.groupby("agent", as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1)
+
+
 def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mode: str, n_episodes: int | None = None, label: str | None = None) -> RolloutResult:
     env = build_env(cfg, "eval", forecast_mode=forecast_mode, share_data=share_data)
     total = int(share_data.eval["price"].shape[0])
@@ -100,13 +173,27 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 solve_meta = {"solve_time_sec": 0.0}
                 action = np.asarray(controller.act(obs), dtype=np.float32).reshape(n, int(cfg.model.action_dim))
             charge_kw = action[:, 0] * pmax
-            pv_effective_req = np.clip(local[:, 2] * (np.float32(0.5) * (action[:, 1] + np.float32(1.0))), 0.0, local[:, 2])
+            load_now, pv_now = _local_load_pv(local)
             obs, reward, done, _, info = env.step(action)
+            ev_charge_kw = _agent_vector(info, "ev_charge_kw", n)
+            ev_soc = _agent_vector(info, "ev_soc", n)
+            ev_available = _agent_vector(info, "ev_available", n)
+            ev_cost = _agent_vector(info, "ev_charging_cost_eur", n)
+            ev_departure_gap = _agent_vector(info, "ev_departure_gap", n)
+            ev_departure_penalty = _agent_vector(info, "ev_departure_penalty", n)
+            ev_charge_kw_rl = _agent_vector(info, "ev_charge_kw_rl", n)
+            ev_required_min_charge_kw = _agent_vector(info, "ev_required_min_charge_kw", n)
+            ev_projection_gap_kw = _agent_vector(info, "ev_projection_gap_kw", n)
+            ev_hard_infeasible = _agent_vector(info, "ev_hard_infeasible", n)
+            ev_emergency_active = _agent_vector(info, "ev_emergency_active", n)
+            ev_emergency_required_kw = _agent_vector(info, "ev_emergency_required_kw", n)
+            ev_emergency_added_kw = _agent_vector(info, "ev_emergency_added_kw", n)
+            ev_cost_total = float(np.sum(ev_cost))
             timestamp = pd.Timestamp(str(share_data.eval["timestamps"][episode_idx, step]))
             wholesale_price = float(share_data.eval["price"][episode_idx, step])
             wholesale_price_pred = float(seq[0, 0, 0])
             import_price, import_price_pred = wholesale_price + markup, wholesale_price_pred + markup
-            load_total, pv_raw_total = float(np.sum(local[:, 1])), float(np.sum(local[:, 2]))
+            load_total, pv_raw_total = float(np.sum(load_now)), float(np.sum(pv_now))
             pv_effective_total = float(np.sum(info["pv_effective"]))
             pv_curtail_total = float(np.sum(info["pv_curtail"]))
             charge_total, discharge_total = float(np.sum(np.maximum(charge_kw, 0.0))), float(np.sum(np.maximum(-charge_kw, 0.0)))
@@ -120,7 +207,14 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 WHOLESALE_PRICE_SIGNAL: wholesale_price, WHOLESALE_PRICE_PRED_COLUMN: wholesale_price_pred,
                 IMPORT_PRICE_COLUMN: import_price, IMPORT_PRICE_PRED_COLUMN: import_price_pred,
                 BATTERY_POWER_COLUMN: float(np.sum(charge_kw)), "battery_charge_total": charge_total,
-                "battery_discharge_total": discharge_total, "load_total": load_total, "pv_raw_total": pv_raw_total,
+                "battery_discharge_total": discharge_total, "ev_charge_total": float(np.sum(ev_charge_kw)), "ev_charging_cost_eur": ev_cost_total,
+                "ev_available": int(np.max(ev_available) > 0.0), "ev_departure_gap_total": float(np.sum(ev_departure_gap)),
+                "ev_departure_penalty_total": float(np.sum(ev_departure_penalty)),
+                "ev_charge_total_rl": float(np.sum(ev_charge_kw_rl)), "ev_projection_gap_total": float(np.sum(ev_projection_gap_kw)),
+                "ev_required_min_charge_total": float(np.sum(ev_required_min_charge_kw)), "ev_hard_infeasible": int(np.any(ev_hard_infeasible > 0.0)),
+                "ev_emergency_active": int(np.any(ev_emergency_active > 0.0)), "ev_emergency_added_total": float(np.sum(ev_emergency_added_kw)),
+                "ev_emergency_required_total": float(np.sum(ev_emergency_required_kw)), "ev_control_mode": str(info.get("ev_control_mode", info.get("ev_constraint_mode", "soft"))),
+                "load_total": load_total, "pv_raw_total": pv_raw_total,
                 "pv_effective_total": pv_effective_total, "pv_curtail_total": pv_curtail_total,
                 "grid_import_total": float(max(post_net, 0.0)), "grid_export_total": float(max(-post_net, 0.0)),
                 "feeder_raw_net_load_kw": raw_net, "feeder_effective_net_load_kw": effective_net,
@@ -128,7 +222,7 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 STORAGE_CHARGE_COST_COLUMN: max(float(np.sum(charge_kw)), 0.0) * float(cfg.env.dt_hours) * import_price,
                 STORAGE_DISCHARGE_REVENUE_COLUMN: max(-float(np.sum(charge_kw)), 0.0) * float(cfg.env.dt_hours) * import_price,
                 STORAGE_PROFIT_COLUMN: storage_profit, STORAGE_OBJECTIVE_COLUMN: -storage_profit,
-                "system_other_cost_eur": 0.0, "total_eur": -storage_profit, "reward_total": float(np.sum(reward)),
+                "system_other_cost_eur": ev_cost_total, "total_eur": -storage_profit + ev_cost_total, "reward_total": float(np.sum(reward)),
                 "soc_penalty_total": float(np.sum(info["madrl_r_action_penalty"]) + np.sum(info["madrl_r_soc_regularization"])),
                 "voltage_penalty_total": float(np.sum(info["madrl_r_safe_v"])), "line_penalty_total": float(np.sum(info["madrl_r_safe_line"])),
                 "trafo_penalty_total": float(np.sum(info["madrl_r_safe_trafo"])), "voltage_violation_count": int(info["voltage_violation_count"]),
@@ -143,8 +237,15 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 agent_rows.append({
                     "controller": controller_label, "forecast_mode": forecast_mode, "episode_idx": episode_idx, "step": step,
                     "timestamp": timestamp, "agent_id": agent_id, "agent_profile": profile, "reward": float(np.asarray(reward)[agent_id]),
-                    "soc": float(info["soc"][agent_id]), "load": float(local[agent_id, 1]), "load_pred": float(seq[agent_id, 0, 1]),
-                    "pv": float(local[agent_id, 2]), "pv_pred": float(seq[agent_id, 0, 2]), "e_bat": float(charge_kw[agent_id]),
+                    "soc": float(info["soc"][agent_id]), "load": float(load_now[agent_id]), "load_pred": float(seq[agent_id, 0, 1]),
+                    "pv": float(pv_now[agent_id]), "pv_pred": float(seq[agent_id, 0, 2]), "e_bat": float(charge_kw[agent_id]),
+                    "ev_charge_kw": float(ev_charge_kw[agent_id]), "ev_soc": float(ev_soc[agent_id]), "ev_available": int(ev_available[agent_id]),
+                    "ev_charging_cost_eur": float(ev_cost[agent_id]), "ev_departure_gap": float(ev_departure_gap[agent_id]),
+                    "ev_departure_penalty": float(ev_departure_penalty[agent_id]),
+                    "ev_charge_kw_rl": float(ev_charge_kw_rl[agent_id]), "ev_required_min_charge_kw": float(ev_required_min_charge_kw[agent_id]),
+                    "ev_projection_gap_kw": float(ev_projection_gap_kw[agent_id]), "ev_hard_infeasible": int(ev_hard_infeasible[agent_id] > 0.0),
+                    "ev_emergency_active": int(ev_emergency_active[agent_id] > 0.0), "ev_emergency_required_kw": float(ev_emergency_required_kw[agent_id]),
+                    "ev_emergency_added_kw": float(ev_emergency_added_kw[agent_id]),
                     "pv_effective_kw": float(info["pv_effective"][agent_id]), "pv_curtail_kw": float(info["pv_curtail"][agent_id]),
                     "net_load_kw": float(info["net_load"][agent_id]), "storage_profit_eur": float(info["madrl_r_inc"][agent_id]),
                 })
@@ -164,6 +265,13 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
         "cfg_hash": cfg.hash8(), "eval_episode_indices": selected, "agent_bus_ids": tuple(int(x) for x in cfg.grid.agent_bus_ids),
         "v_min_pu": 0.95, "v_max_pu": 1.05, "trafo_limit_kw": float(env.grid_core.trafo_limit_kw),
         "trafo_loading_limit_pct": 100.0, "loading_limit_pct": 100.0, "dt_hours": float(cfg.env.dt_hours),
+        "ev_enabled": bool(getattr(cfg.env, "ev_enabled", False)), "ev_departure_soc_req": float(getattr(cfg.env, "ev_departure_soc_req", 0.90)),
+        "ev_departure_step": int(getattr(cfg.env, "ev_departure_step", 28)),
+        "ev_departure_constraint_mode": str(getattr(cfg.env, "ev_departure_constraint_mode", "soft")),
+        "ev_hard_projection_enabled": bool(getattr(cfg.env, "ev_hard_projection_enabled", False)),
+        "ev_emergency_charging_enabled": bool(getattr(cfg.env, "ev_emergency_charging_enabled", False)),
+        "ev_emergency_window_hours": float(getattr(cfg.env, "ev_emergency_window_hours", 1.0)),
+        "ev_emergency_strategy": str(getattr(cfg.env, "ev_emergency_strategy", "required_power")),
         "soc_mode": "continuous", "objective_mode": "max_storage_profit", IMPORT_PRICE_MARKUP_KEY: markup,
     }
     return RolloutResult(step_df=step_df, agent_df=agent_df, grid_df=grid_df, summary=summary, meta=meta)
@@ -173,7 +281,8 @@ def controller_window_from_obs(obs: dict[str, np.ndarray]) -> dict[str, np.ndarr
     local = np.asarray(obs["local"], dtype=np.float32)
     seq = np.asarray(obs["sequence"], dtype=np.float32)
     load_seq = seq[:, :, 1].copy(); pv_seq = seq[:, :, 2].copy()
-    load_seq[:, 0] = local[:, 1]; pv_seq[:, 0] = local[:, 2]
+    load_now, pv_now = _local_load_pv(local)
+    load_seq[:, 0] = load_now; pv_seq[:, 0] = pv_now
     return {"price_seq": seq[0, :, 0].copy(), "load_seq": load_seq, "pv_seq": pv_seq}
 
 
@@ -357,10 +466,13 @@ def plot_net_load_comparison(*rollouts: RolloutResult):
 
 def plot_power_balance_comparison(*rollouts: RolloutResult):
     fig, axes = _panel(len(rollouts), 3.6)
-    pos_specs = [("load_total", "Load", "#111827"), ("battery_charge_total", "Charge", "#dc2626"), ("grid_export_total", "Grid export", "#f59e0b"), ("pv_curtail_total", "Curtailment loss", "#fca5a5")]
     neg_specs = [("pv_raw_total", "PV raw", "#16a34a"), ("grid_import_total", "Grid import", "#2563eb"), ("battery_discharge_total", "Discharge", "#7c3aed")]
     for idx, (ax, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         step = rollout.step_df; residual = np.zeros(len(step), dtype=np.float32)
+        pos_specs = [("load_total", "Load", "#111827"), ("battery_charge_total", "Charge", "#dc2626")]
+        if "ev_charge_total" in step.columns:
+            pos_specs.append(("ev_charge_total", "EV charge", "#0891b2"))
+        pos_specs.extend([("grid_export_total", "Grid export", "#f59e0b"), ("pv_curtail_total", "Curtailment loss", "#fca5a5")])
         residual += sum((step[col].to_numpy(dtype=np.float32) for col, *_ in pos_specs), start=np.zeros(len(step), dtype=np.float32))
         residual -= sum((step[col].to_numpy(dtype=np.float32) for col, *_ in neg_specs), start=np.zeros(len(step), dtype=np.float32))
         for specs, sign in ((pos_specs, 1.0), (neg_specs, -1.0)):
@@ -380,7 +492,10 @@ def plot_battery_power_and_soc_comparison(*rollouts: RolloutResult):
     for idx, (ax, rollout) in enumerate(zip(axes, rollouts, strict=False)):
         step, agent = rollout.step_df, rollout.agent_df
         net_power = step["battery_discharge_total"].to_numpy(dtype=np.float32) - step["battery_charge_total"].to_numpy(dtype=np.float32)
-        ax.bar(step["timestamp"], net_power, width=0.008, color=["#dc2626" if value >= 0.0 else "#2563eb" for value in net_power], alpha=0.82)
+        ax.bar(step["timestamp"], net_power, width=0.008, color=["#dc2626" if value >= 0.0 else "#2563eb" for value in net_power], alpha=0.30, label="Total battery power" if idx == 0 else None)
+        if "e_bat" in agent.columns:
+            for agent_id, frame in agent.sort_values(["episode_idx", "agent_id", "step"]).groupby("agent_id", sort=True):
+                ax.plot(frame["timestamp"], frame["e_bat"], color=_AGENT_COLORS[int(agent_id) % len(_AGENT_COLORS)], linewidth=1.2, alpha=0.88, label=f"Agent {agent_id} battery" if idx == 0 else None)
         ax.axhline(0.0, color="#475569", linewidth=0.9); _style(ax, str(rollout.meta["controller"]), "Battery Power [kW]")
         soc_ax = ax.twinx()
         summary = agent.groupby(["episode_idx", "step", "timestamp"], as_index=False).agg(mean=("soc", "mean"))
@@ -389,7 +504,7 @@ def plot_battery_power_and_soc_comparison(*rollouts: RolloutResult):
         soc_ax.plot(summary["timestamp"], summary["mean"], color="#111827", linewidth=1.5, label="Mean SoC")
         soc_ax.set_ylabel("SoC"); soc_ax.set_ylim(0.0, 1.0)
         if idx == 0:
-            ax.legend(handles=[], labels=[], loc="upper right")
+            ax.legend(loc="upper right", ncol=4, fontsize=8)
     axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
 
 

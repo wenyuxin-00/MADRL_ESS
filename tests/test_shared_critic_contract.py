@@ -31,8 +31,8 @@ def _small_cfg() -> Cfg:
 def _obs(cfg: Cfg, batch: int = 2) -> dict[str, torch.Tensor]:
     n, s = int(cfg.env.num_agents), int(cfg.obs.sequence_length)
     return {
-        "madrl_local": torch.zeros(batch, n, 5),
-        "safety_local": torch.tensor([[[0.5, 2.0, 1.0, 100.0, 50.0]] * n] * batch, dtype=torch.float32),
+        "madrl_local": torch.zeros(batch, n, 7),
+        "safety_local": torch.tensor([[[0.5, 0.2, 1.0, 2.0, 1.0, 100.0, 50.0, 60.0, 11.0]] * n] * batch, dtype=torch.float32),
         "wholesale_price_relative_seq": torch.zeros(batch, s),
         "wholesale_price_spread_seq": torch.zeros(batch, s),
         "load_seq": torch.zeros(batch, n, s),

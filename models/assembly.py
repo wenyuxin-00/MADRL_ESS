@@ -41,7 +41,7 @@ def critic_features(obs: dict[str, torch.Tensor], action: torch.Tensor) -> torch
 class Actor(nn.Module):
     def __init__(self, cfg: Cfg, agent_id: int) -> None:
         super().__init__(); self.agent_id = int(agent_id)
-        dim = 5 + int(cfg.obs.sequence_length) * 4
+        dim = 7 + int(cfg.obs.sequence_length) * 4
         self.fc1 = nn.Linear(dim, int(cfg.model.hidden_dim)); self.fc2 = nn.Linear(int(cfg.model.hidden_dim), int(cfg.model.hidden_dim)); self.out = nn.Linear(int(cfg.model.hidden_dim), int(cfg.model.action_dim))
         self.apply(_init)
 
@@ -53,7 +53,7 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self, cfg: Cfg, twin: bool) -> None:
         super().__init__(); n, s, h = int(cfg.env.num_agents), int(cfg.obs.sequence_length), int(cfg.model.hidden_dim)
-        dim = n * 5 + 2 * s + 2 * n * s + n * int(cfg.model.action_dim)
+        dim = n * 7 + 2 * s + 2 * n * s + n * int(cfg.model.action_dim)
         self.twin = bool(twin)
         self.fc1 = nn.Linear(dim, h); self.fc2 = nn.Linear(h, h); self.q1 = nn.Linear(h, 1)
         self.fc1b = nn.Linear(dim, h) if self.twin else None; self.fc2b = nn.Linear(h, h) if self.twin else None; self.q2 = nn.Linear(h, 1) if self.twin else None
@@ -75,7 +75,7 @@ def build_actors(cfg: Cfg) -> list[Actor]:
 class SharedTwinCritic(nn.Module):
     def __init__(self, cfg: Cfg) -> None:
         super().__init__(); n, s, h = int(cfg.env.num_agents), int(cfg.obs.sequence_length), int(cfg.model.hidden_dim)
-        dim = n * 5 + 2 * s + 2 * n * s + n * int(cfg.model.action_dim)
+        dim = n * 7 + 2 * s + 2 * n * s + n * int(cfg.model.action_dim)
         self.q1_fc1 = nn.Linear(dim, h); self.q1_fc2 = nn.Linear(h, h); self.q1_head = nn.Linear(h, n)
         self.q2_fc1 = nn.Linear(dim, h); self.q2_fc2 = nn.Linear(h, h); self.q2_head = nn.Linear(h, n)
         self.apply(_init)

@@ -41,6 +41,7 @@ REWARD_COMPONENT_SPECS = (
     ("madrl_r_safe_total", -1.0, "safety total", "#475569"),
 )
 REWARD_COMPONENT_COLUMNS = tuple(item[0] for item in REWARD_COMPONENT_SPECS)
+EV_AGENT_COLORS = ("#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed", "#0891b2")
 
 
 def _scheme_cfg(cfg: Cfg, spec: dict[str, Any], episodes: int) -> Cfg:
@@ -324,10 +325,265 @@ def _plot_reward_curves(rewards: pd.DataFrame, run_dir: str | Path, prefix: str)
     return fig
 
 
+def _has_ev_rollout_fields(rollouts: dict[str, Any]) -> bool:
+    return any({"ev_soc", "ev_charge_kw"}.issubset(set(rollout.agent_df.columns)) for rollout in rollouts.values())
+
+
+def _series_or_zero(frame: pd.DataFrame, column: str) -> pd.Series:
+    return frame[column].astype(float) if column in frame.columns else pd.Series(0.0, index=frame.index, dtype=float)
+
+
+def compute_ev_cost_summary(rollout, cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Return step-level EV experiment costs and a one-row total cost summary.
+
+    PV cost is currently zero unless a PV curtailment price or penalty is added to
+    the recorded rollout fields.
+    """
+    agent = rollout.agent_df.copy()
+    if agent.empty:
+        cost_ts = pd.DataFrame(columns=["episode_idx", "step", "timestamp", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
+        return cost_ts, pd.DataFrame([{"battery_total_cost_eur": 0.0, "ev_total_cost_eur": 0.0, "pv_total_cost_eur": 0.0, "total_cost_eur": 0.0}])
+    dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
+    step_price = rollout.step_df[[c for c in ("episode_idx", "step", "timestamp", "import_price", "wholesale_price") if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
+    if "import_price" not in agent.columns and "import_price" in step_price.columns:
+        agent = agent.merge(step_price[[c for c in ("episode_idx", "step", "import_price") if c in step_price.columns]], on=["episode_idx", "step"], how="left")
+    if "timestamp" not in agent.columns and "timestamp" in step_price.columns:
+        agent = agent.merge(step_price[["episode_idx", "step", "timestamp"]], on=["episode_idx", "step"], how="left")
+    if "storage_profit_eur" in agent.columns:
+        battery_cost = -agent["storage_profit_eur"].astype(float)
+    elif "madrl_r_inc" in agent.columns:
+        battery_cost = -agent["madrl_r_inc"].astype(float)
+    elif {"e_bat", "import_price"}.issubset(agent.columns):
+        battery_cost = agent["e_bat"].astype(float) * agent["import_price"].astype(float) * dt
+    else:
+        battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
+    if "ev_charging_cost_eur" in agent.columns:
+        ev_cost = agent["ev_charging_cost_eur"].astype(float)
+    elif {"ev_charge_kw", "import_price"}.issubset(agent.columns):
+        ev_cost = agent["ev_charge_kw"].astype(float).clip(lower=0.0) * agent["import_price"].astype(float) * dt
+    else:
+        ev_cost = pd.Series(0.0, index=agent.index, dtype=float)
+    pv_cost = _series_or_zero(agent, "pv_cost_eur")
+    per_agent = agent[[c for c in ("episode_idx", "step", "timestamp", "agent_id") if c in agent.columns]].copy()
+    per_agent["battery_cost_eur"] = battery_cost
+    per_agent["ev_cost_eur"] = ev_cost
+    per_agent["pv_cost_eur"] = pv_cost
+    per_agent["total_cost_eur"] = per_agent[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
+    group_cols = [c for c in ("episode_idx", "step", "timestamp") if c in per_agent.columns]
+    cost_ts = per_agent.groupby(group_cols, as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1)
+    cost_ts = cost_ts.sort_values([c for c in ("episode_idx", "step") if c in cost_ts.columns]).reset_index(drop=True)
+    cost_summary = pd.DataFrame([{
+        "battery_total_cost_eur": float(cost_ts["battery_cost_eur"].sum()),
+        "ev_total_cost_eur": float(cost_ts["ev_cost_eur"].sum()),
+        "pv_total_cost_eur": float(cost_ts["pv_cost_eur"].sum()),
+        "total_cost_eur": float(cost_ts["total_cost_eur"].sum()),
+        "pv_cost_note": "PV cost currently set to zero unless curtailment price/penalty is configured.",
+    }])
+    return cost_ts, cost_summary
+
+
+def compute_ev_agent_cost_summary(rollout, cfg) -> pd.DataFrame:
+    agent = rollout.agent_df.copy()
+    if agent.empty or "agent_id" not in agent.columns:
+        return pd.DataFrame(columns=["agent", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
+    step_price = rollout.step_df[[c for c in ("episode_idx", "step", "import_price") if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
+    if "import_price" not in agent.columns and "import_price" in step_price.columns:
+        agent = agent.merge(step_price, on=["episode_idx", "step"], how="left")
+    dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
+    if "storage_profit_eur" in agent.columns:
+        battery_cost = -agent["storage_profit_eur"].astype(float)
+    elif "madrl_r_inc" in agent.columns:
+        battery_cost = -agent["madrl_r_inc"].astype(float)
+    elif {"e_bat", "import_price"}.issubset(agent.columns):
+        battery_cost = agent["e_bat"].astype(float) * agent["import_price"].astype(float) * dt
+    else:
+        battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
+    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, "import_price") * dt
+    pv_cost = _series_or_zero(agent, "pv_cost_eur")
+    frame = pd.DataFrame({"agent": agent["agent_id"].astype(int), "battery_cost_eur": battery_cost, "ev_cost_eur": ev_cost, "pv_cost_eur": pv_cost})
+    frame["total_cost_eur"] = frame[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
+    return frame.groupby("agent", as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1)
+
+
+def _plot_total_cost(rollouts: dict[str, Any]):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(3.6 * len(rollouts), 4.6)), sharex=True)
+    axes = np.atleast_1d(axes)
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        cost_ts, _ = compute_ev_cost_summary(rollout, Cfg())
+        x = cost_ts["timestamp"] if "timestamp" in cost_ts.columns else cost_ts["step"]
+        ax.plot(x, cost_ts["total_cost_eur"].fillna(0.0).cumsum(), color="#111827", linewidth=1.8, label="Total cumulative cost" if idx == 0 else None)
+        ax.set_title(f"{rollout.meta['controller']} - Total cumulative cost"); ax.set_ylabel("Cumulative cost [EUR]"); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            ax.legend(loc="upper left", fontsize=9)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _plot_cost_components(rollouts: dict[str, Any], cumulative: bool):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(3.8 * len(rollouts), 4.8)), sharex=True)
+    axes = np.atleast_1d(axes)
+    specs = [("battery_cost_eur", "Battery cost / revenue", "#2563eb"), ("ev_cost_eur", "EV charging cost", "#0891b2"), ("pv_cost_eur", "PV cost (currently zero)", "#16a34a"), ("total_cost_eur", "Total cost", "#111827")]
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        cost_ts, _ = compute_ev_cost_summary(rollout, Cfg())
+        x = cost_ts["timestamp"] if "timestamp" in cost_ts.columns else cost_ts["step"]
+        for column, label, color in specs:
+            values = cost_ts[column].fillna(0.0).to_numpy(dtype=np.float64)
+            if cumulative:
+                values = np.cumsum(values)
+            ax.plot(x, values, color=color, linewidth=1.7 if column == "total_cost_eur" else 1.3, linestyle="-" if column == "total_cost_eur" else "--", label=label if idx == 0 else None)
+        ax.set_title(f"{rollout.meta['controller']} - {'Cumulative cost components' if cumulative else 'Cost components per step'}")
+        ax.set_ylabel("Cumulative cost [EUR]" if cumulative else "Cost per step [EUR]"); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            ax.legend(loc="upper left", ncol=4, fontsize=9)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _shade_ev_connected(axis, frame: pd.DataFrame) -> None:
+    if "ev_available" not in frame.columns:
+        return
+    connected = frame.groupby(["episode_idx", "step", "timestamp"], as_index=False)["ev_available"].max()
+    active = connected["ev_available"].to_numpy(dtype=np.float32) > 0.0
+    start = None
+    for idx, is_active in enumerate(active):
+        if is_active and start is None:
+            start = connected["timestamp"].iloc[idx]
+        if start is not None and (not is_active or idx == len(active) - 1):
+            end = connected["timestamp"].iloc[idx] if is_active else connected["timestamp"].iloc[max(idx - 1, 0)]
+            axis.axvspan(start, end, color="#e5e7eb", alpha=0.35, linewidth=0.0)
+            start = None
+
+
+def _plot_ev_soc_comparison(rollouts: dict[str, Any], required_soc: float):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(3.8 * len(rollouts), 4.8)), sharex=True)
+    axes = np.atleast_1d(axes)
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        agent = rollout.agent_df.sort_values(["episode_idx", "agent_id", "step"])
+        mode = str(rollout.meta.get("ev_departure_constraint_mode", "soft"))
+        for agent_id, frame in agent.groupby("agent_id", sort=True):
+            ax.plot(frame["timestamp"], frame["ev_soc"], color=EV_AGENT_COLORS[int(agent_id) % len(EV_AGENT_COLORS)], linewidth=1.7, label=f"Agent {agent_id}" if idx == 0 else None)
+        ax.axhline(float(required_soc), color="#dc2626", linestyle="--", linewidth=1.2, label="Required departure SOC" if idx == 0 else None)
+        ax.set_title(f"{rollout.meta['controller']} - EV SOC - {mode} departure constraint"); ax.set_ylabel("EV SOC"); ax.set_ylim(0.0, 1.0); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            ax.legend(loc="upper right", ncol=4, fontsize=9)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _plot_ev_charge_comparison(rollouts: dict[str, Any]):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(3.8 * len(rollouts), 4.8)), sharex=True)
+    axes = np.atleast_1d(axes)
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        agent = rollout.agent_df.sort_values(["episode_idx", "agent_id", "step"])
+        _shade_ev_connected(ax, agent)
+        for agent_id, frame in agent.groupby("agent_id", sort=True):
+            color = EV_AGENT_COLORS[int(agent_id) % len(EV_AGENT_COLORS)]
+            if "ev_charge_kw_rl" in frame.columns:
+                rl_values = np.maximum(frame["ev_charge_kw_rl"].to_numpy(dtype=np.float32), 0.0)
+                ax.plot(frame["timestamp"], rl_values, color=color, linestyle=":", linewidth=1.1, alpha=0.70, label=f"Agent {agent_id} RL" if idx == 0 else None)
+            values = np.maximum(frame["ev_charge_kw"].to_numpy(dtype=np.float32), 0.0)
+            ax.plot(frame["timestamp"], values, color=color, linewidth=1.7, label=f"Agent {agent_id} actual" if idx == 0 and "ev_charge_kw_rl" in frame.columns else f"Agent {agent_id}" if idx == 0 else None)
+        ax.set_title(f"{rollout.meta['controller']} - EV charging power"); ax.set_ylabel("EV charging power [kW]"); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            ax.legend(loc="upper right", ncol=4, fontsize=9)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _plot_ev_emergency_column(rollouts: dict[str, Any], column: str, ylabel: str, title_suffix: str):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(3.8 * len(rollouts), 4.8)), sharex=True)
+    axes = np.atleast_1d(axes)
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        agent = rollout.agent_df.sort_values(["episode_idx", "agent_id", "step"])
+        _shade_ev_connected(ax, agent)
+        for agent_id, frame in agent.groupby("agent_id", sort=True):
+            values = np.maximum(frame[column].to_numpy(dtype=np.float32), 0.0)
+            ax.plot(frame["timestamp"], values, color=EV_AGENT_COLORS[int(agent_id) % len(EV_AGENT_COLORS)], linewidth=1.7, label=f"Agent {agent_id}" if idx == 0 else None)
+        ax.set_title(f"{rollout.meta['controller']} - {title_suffix}"); ax.set_ylabel(ylabel); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            ax.legend(loc="upper right", ncol=4, fontsize=9)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _plot_ev_hard_projection_comparison(rollouts: dict[str, Any]):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(18, max(4.2 * len(rollouts), 5.0)), sharex=True)
+    axes = np.atleast_1d(axes)
+    for idx, ((_, rollout), ax) in enumerate(zip(rollouts.items(), axes, strict=False)):
+        agent = rollout.agent_df.sort_values(["episode_idx", "agent_id", "step"])
+        _shade_ev_connected(ax, agent)
+        for agent_id, frame in agent.groupby("agent_id", sort=True):
+            color = EV_AGENT_COLORS[int(agent_id) % len(EV_AGENT_COLORS)]
+            ax.plot(frame["timestamp"], np.maximum(frame["ev_charge_kw_rl"].to_numpy(dtype=np.float32), 0.0), color=color, linestyle=":", linewidth=1.2, alpha=0.75, label=f"Agent {agent_id} RL" if idx == 0 else None)
+            ax.plot(frame["timestamp"], np.maximum(frame["ev_charge_kw"].to_numpy(dtype=np.float32), 0.0), color=color, linewidth=1.7, label=f"Agent {agent_id} projected" if idx == 0 else None)
+            ax.plot(frame["timestamp"], np.maximum(frame["ev_required_min_charge_kw"].to_numpy(dtype=np.float32), 0.0), color=color, linestyle="--", linewidth=1.0, alpha=0.55, label=f"Agent {agent_id} required min" if idx == 0 else None)
+        gap_ax = ax.twinx()
+        gap = agent.groupby(["episode_idx", "step", "timestamp"], as_index=False)["ev_projection_gap_kw"].sum()
+        gap_ax.fill_between(gap["timestamp"], gap["ev_projection_gap_kw"].to_numpy(dtype=np.float32), color="#f97316", alpha=0.20, label="Projection gap total" if idx == 0 else None)
+        gap_ax.set_ylabel("projection gap [kW]")
+        ax.set_title(f"{rollout.meta['controller']} - EV hard projection diagnostics"); ax.set_ylabel("EV charging power [kW]"); ax.grid(True, alpha=0.25)
+        if idx == 0:
+            lines, labels = ax.get_legend_handles_labels()
+            gap_lines, gap_labels = gap_ax.get_legend_handles_labels()
+            ax.legend(lines + gap_lines, labels + gap_labels, loc="upper right", ncol=4, fontsize=8)
+    axes[-1].set_xlabel("Timestamp"); fig.tight_layout(); return fig
+
+
+def _plot_ev_departure_check(rollouts: dict[str, Any], required_soc: float, departure_step: int):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(len(rollouts), 1, figsize=(10, max(3.4 * len(rollouts), 4.0)), sharex=False)
+    axes = np.atleast_1d(axes)
+    for (_, rollout), ax in zip(rollouts.items(), axes, strict=False):
+        agent = rollout.agent_df.copy()
+        if "ev_departure_gap" not in agent.columns:
+            agent["ev_departure_gap"] = np.maximum(0.0, float(required_soc) - agent["ev_soc"].astype(float))
+        departures = agent.loc[agent["step"].astype(int) == int(departure_step)]
+        if departures.empty:
+            departures = agent.loc[agent["ev_departure_gap"].astype(float) > 0.0]
+        if departures.empty:
+            departures = agent.sort_values(["episode_idx", "agent_id", "step"]).groupby(["episode_idx", "agent_id"], as_index=False).tail(1)
+        summary = departures.groupby("agent_id", as_index=False).agg(ev_departure_gap=("ev_departure_gap", "max"), ev_soc=("ev_soc", "min"))
+        colors = ["#16a34a" if float(gap) <= 1e-6 else "#dc2626" for gap in summary["ev_departure_gap"]]
+        ax.bar(summary["agent_id"].astype(str), summary["ev_departure_gap"].astype(float), color=colors, alpha=0.82)
+        for pos, row in enumerate(summary.itertuples(index=False)):
+            ax.text(pos, float(row.ev_departure_gap), f"SOC {float(row.ev_soc):.3f}", ha="center", va="bottom", fontsize=9)
+        ax.axhline(0.0, color="#111827", linewidth=0.9); ax.set_title(f"{rollout.meta['controller']} - Departure SOC requirement check")
+        ax.set_ylabel(f"Gap to {float(required_soc):.2f} SOC"); ax.set_xlabel("Agent"); ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout(); return fig
+
+
+def _add_ev_madrl_figures(figures: dict[str, Any], rollouts: dict[str, Any], run_dir: str | Path, prefix: str) -> None:
+    if not _has_ev_rollout_fields(rollouts):
+        return
+    out = Path(run_dir) / "figures"; out.mkdir(parents=True, exist_ok=True)
+    first = next(iter(rollouts.values()))
+    required_soc = float(first.meta.get("ev_departure_soc_req", 0.90))
+    departure_step = int(first.meta.get("ev_departure_step", 28))
+    ev_specs = {
+        f"{prefix}_ev_soc": _plot_ev_soc_comparison(rollouts, required_soc),
+        f"{prefix}_ev_charge_kw": _plot_ev_charge_comparison(rollouts),
+        f"{prefix}_ev_departure_check": _plot_ev_departure_check(rollouts, required_soc, departure_step),
+        f"{prefix}_total_cost": _plot_total_cost(rollouts),
+        f"{prefix}_cost_components": _plot_cost_components(rollouts, cumulative=False),
+        f"{prefix}_cumulative_cost_components": _plot_cost_components(rollouts, cumulative=True),
+    }
+    if any({"ev_charge_kw_rl", "ev_required_min_charge_kw", "ev_projection_gap_kw"}.issubset(set(rollout.agent_df.columns)) for rollout in rollouts.values()):
+        ev_specs[f"{prefix}_ev_hard_projection"] = _plot_ev_hard_projection_comparison(rollouts)
+    if any({"ev_emergency_added_kw", "ev_emergency_required_kw"}.issubset(set(rollout.agent_df.columns)) for rollout in rollouts.values()):
+        ev_specs[f"{prefix}_ev_emergency_added_kw"] = _plot_ev_emergency_column(rollouts, "ev_emergency_added_kw", "Emergency added power [kW]", "EV emergency added charging power")
+        ev_specs[f"{prefix}_ev_emergency_required_kw"] = _plot_ev_emergency_column(rollouts, "ev_emergency_required_kw", "Emergency required power [kW]", "EV emergency required charging power")
+    for name, fig in ev_specs.items():
+        fig.savefig(out / f"{name}.png", dpi=140)
+        figures[name] = fig
+
+
 def plot_madrl_outputs(result: dict[str, Any], run_dir: str | Path) -> dict[str, Any]:
     rollouts = {name: saved["rollout"] for name, saved in result["records"].items()}
     prefix = next(iter(rollouts)) if len(rollouts) == 1 else "madrl"
     figures = plot_basic_records(rollouts, run_dir, prefix)
+    _add_ev_madrl_figures(figures, rollouts, run_dir, prefix)
     figures[f"{prefix}_learning_curve"] = _plot_reward_curves(result["reward_curves"], run_dir, prefix)
     return figures
 

@@ -51,6 +51,38 @@ class EnvCfg:
     max_charge_rate: float = 0.5 #每个时间步最大充电/放电功率，单位为电池容量的倍数，例如0.5表示每个时间步最多充放电50kW
     window_stride_days: int = 1
 
+    # EV parameters
+    ev_enabled: bool = True
+
+    # EV battery capacity for each agent
+    ev_capacity_kwh: tuple[float, ...] = (60.0, 60.0, 60.0)
+
+    # EV SOC limits
+    ev_soc_min: float = 0.10
+    ev_soc_max: float = 0.95
+
+    # EV SOC when arriving home at 18:00
+    ev_arrival_soc: float = 0.15
+
+    # Required SOC when leaving home at 07:00
+    ev_departure_soc_req: float = 0.90
+
+    # Home charger maximum power
+    ev_max_charge_kw: tuple[float, ...] = (11.0, 11.0, 11.0)
+
+    # EV charging efficiency
+    ev_efficiency: float = 0.95
+
+    # EV connection window
+    # With 15-min resolution: 18:00 = step 72, 07:00 = step 28
+    ev_arrival_step: int = 72
+    ev_departure_step: int = 28
+    ev_departure_constraint_mode: str = "soft"
+    ev_hard_projection_enabled: bool = False
+    ev_emergency_charging_enabled: bool = False
+    ev_emergency_window_hours: float = 1.0
+    ev_emergency_strategy: str = "required_power"
+
 #强化学习算法参数
 @dataclass
 class AlgoCfg:
@@ -103,6 +135,12 @@ class RewardCfg:
     w_voltage_pen: float = 1.0 #电压惩罚权重，电压越偏离额定值，惩罚越大
     w_line_pen: float = 1.0    #线路惩罚权重，线路负载越接近或超过限制，惩罚越大
     w_trafo_pen: float = 1.0   #变压器惩罚权重，变压器负载越接近或超过限制，惩罚越大
+    # EV reward parameters
+    ev_departure_penalty_weight: float = 500.0
+    ev_soc_regularization_weight: float = 0.005
+    ev_projection_penalty_weight: float = 0.0
+    ev_emergency_penalty_weight: float = 0.0
+
 
 #观测处理参数
 @dataclass
@@ -151,7 +189,7 @@ class ForecastCfg:
 @dataclass
 class ModelCfg:
     hidden_dim: int = 256
-    action_dim: int = 2
+    action_dim: int = 3
     max_action: float = 1.0
     use_grad_clip: bool = True
     grad_clip_norm: float = 10.0

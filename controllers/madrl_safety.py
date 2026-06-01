@@ -10,9 +10,31 @@ from envs.grid_core import PowerFlowGridCore
 EPS = 1e-6
 
 
+def _safety_columns(safety_local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if int(safety_local.shape[-1]) >= 9:
+        return safety_local[..., 0], safety_local[..., 3], safety_local[..., 4], safety_local[..., 5], safety_local[..., 6], safety_local[..., 2], safety_local[..., 8]
+    zeros = torch.zeros_like(safety_local[..., 0])
+    return safety_local[..., 0], safety_local[..., 1], safety_local[..., 2], safety_local[..., 3], safety_local[..., 4], zeros, zeros
+
+
+def _ev_charge_kw_from_action(cfg: Cfg, safety_local: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    if int(actions.shape[-1]) < 3 or not bool(cfg.env.ev_enabled):
+        return torch.zeros_like(actions[..., 0])
+    _, _, _, _, _, ev_available, ev_pmax = _safety_columns(safety_local)
+    return torch.clamp(ev_available, 0.0, 1.0) * torch.clamp(0.5 * (actions[..., 2] + 1.0), 0.0, 1.0) * torch.clamp(ev_pmax, min=0.0)
+
+
+def _stack_action(cfg: Cfg, battery_action: torch.Tensor, pv_action: torch.Tensor, ev_action: torch.Tensor | None = None) -> torch.Tensor:
+    if int(cfg.model.action_dim) >= 3:
+        ev = torch.full_like(battery_action, -1.0) if ev_action is None else torch.clamp(ev_action, -1.0, 1.0)
+        return torch.stack([torch.clamp(battery_action, -1.0, 1.0), torch.clamp(pv_action, -1.0, 1.0), ev], dim=-1)
+    return torch.stack([torch.clamp(battery_action, -1.0, 1.0), torch.clamp(pv_action, -1.0, 1.0)], dim=-1)
+
+
 def local_bounds_torch(cfg: Cfg, safety_local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    soc = torch.clamp(safety_local[..., 0], float(cfg.env.soc_min), float(cfg.env.soc_max))
-    cap = torch.clamp(safety_local[..., 3], min=EPS); pmax = torch.clamp(safety_local[..., 4], min=EPS); pv = torch.clamp(safety_local[..., 2], min=0.0)
+    soc_raw, _, pv_raw, cap_raw, pmax_raw, _, _ = _safety_columns(safety_local)
+    soc = torch.clamp(soc_raw, float(cfg.env.soc_min), float(cfg.env.soc_max))
+    cap = torch.clamp(cap_raw, min=EPS); pmax = torch.clamp(pmax_raw, min=EPS); pv = torch.clamp(pv_raw, min=0.0)
     dt, eff = max(float(cfg.env.dt_hours), EPS), max(float(cfg.env.efficiency), EPS)
     lower = -torch.minimum(pmax, torch.clamp((soc * cap - float(cfg.env.soc_min) * cap) * eff / dt, min=0.0))
     upper = torch.minimum(pmax, torch.clamp((float(cfg.env.soc_max) * cap - soc * cap) / (eff * dt), min=0.0))
@@ -23,13 +45,15 @@ def map_actor_output_to_soc_feasible_action(cfg: Cfg, safety_local: torch.Tensor
     raw = torch.clamp(raw_actions, -float(cfg.model.max_action), float(cfg.model.max_action))
     lower, upper, pmax, _ = local_bounds_torch(cfg, safety_local)
     battery_kw = lower + 0.5 * (raw[..., 0] + 1.0) * torch.clamp(upper - lower, min=0.0)
-    return torch.stack([torch.clamp(battery_kw / torch.clamp(pmax, min=EPS), -1.0, 1.0), raw[..., 1]], dim=-1)
+    ev_action = raw[..., 2] if int(raw.shape[-1]) >= 3 and bool(cfg.env.ev_enabled) else None
+    return _stack_action(cfg, battery_kw / torch.clamp(pmax, min=EPS), raw[..., 1], ev_action)
 
 
 def enforce_local_action_feasibility(cfg: Cfg, safety_local: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
     lower, upper, pmax, _ = local_bounds_torch(cfg, safety_local)
     battery = torch.clamp(actions[..., 0] * pmax, min=lower, max=upper) / torch.clamp(pmax, min=EPS)
-    return torch.stack([torch.clamp(battery, -1.0, 1.0), torch.clamp(actions[..., 1], -1.0, 1.0)], dim=-1)
+    ev_action = actions[..., 2] if int(actions.shape[-1]) >= 3 and bool(cfg.env.ev_enabled) else None
+    return _stack_action(cfg, battery, actions[..., 1], ev_action)
 
 
 class JointGridSafetyProjector(nn.Module):
@@ -82,11 +106,13 @@ class JointGridSafetyProjector(nn.Module):
         battery_kw = torch.clamp(actions[..., 0] * pmax, min=lower, max=upper)
         pv_curtail_kw = torch.minimum(torch.clamp(pv * (1.0 - torch.clamp(0.5 * (actions[..., 1] + 1.0), 0.0, 1.0)), min=0.0), pv)
         x = torch.cat([battery_kw, pv_curtail_kw], dim=1)
-        rows, bounds = self._rows((safety[..., 1] - safety[..., 2]), dtype, device)
+        _, load, pv_raw, _, _, _, _ = _safety_columns(safety)
+        rows, bounds = self._rows(load - pv_raw + _ev_charge_kw_from_action(self.cfg, safety, actions), dtype, device)
         for _ in range(max(int(self.cfg.safety.projection_iters), 1)):
             x = self._project_rows(x, rows, bounds)
             x = torch.cat([torch.clamp(x[:, :n], min=lower, max=upper), torch.minimum(torch.clamp(x[:, n:], min=0.0), pv)], dim=1)
         battery_action = torch.clamp(x[:, :n] / torch.clamp(pmax, min=EPS), -1.0, 1.0)
         pv_util = torch.where(pv > EPS, 1.0 - x[:, n:] / torch.clamp(pv, min=EPS), torch.ones_like(pv))
-        projected = torch.stack([battery_action, torch.clamp(2.0 * pv_util - 1.0, -1.0, 1.0)], dim=-1)
+        ev_action = actions[..., 2] if int(actions.shape[-1]) >= 3 and bool(self.cfg.env.ev_enabled) else None
+        projected = _stack_action(self.cfg, battery_action, 2.0 * pv_util - 1.0, ev_action)
         return projected.squeeze(0) if squeezed else projected
