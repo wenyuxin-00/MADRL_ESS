@@ -79,7 +79,7 @@ class EnvCfg:
     ev_departure_step: int = 28
     ev_departure_constraint_mode: str = "soft"
     ev_hard_projection_enabled: bool = False
-    ev_emergency_charging_enabled: bool = False
+    ev_emergency_charging_enabled: bool = True
     ev_emergency_window_hours: float = 1.0
     ev_emergency_strategy: str = "required_power"
 

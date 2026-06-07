@@ -221,8 +221,10 @@ def _project_first_step_action(env, window_data: AdmmMpcWindowData, coordination
         model.addConstr(charge[idx] <= float(window_data.p_max_kw[idx]), name=f"charge_ub_{idx}")
         model.addConstr(discharge[idx] <= float(window_data.p_max_kw[idx]), name=f"discharge_ub_{idx}")
         model.addConstr(curtail[idx] <= float(max(window_data.pv_seq[idx, 0], 0.0)), name=f"curtail_ub_{idx}")
-        ev_pmax = 0.0 if window_data.ev_p_max_kw is None else float(np.asarray(window_data.ev_p_max_kw, dtype=np.float32)[idx])
-        model.addConstr(ev_charge[idx] <= ev_pmax if bool(window_data.ev_enabled) and _ev_available(env.cfg, int(window_data.start_step)) else 0.0, name=f"ev_charge_ub_{idx}")
+        ev_connected_now = bool(window_data.ev_enabled) and _ev_available(env.cfg, int(window_data.start_step))
+        ev_pmax_i = 0.0 if window_data.ev_p_max_kw is None else float(np.asarray(window_data.ev_p_max_kw, dtype=np.float32)[idx])
+        ev_ub = ev_pmax_i if ev_connected_now else 0.0
+        model.addConstr(ev_charge[idx] <= ev_ub, name=f"ev_charge_ub_{idx}")
         if window_data.ev_energy_init_kwh is not None and window_data.ev_energy_max_kwh is not None:
             next_ev_energy = float(np.asarray(window_data.ev_energy_init_kwh, dtype=np.float32)[idx]) + float(window_data.ev_efficiency * window_data.dt_hours) * ev_charge[idx]
             model.addConstr(next_ev_energy <= float(np.asarray(window_data.ev_energy_max_kwh, dtype=np.float32)[idx]), name=f"ev_energy_ub_{idx}")
