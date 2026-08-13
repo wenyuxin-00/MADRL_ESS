@@ -1,0 +1,10 @@
+label,group,total_eur,system_other_cost_eur,storage_profit_total_eur,ev_charging_cost_eur
+Base_soft,MADRL Soft,57.39,329.784,272.393,329.784
+Base_Costweight_soft,MADRL Soft,251.639,531.58,102.748,354.387
+Base_Progress_soft,MADRL Soft,188.694,335.677,146.983,335.677
+Projection_Progress_soft,MADRL Soft,462.559,353.551,-109.008,353.551
+Projection_EV_EME_soft,MADRL Soft,272.613,305.277,32.663,305.277
+Base_EME_soft,MADRL Soft,94.284,195.215,100.931,195.215
+ADMM-MPC Soft,Baseline,-24.855,210.693,235.548,210.693
+Local MPC Soft,Baseline,-83.254,208.323,291.577,208.323
+Rule-based with Battery,Baseline,274.009,386.895,112.886,386.895

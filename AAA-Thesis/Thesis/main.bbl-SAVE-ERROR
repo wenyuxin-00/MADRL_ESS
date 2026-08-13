@@ -1,0 +1,1944 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{nty/global//global/global/global}
+    \entry{ALI2022104609}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=0,uniquepart=base,hash=2d218fbf4cdb4d7f7f772ebbb9f5d5ff}{%
+           family={Ali},
+           familyi={A\bibinitperiod},
+           given={Abdelrahman\bibnamedelima O.},
+           giveni={A\bibinitperiod\bibinitdelim O\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=ac628f51abed7ad1463da452caf2505f}{%
+           family={Elmarghany},
+           familyi={E\bibinitperiod},
+           given={Mohamed\bibnamedelima R.},
+           giveni={M\bibinitperiod\bibinitdelim R\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=77cb2d63e40b43d6c335941ee97a10d3}{%
+           family={Abdelsalam},
+           familyi={A\bibinitperiod},
+           given={Mohamed\bibnamedelima M.},
+           giveni={M\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=2dd383531cb7e35ddeb46739594916a1}{%
+           family={Sabry},
+           familyi={S\bibinitperiod},
+           given={Mohamed\bibnamedelima Nabil},
+           giveni={M\bibinitperiod\bibinitdelim N\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=81e49b55604a4feccdd74011cb2e1ee8}{%
+           family={Hamed},
+           familyi={H\bibinitperiod},
+           given={Ahmed\bibnamedelima M.},
+           giveni={A\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{179cb1290f2156a115c16754dadeb298}
+      \strng{fullhash}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \strng{fullhashraw}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \strng{bibnamehash}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \strng{authorbibnamehash}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \strng{authornamehash}{179cb1290f2156a115c16754dadeb298}
+      \strng{authorfullhash}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \strng{authorfullhashraw}{4f4bb739b0d13c9a4e7fdc93d4d601c5}
+      \field{sortinit}{A}
+      \field{sortinithash}{2f401846e2029bad6b3ecc16d50031e2}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{2352-152X}
+      \field{journaltitle}{Journal of Energy Storage}
+      \field{title}{Closed-loop home energy management system with renewable energy sources in a smart grid: A comprehensive review}
+      \field{volume}{50}
+      \field{year}{2022}
+      \field{pages}{104609}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.est.2022.104609
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S2352152X22006259
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S2352152X22006259
+      \endverb
+      \keyw{Home energy management system,Renewable energy,Smart grid,Demand response,Home energy storage system,Home appliance,Optimization scheduling techniques}
+    \endentry
+    \entry{en15218235}{article}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=8fc32570ad6c4d60e1fb8deb45885d07}{%
+           family={Amer},
+           familyi={A\bibinitperiod},
+           given={Aya},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=2fa72be119d04226ba88f4faf6e0dadd}{%
+           family={Shaban},
+           familyi={S\bibinitperiod},
+           given={Khaled},
+           giveni={K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=c20d58da24b696e4a85f7dd6a3f268c9}{%
+           family={Massoud},
+           familyi={M\bibinitperiod},
+           given={Ahmed},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{fullhash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{fullhashraw}{cf13172350f089f7a29e9a13413167c4}
+      \strng{bibnamehash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{authorbibnamehash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{authornamehash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{authorfullhash}{cf13172350f089f7a29e9a13413167c4}
+      \strng{authorfullhashraw}{cf13172350f089f7a29e9a13413167c4}
+      \field{sortinit}{A}
+      \field{sortinithash}{2f401846e2029bad6b3ecc16d50031e2}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{1996-1073}
+      \field{journaltitle}{Energies}
+      \field{number}{21}
+      \field{title}{Demand Response in HEMSs Using DRL and the Impact of Its Various Configurations and Environmental Changes}
+      \field{volume}{15}
+      \field{year}{2022}
+      \verb{doi}
+      \verb 10.3390/en15218235
+      \endverb
+      \verb{urlraw}
+      \verb https://www.mdpi.com/1996-1073/15/21/8235
+      \endverb
+      \verb{url}
+      \verb https://www.mdpi.com/1996-1073/15/21/8235
+      \endverb
+    \endentry
+    \entry{BEAUDIN2015318}{article}{}{}
+      \name{author}{2}{}{%
+        {{un=0,uniquepart=base,hash=fdaaaf9fb69753ab619427e7b7d1eff3}{%
+           family={Beaudin},
+           familyi={B\bibinitperiod},
+           given={Marc},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=52328139e92c1c357c7366f2f65ccc0d}{%
+           family={Zareipour},
+           familyi={Z\bibinitperiod},
+           given={Hamidreza},
+           giveni={H\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{fullhash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{fullhashraw}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{bibnamehash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{authorbibnamehash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{authornamehash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{authorfullhash}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \strng{authorfullhashraw}{3a45c5af1dd3d19fe48809d3ab3df469}
+      \field{sortinit}{B}
+      \field{sortinithash}{d7095fff47cda75ca2589920aae98399}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{1364-0321}
+      \field{journaltitle}{Renewable and Sustainable Energy Reviews}
+      \field{title}{Home energy management systems: A review of modelling and complexity}
+      \field{volume}{45}
+      \field{year}{2015}
+      \field{pages}{318\bibrangedash 335}
+      \range{pages}{18}
+      \verb{doi}
+      \verb 10.1016/j.rser.2015.01.046
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032115000568
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032115000568
+      \endverb
+      \keyw{Home energy management system,Appliance models,Household device models,Smart home,Optimal residential energy management,Home energy scheduling,Smart grid}
+    \endentry
+    \entry{6465896}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=fdaaaf9fb69753ab619427e7b7d1eff3}{%
+           family={Beaudin},
+           familyi={B\bibinitperiod},
+           given={Marc},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=52328139e92c1c357c7366f2f65ccc0d}{%
+           family={Zareipour},
+           familyi={Z\bibinitperiod},
+           given={Hamidreza},
+           giveni={H\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=e49081097756d0a9a7a31799b2b092b3}{%
+           family={Schellenberg},
+           familyi={S\bibinitperiod},
+           given={Antony},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{fullhash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{fullhashraw}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{bibnamehash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{authorbibnamehash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{authornamehash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{authorfullhash}{1071786ba2b87a3e13bd64a46b33471d}
+      \strng{authorfullhashraw}{1071786ba2b87a3e13bd64a46b33471d}
+      \field{sortinit}{B}
+      \field{sortinithash}{d7095fff47cda75ca2589920aae98399}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2012 3rd IEEE PES Innovative Smart Grid Technologies Europe (ISGT Europe)}
+      \field{title}{Residential energy management using a moving window algorithm}
+      \field{year}{2012}
+      \field{pages}{1\bibrangedash 8}
+      \range{pages}{8}
+      \verb{doi}
+      \verb 10.1109/ISGTEurope.2012.6465896
+      \endverb
+      \keyw{Mathematical model,Space heating,Water heating,Equations,Electricity,Optimal scheduling,Scheduling,Mixed Integer Linear Programming,Residential Energy management,appliance modelling,power scheduling}
+    \endentry
+    \entry{Chen20131401}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=0,uniquepart=base,hash=da31f56113cb61a1fef7cf7543eefff8}{%
+           family={Chen},
+           familyi={C\bibinitperiod},
+           given={Chen},
+           giveni={C\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=735251ff30c1ec1c149b7acd80972b97}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Jianhui},
+           giveni={J\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=6258245eaf784e2c3a72adf224fec922}{%
+           family={Heo},
+           familyi={H\bibinitperiod},
+           given={Yeonsook},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=1f9a2ca458d7eb4ba2e04aa16b0651de}{%
+           family={Kishore},
+           familyi={K\bibinitperiod},
+           given={Shalinee},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{fullhash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{fullhashraw}{303b4492c03b3436f454d9deae4401ce}
+      \strng{bibnamehash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{authorbibnamehash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{authornamehash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{authorfullhash}{303b4492c03b3436f454d9deae4401ce}
+      \strng{authorfullhashraw}{303b4492c03b3436f454d9deae4401ce}
+      \field{sortinit}{C}
+      \field{sortinithash}{4d103a86280481745c9c897c925753c0}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Smart Grid}
+      \field{number}{3}
+      \field{title}{MPC-based appliance scheduling for residential building energy management controller}
+      \field{volume}{4}
+      \field{year}{2013}
+      \field{pages}{1401\bibrangedash 1410}
+      \range{pages}{10}
+      \verb{doi}
+      \verb 10.1109/TSG.2013.2265239
+      \endverb
+      \verb{urlraw}
+      \verb https://www.scopus.com/inward/record.uri?eid=2-s2.0-84883299352&doi=10.1109%2fTSG.2013.2265239&partnerID=40&md5=921a15b88f5feba040d2f6250f618e6c
+      \endverb
+      \verb{url}
+      \verb https://www.scopus.com/inward/record.uri?eid=2-s2.0-84883299352&doi=10.1109%2fTSG.2013.2265239&partnerID=40&md5=921a15b88f5feba040d2f6250f618e6c
+      \endverb
+    \endentry
+    \entry{CLASTRES201055}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=0,uniquepart=base,hash=23f90d8c800c6caadd23479a834e3891}{%
+           family={Clastres},
+           familyi={C\bibinitperiod},
+           given={C.},
+           giveni={C\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=577c7b8d5503c9a0e3cfe35327613cbb}{%
+           family={{Ha Pham}},
+           familyi={H\bibinitperiod},
+           given={T.\bibnamedelimi T.},
+           giveni={T\bibinitperiod\bibinitdelim T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=109c2400c1601c4bad034a2d73a97644}{%
+           family={Wurtz},
+           familyi={W\bibinitperiod},
+           given={F.},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=45b0fb08cdc92b8b5b6ffa46a5c0b2e0}{%
+           family={Bacha},
+           familyi={B\bibinitperiod},
+           given={S.},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{fullhash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{fullhashraw}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{bibnamehash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{authorbibnamehash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{authornamehash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{authorfullhash}{e4c324c1634dac9144c17b868a5375ed}
+      \strng{authorfullhashraw}{e4c324c1634dac9144c17b868a5375ed}
+      \field{sortinit}{C}
+      \field{sortinithash}{4d103a86280481745c9c897c925753c0}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0360-5442}
+      \field{journaltitle}{Energy}
+      \field{number}{1}
+      \field{title}{Ancillary services and optimal household energy management with photovoltaic production}
+      \field{volume}{35}
+      \field{year}{2010}
+      \field{pages}{55\bibrangedash 64}
+      \range{pages}{10}
+      \verb{doi}
+      \verb 10.1016/j.energy.2009.08.025
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0360544209003673
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0360544209003673
+      \endverb
+      \keyw{Energy management,Ancillary services,PV production,Household application}
+    \endentry
+    \entry{5984354}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=84987da0d698ff09bc47b223e470afb6}{%
+           family={Costanzo},
+           familyi={C\bibinitperiod},
+           given={Giuseppe\bibnamedelima T.},
+           giveni={G\bibinitperiod\bibinitdelim T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=2d9b2927a4fea8ed08933e8e21a9807f}{%
+           family={Kheir},
+           familyi={K\bibinitperiod},
+           given={Jan},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=401ad617a0cc94066c2c5bdfc4ff403c}{%
+           family={Zhu},
+           familyi={Z\bibinitperiod},
+           given={Guchuan},
+           giveni={G\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{fullhash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{fullhashraw}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{bibnamehash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{authorbibnamehash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{authornamehash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{authorfullhash}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \strng{authorfullhashraw}{e5deaaf4cad4d0ab9ba1ffcfe65ddb31}
+      \field{sortinit}{C}
+      \field{sortinithash}{4d103a86280481745c9c897c925753c0}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2011 IEEE International Symposium on Industrial Electronics}
+      \field{title}{Peak-load shaving in smart homes via online scheduling}
+      \field{year}{2011}
+      \field{pages}{1347\bibrangedash 1352}
+      \range{pages}{6}
+      \verb{doi}
+      \verb 10.1109/ISIE.2011.5984354
+      \endverb
+      \keyw{Home appliances,Water heating,Computational modeling,Processor scheduling,Scheduling,Load modeling,Power demand,Smart Grid,Smart Home,energy efficiency,peak-load shaving,real-time scheduling}
+    \endentry
+    \entry{DONGOL20181}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=0,uniquepart=base,hash=e5e45db9e2eb7ccc58c6382ef03a6a24}{%
+           family={Dongol},
+           familyi={D\bibinitperiod},
+           given={Deepranjan},
+           giveni={D\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=3de2d48fa6c0a076d6ced8ea18c268dc}{%
+           family={Feldmann},
+           familyi={F\bibinitperiod},
+           given={Thomas},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=7047d212f80975d90e11f6931e965e13}{%
+           family={Schmidt},
+           familyi={S\bibinitperiod},
+           given={Michael},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=fd6ab4d549f534e390e1da6ebb4c5645}{%
+           family={Bollin},
+           familyi={B\bibinitperiod},
+           given={Elmar},
+           giveni={E\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{00d15685d934fd11349ced283896f184}
+      \strng{fullhash}{00d15685d934fd11349ced283896f184}
+      \strng{fullhashraw}{00d15685d934fd11349ced283896f184}
+      \strng{bibnamehash}{00d15685d934fd11349ced283896f184}
+      \strng{authorbibnamehash}{00d15685d934fd11349ced283896f184}
+      \strng{authornamehash}{00d15685d934fd11349ced283896f184}
+      \strng{authorfullhash}{00d15685d934fd11349ced283896f184}
+      \strng{authorfullhashraw}{00d15685d934fd11349ced283896f184}
+      \field{sortinit}{D}
+      \field{sortinithash}{6f385f66841fb5e82009dc833c761848}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{2352-4677}
+      \field{journaltitle}{Sustainable Energy, Grids and Networks}
+      \field{title}{A model predictive control based peak shaving application of battery for a household with photovoltaic system in a rural distribution grid}
+      \field{volume}{16}
+      \field{year}{2018}
+      \field{pages}{1\bibrangedash 13}
+      \range{pages}{13}
+      \verb{doi}
+      \verb 10.1016/j.segan.2018.05.001
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S2352467717302916
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S2352467717302916
+      \endverb
+      \keyw{Model predictive control,Peak shaving,Battery storage}
+    \endentry
+    \entry{DU2026127976}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=0,uniquepart=base,hash=c8ad06bb215c54d0691ad1171411baef}{%
+           family={Du},
+           familyi={D\bibinitperiod},
+           given={Xiao},
+           giveni={X\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=ab267ea22b9dd687d69f36990abae742}{%
+           family={Luo},
+           familyi={L\bibinitperiod},
+           given={Fengji},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=d65873e9aec504182939e8af52810094}{%
+           family={Hu},
+           familyi={H\bibinitperiod},
+           given={Juntao},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=c7905d3683e86c148202145e4b6e5b7c}{%
+           family={Zhou},
+           familyi={Z\bibinitperiod},
+           given={Wei},
+           giveni={W\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=94b59b395a72a58a06eec9488ddbc73b}{%
+           family={Wen},
+           familyi={W\bibinitperiod},
+           given={Junhao},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{f6d2a4faf9ff3970e7a4ac7747688222}
+      \strng{fullhash}{c298fb5336dbfe6975508f16dd698808}
+      \strng{fullhashraw}{c298fb5336dbfe6975508f16dd698808}
+      \strng{bibnamehash}{c298fb5336dbfe6975508f16dd698808}
+      \strng{authorbibnamehash}{c298fb5336dbfe6975508f16dd698808}
+      \strng{authornamehash}{f6d2a4faf9ff3970e7a4ac7747688222}
+      \strng{authorfullhash}{c298fb5336dbfe6975508f16dd698808}
+      \strng{authorfullhashraw}{c298fb5336dbfe6975508f16dd698808}
+      \field{sortinit}{D}
+      \field{sortinithash}{6f385f66841fb5e82009dc833c761848}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Adaptive home energy management to self-motivated user preferences via iterative LLM-augmented reinforcement learning}
+      \field{volume}{415}
+      \field{year}{2026}
+      \field{pages}{127976}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2026.127976
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261926006288
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261926006288
+      \endverb
+      \keyw{User preferences,Home energy management,Reinforcement learning,Large language model,Multi-agent system}
+    \endentry
+    \entry{IDOMAR2026100249}{article}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=87de2991d34b10b0e33a9ccb7763277d}{%
+           family={{Id Omar}},
+           familyi={I\bibinitperiod},
+           given={Nour-eddine},
+           giveni={N\bibinithyphendelim e\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9064a992d0f8569f5fe7b0ea2242481a}{%
+           family={{Le-Agopyan}},
+           familyi={L\bibinitperiod},
+           given={Alexandre},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=f89ba80e2391a9d6c59242c2ba654aa5}{%
+           family={Sossan},
+           familyi={S\bibinitperiod},
+           given={Fabrizio},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{205939e6708840a29216b619eae95b9d}
+      \strng{fullhash}{205939e6708840a29216b619eae95b9d}
+      \strng{fullhashraw}{205939e6708840a29216b619eae95b9d}
+      \strng{bibnamehash}{205939e6708840a29216b619eae95b9d}
+      \strng{authorbibnamehash}{205939e6708840a29216b619eae95b9d}
+      \strng{authornamehash}{205939e6708840a29216b619eae95b9d}
+      \strng{authorfullhash}{205939e6708840a29216b619eae95b9d}
+      \strng{authorfullhashraw}{205939e6708840a29216b619eae95b9d}
+      \field{sortinit}{I}
+      \field{sortinithash}{8d291c51ee89b6cd86bf5379f0b151d8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{2666-9552}
+      \field{journaltitle}{Smart Energy}
+      \field{title}{Control and scheduling of behind-the-meter battery energy storage systems for stacked grid and building services}
+      \field{volume}{22}
+      \field{year}{2026}
+      \field{pages}{100249}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.segy.2026.100249
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S2666955226000249
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S2666955226000249
+      \endverb
+      \keyw{Battery energy storage,Balancing power,Battery multi-tasking,Behind-the-meter BESS,Smart buildings,Optimization}
+    \endentry
+    \entry{JIN20171583}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=0,uniquepart=base,hash=25d35f1e3db69ef117155be8b0774e3c}{%
+           family={Jin},
+           familyi={J\bibinitperiod},
+           given={Xin},
+           giveni={X\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9ad48702d2e0afc9f7b4435b1a55082f}{%
+           family={Baker},
+           familyi={B\bibinitperiod},
+           given={Kyri},
+           giveni={K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=0c6b76b36eb5fbac44dfd1e408475d33}{%
+           family={Christensen},
+           familyi={C\bibinitperiod},
+           given={Dane},
+           giveni={D\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=a1c4b95eac5f95a590952a45ca7d6a1e}{%
+           family={Isley},
+           familyi={I\bibinitperiod},
+           given={Steven},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{fullhash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{fullhashraw}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{bibnamehash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{authorbibnamehash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{authornamehash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{authorfullhash}{72cdf182b2a0c44bf0b68eada6934c24}
+      \strng{authorfullhashraw}{72cdf182b2a0c44bf0b68eada6934c24}
+      \field{sortinit}{J}
+      \field{sortinithash}{b2f54a9081ace9966a7cb9413811edb4}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Foresee: A user-centric home energy management system for energy efficiency and demand response}
+      \field{volume}{205}
+      \field{year}{2017}
+      \field{pages}{1583\bibrangedash 1595}
+      \range{pages}{13}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2017.08.166
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261917311856
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261917311856
+      \endverb
+      \keyw{Home energy management system,Model predictive control,User preference,Smart grid,Energy efficiency,Demand response}
+    \endentry
+    \entry{9302935}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=377c1411d67087c07b23948e60f117b2}{%
+           family={Lee},
+           familyi={L\bibinitperiod},
+           given={Joash},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=5dfc0029cef360158276b0922e0c5670}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Wenbo},
+           giveni={W\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=f678efa4adc87cf8d6e229b46a03b8dd}{%
+           family={Niyato},
+           familyi={N\bibinitperiod},
+           given={Dusit},
+           giveni={D\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{d833205d6a7535e78e90793533dec59d}
+      \strng{fullhash}{d833205d6a7535e78e90793533dec59d}
+      \strng{fullhashraw}{d833205d6a7535e78e90793533dec59d}
+      \strng{bibnamehash}{d833205d6a7535e78e90793533dec59d}
+      \strng{authorbibnamehash}{d833205d6a7535e78e90793533dec59d}
+      \strng{authornamehash}{d833205d6a7535e78e90793533dec59d}
+      \strng{authorfullhash}{d833205d6a7535e78e90793533dec59d}
+      \strng{authorfullhashraw}{d833205d6a7535e78e90793533dec59d}
+      \field{sortinit}{L}
+      \field{sortinithash}{7c47d417cecb1f4bd38d1825c427a61a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2020 IEEE International Conference on Communications, Control, and Computing Technologies for Smart Grids (SmartGridComm)}
+      \field{title}{Demand-Side Scheduling Based on Multi-Agent Deep Actor-Critic Learning for Smart Grids}
+      \field{year}{2020}
+      \field{pages}{1\bibrangedash 6}
+      \range{pages}{6}
+      \verb{doi}
+      \verb 10.1109/SmartGridComm47815.2020.9302935
+      \endverb
+      \keyw{Home appliances,Task analysis,Markov processes,Smart grids,Pricing,Reinforcement learning,Microgrids,deep learning,multi-agent systems,task scheduling}
+    \endentry
+    \entry{10241311}{article}{}{}
+      \name{author}{6}{}{%
+        {{un=1,uniquepart=given,hash=11d36b06ec7e81295f3b1b02674db097}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Yuanzheng},
+           giveni={Y\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=a3b57d3bdc7391e8011007434a89713e}{%
+           family={Yu},
+           familyi={Y\bibinitperiod},
+           given={Chaofan},
+           giveni={C\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=181f09b6e6ed41238f81c55087fdb979}{%
+           family={Shahidehpour},
+           familyi={S\bibinitperiod},
+           given={Mohammad},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=30dbf96c2effbc0427e80f15e466813e}{%
+           family={Yang},
+           familyi={Y\bibinitperiod},
+           given={Tao},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=7e0e071b95e657f6d723e586a3c1a88f}{%
+           family={Zeng},
+           familyi={Z\bibinitperiod},
+           given={Zhigang},
+           giveni={Z\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=eab7435f373f8fc9d4085b33a2fda8fe}{%
+           family={Chai},
+           familyi={C\bibinitperiod},
+           given={Tianyou},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{23a48315ac1687e38afb02965b013d2f}
+      \strng{fullhash}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \strng{fullhashraw}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \strng{bibnamehash}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \strng{authorbibnamehash}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \strng{authornamehash}{23a48315ac1687e38afb02965b013d2f}
+      \strng{authorfullhash}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \strng{authorfullhashraw}{9b70f4d364feb6b8aeedc5f6e2284ea6}
+      \field{sortinit}{L}
+      \field{sortinithash}{7c47d417cecb1f4bd38d1825c427a61a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Proceedings of the IEEE}
+      \field{number}{9}
+      \field{title}{Deep Reinforcement Learning for Smart Grid Operations: Algorithms, Applications, and Prospects}
+      \field{volume}{111}
+      \field{year}{2023}
+      \field{pages}{1055\bibrangedash 1096}
+      \range{pages}{42}
+      \verb{doi}
+      \verb 10.1109/JPROC.2023.3303358
+      \endverb
+      \keyw{Smart grids,Reinforcement learning,Artificial intelligence,Surveys,Power system stability,Deep learning,Uncertainty,Renewable energy sources,Power markets,Power system control,Deep reinforcement learning,electricity market,operational control,optimal dispatch,smart grid}
+    \endentry
+    \entry{Liu2020572}{article}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=7f8cf6b70f1867ba639a0296b4634554}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Yuankun},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=ab3fee434c92de5e1aae44fef7287ec1}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Dongxia},
+           giveni={D\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=83630be0283f2fde6399caee6fe25b16}{%
+           family={Gooi},
+           familyi={G\bibinitperiod},
+           given={Hoay\bibnamedelima Beng},
+           giveni={H\bibinitperiod\bibinitdelim B\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{fullhash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{fullhashraw}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{bibnamehash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{authorbibnamehash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{authornamehash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{authorfullhash}{22c358d70e36f5a24fc224e7074fd881}
+      \strng{authorfullhashraw}{22c358d70e36f5a24fc224e7074fd881}
+      \field{sortinit}{L}
+      \field{sortinithash}{7c47d417cecb1f4bd38d1825c427a61a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{CSEE Journal of Power and Energy Systems}
+      \field{number}{3}
+      \field{title}{Optimization strategy based on deep reinforcement learning for home energy management}
+      \field{volume}{6}
+      \field{year}{2020}
+      \field{pages}{572\bibrangedash 582}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.17775/CSEEJPES.2019.02890
+      \endverb
+      \verb{urlraw}
+      \verb https://www.scopus.com/inward/record.uri?eid=2-s2.0-85091667722&doi=10.17775%2fCSEEJPES.2019.02890&partnerID=40&md5=3d8c97a3d6cc147be6625d761a08f8c1
+      \endverb
+      \verb{url}
+      \verb https://www.scopus.com/inward/record.uri?eid=2-s2.0-85091667722&doi=10.17775%2fCSEEJPES.2019.02890&partnerID=40&md5=3d8c97a3d6cc147be6625d761a08f8c1
+      \endverb
+    \endentry
+    \entry{MAKHADMEH2019109362}{article}{}{}
+      \name{author}{6}{}{%
+        {{un=0,uniquepart=base,hash=24503a3a52a1d75e46702a217ca4eef7}{%
+           family={Makhadmeh},
+           familyi={M\bibinitperiod},
+           given={Sharif\bibnamedelima Naser},
+           giveni={S\bibinitperiod\bibinitdelim N\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=6cdb5e7a9d652007462c244b3e29d706}{%
+           family={Khader},
+           familyi={K\bibinitperiod},
+           given={Ahamad\bibnamedelima Tajudin},
+           giveni={A\bibinitperiod\bibinitdelim T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=13dec97694c77c9a9a4628503922f7bb}{%
+           family={Al-Betar},
+           familyi={A\bibinithyphendelim B\bibinitperiod},
+           given={Mohammed\bibnamedelima Azmi},
+           giveni={M\bibinitperiod\bibinitdelim A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=8cc7b0890ecb0dcd81b332154dcb9a23}{%
+           family={Naim},
+           familyi={N\bibinitperiod},
+           given={Syibrah},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=fb26139b869efa7945a9a62c22536627}{%
+           family={Abasi},
+           familyi={A\bibinitperiod},
+           given={Ammar\bibnamedelima Kamal},
+           giveni={A\bibinitperiod\bibinitdelim K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=321a049d881d93e7920189cfb1a4660f}{%
+           family={Alyasseri},
+           familyi={A\bibinitperiod},
+           given={Zaid\bibnamedelimb Abdi\bibnamedelima Alkareem},
+           giveni={Z\bibinitperiod\bibinitdelim A\bibinitperiod\bibinitdelim A\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{364d399dcdfa3f978649fc3653f7a1d0}
+      \strng{fullhash}{8dad5c7308f8921655672bff2042807c}
+      \strng{fullhashraw}{8dad5c7308f8921655672bff2042807c}
+      \strng{bibnamehash}{8dad5c7308f8921655672bff2042807c}
+      \strng{authorbibnamehash}{8dad5c7308f8921655672bff2042807c}
+      \strng{authornamehash}{364d399dcdfa3f978649fc3653f7a1d0}
+      \strng{authorfullhash}{8dad5c7308f8921655672bff2042807c}
+      \strng{authorfullhashraw}{8dad5c7308f8921655672bff2042807c}
+      \field{sortinit}{M}
+      \field{sortinithash}{4625c616857f13d17ce56f7d4f97d451}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{1364-0321}
+      \field{journaltitle}{Renewable and Sustainable Energy Reviews}
+      \field{title}{Optimization methods for power scheduling problems in smart home: Survey}
+      \field{volume}{115}
+      \field{year}{2019}
+      \field{pages}{109362}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.rser.2019.109362
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032119305702
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032119305702
+      \endverb
+      \keyw{Smart grid,Smart home,Power scheduling problem in smart home,Optimization}
+    \endentry
+    \entry{6652143}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=4248195b610cfd3f94079355a07b3efa}{%
+           family={Manjunatha},
+           familyi={M\bibinitperiod},
+           given={Aravind\bibnamedelima P.},
+           giveni={A\bibinitperiod\bibinitdelim P\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=50029ab004b7976578a973efe1d52b75}{%
+           family={Korba},
+           familyi={K\bibinitperiod},
+           given={Petr},
+           giveni={P\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=dbd6cc5d836267ab66f21b63840ed91c}{%
+           family={Stauch},
+           familyi={S\bibinitperiod},
+           given={Vanessa},
+           giveni={V\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{fullhash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{fullhashraw}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{bibnamehash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{authorbibnamehash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{authornamehash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{authorfullhash}{2294310843b838f6deeb3d6e75c4586b}
+      \strng{authorfullhashraw}{2294310843b838f6deeb3d6e75c4586b}
+      \field{sortinit}{M}
+      \field{sortinithash}{4625c616857f13d17ce56f7d4f97d451}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2013 IEEE Grenoble Conference}
+      \field{title}{Integration of large battery storage system into distribution grid with renewable generation}
+      \field{year}{2013}
+      \field{pages}{1\bibrangedash 6}
+      \range{pages}{6}
+      \verb{doi}
+      \verb 10.1109/PTC.2013.6652143
+      \endverb
+      \keyw{Batteries,Predictive models,Load modeling,Meteorology,Power systems,Real-time systems,Optimization,Battery energy storage systems,Integration of renewable energy sources,Model-based predictive control,Smart grids,weather forecast}
+    \endentry
+    \entry{MOCANU20193698}{article}{}{}
+      \name{author}{7}{}{%
+        {{un=1,uniquepart=given,hash=05f173e4a381c7001f40e858b8fd8143}{%
+           family={Mocanu},
+           familyi={M\bibinitperiod},
+           given={Elena},
+           giveni={E\bibinitperiod},
+           givenun=1}}%
+        {{un=1,uniquepart=given,hash=74fdd3b656fcca3f8900696a23aee55c}{%
+           family={Mocanu},
+           familyi={M\bibinitperiod},
+           given={Decebal\bibnamedelima Constantin},
+           giveni={D\bibinitperiod\bibinitdelim C\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=9017d7b33f416e377bb53909ecc5639d}{%
+           family={Nguyen},
+           familyi={N\bibinitperiod},
+           given={Phuong\bibnamedelima H.},
+           giveni={P\bibinitperiod\bibinitdelim H\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=85e45aafbde0191b2e141942bbc0ff43}{%
+           family={Liotta},
+           familyi={L\bibinitperiod},
+           given={Antonio},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=f92ff45ba83a9b6175476a92f540344a}{%
+           family={Webber},
+           familyi={W\bibinitperiod},
+           given={Michael\bibnamedelima E.},
+           giveni={M\bibinitperiod\bibinitdelim E\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9918b657837dac7f3d816f7951dc3568}{%
+           family={Gibescu},
+           familyi={G\bibinitperiod},
+           given={Madeleine},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=6fde641dd44e0e9a1c36d36b467e8974}{%
+           family={Slootweg},
+           familyi={S\bibinitperiod},
+           given={J.\bibnamedelimi G.},
+           giveni={J\bibinitperiod\bibinitdelim G\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{2c12d11e313427d3ced832581c792b73}
+      \strng{fullhash}{971c69b67feb10a94b599da7f4ae0639}
+      \strng{fullhashraw}{971c69b67feb10a94b599da7f4ae0639}
+      \strng{bibnamehash}{971c69b67feb10a94b599da7f4ae0639}
+      \strng{authorbibnamehash}{971c69b67feb10a94b599da7f4ae0639}
+      \strng{authornamehash}{2c12d11e313427d3ced832581c792b73}
+      \strng{authorfullhash}{971c69b67feb10a94b599da7f4ae0639}
+      \strng{authorfullhashraw}{971c69b67feb10a94b599da7f4ae0639}
+      \field{sortinit}{M}
+      \field{sortinithash}{4625c616857f13d17ce56f7d4f97d451}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Smart Grid}
+      \field{number}{4}
+      \field{title}{On-Line Building Energy Optimization Using Deep Reinforcement Learning}
+      \field{volume}{10}
+      \field{year}{2019}
+      \field{pages}{3698\bibrangedash 3708}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.1109/TSG.2018.2834219
+      \endverb
+      \keyw{Buildings,Machine learning,Energy consumption,Optimization,Smart grids,Deep reinforcement learning,demand response,deep neural networks,strategic optimization}
+    \endentry
+    \entry{MUELLER2025126465}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=0,uniquepart=base,hash=08ce8685310410fe66c1cf584e72d4a7}{%
+           family={Mueller},
+           familyi={M\bibinitperiod},
+           given={Felicitas},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=cb521ef94e0a2042b307d09f7b9fd845}{%
+           family={{de Jongh}},
+           familyi={d\bibinitperiod},
+           given={Steven},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=094ba7d45af45c97db8e81932f8f80a0}{%
+           family={Canizares},
+           familyi={C\bibinitperiod},
+           given={Claudio\bibnamedelima A.},
+           giveni={C\bibinitperiod\bibinitdelim A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=e7f422ed423b8236fbfcf5bf273489df}{%
+           family={Leibfried},
+           familyi={L\bibinitperiod},
+           given={Thomas},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=87257f475a3c9e5b10ef86f0ba5a2218}{%
+           family={Bhattacharya},
+           familyi={B\bibinitperiod},
+           given={Kankar},
+           giveni={K\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{530fc429afcaf1bde4758d13f0eecbb6}
+      \strng{fullhash}{5ba3039b8d426146fb8b59f4285b2222}
+      \strng{fullhashraw}{5ba3039b8d426146fb8b59f4285b2222}
+      \strng{bibnamehash}{5ba3039b8d426146fb8b59f4285b2222}
+      \strng{authorbibnamehash}{5ba3039b8d426146fb8b59f4285b2222}
+      \strng{authornamehash}{530fc429afcaf1bde4758d13f0eecbb6}
+      \strng{authorfullhash}{5ba3039b8d426146fb8b59f4285b2222}
+      \strng{authorfullhashraw}{5ba3039b8d426146fb8b59f4285b2222}
+      \field{sortinit}{M}
+      \field{sortinithash}{4625c616857f13d17ce56f7d4f97d451}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Comparison of machine learning and MPC methods for control of home battery storage systems in distribution grids}
+      \field{volume}{400}
+      \field{year}{2025}
+      \field{pages}{126465}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2025.126465
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S030626192501195X
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S030626192501195X
+      \endverb
+      \keyw{Active distribution networks,Home energy management system,Imitation learning,Model predictive control,Neural networks,Optimal storage scheduling,Reinforcement learning}
+    \endentry
+    \entry{PARK2022120111}{article}{}{}
+      \name{author}{2}{}{%
+        {{un=0,uniquepart=base,hash=9f12bc2553cfcb025ba1c3c5ec66c585}{%
+           family={Park},
+           familyi={P\bibinitperiod},
+           given={Keonwoo},
+           giveni={K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=7acf019bcb348417235f5fc0d452fd82}{%
+           family={Moon},
+           familyi={M\bibinitperiod},
+           given={Ilkyeong},
+           giveni={I\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{fullhash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{fullhashraw}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{bibnamehash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{authorbibnamehash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{authornamehash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{authorfullhash}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \strng{authorfullhashraw}{5a3a4068909e3c44bcb4572b75b0bcf5}
+      \field{sortinit}{P}
+      \field{sortinithash}{ff3bcf24f47321b42cb156c2cc8a8422}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Multi-agent deep reinforcement learning approach for EV charging scheduling in a smart grid}
+      \field{volume}{328}
+      \field{year}{2022}
+      \field{pages}{120111}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2022.120111
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S030626192201368X
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S030626192201368X
+      \endverb
+      \keyw{Electric vehicles,Smart grid,Scheduling,Multi-agent deep reinforcement learning}
+    \endentry
+    \entry{9960416}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=cdbf8afffba972fd74b6a86623779023}{%
+           family={Quakernack},
+           familyi={Q\bibinitperiod},
+           given={Lars},
+           giveni={L\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=db746da7131ffeba11546032bedfc820}{%
+           family={Kelker},
+           familyi={K\bibinitperiod},
+           given={Michael},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=8792ef61b1afe7cce0d79623d761b52f}{%
+           family={Haubrock},
+           familyi={H\bibinitperiod},
+           given={Jens},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{fullhash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{fullhashraw}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{bibnamehash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{authorbibnamehash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{authornamehash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{authorfullhash}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \strng{authorfullhashraw}{cd3b4ef75f610a69b3a166e0d3288ca8}
+      \field{sortinit}{Q}
+      \field{sortinithash}{ce69a400a872ddd02ee7fdb3b38c6abd}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2022 IEEE PES Innovative Smart Grid Technologies Conference Europe (ISGT-Europe)}
+      \field{title}{Deep Reinforcement Learning For Autonomous Control Of Low Voltage Grids With Focus On Grid Stability In Future Power Grids}
+      \field{year}{2022}
+      \field{pages}{1\bibrangedash 5}
+      \range{pages}{5}
+      \verb{doi}
+      \verb 10.1109/ISGT-Europe54678.2022.9960416
+      \endverb
+      \keyw{Low voltage,Power measurement,Power system stability,Transformers,Stability analysis,Data models,Batteries,reinforcement learning,low-voltage,grid stability,autonomous control}
+    \endentry
+    \entry{RAHIM2016452}{article}{}{}
+      \name{author}{7}{}{%
+        {{un=0,uniquepart=base,hash=ae98389cdaac93418f6143b169e86de9}{%
+           family={Rahim},
+           familyi={R\bibinitperiod},
+           given={Sahar},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=e175e0937024b1070f005b754647b028}{%
+           family={Javaid},
+           familyi={J\bibinitperiod},
+           given={Nadeem},
+           giveni={N\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=93191ac2f9cd01c8d42b2050c49d5dfd}{%
+           family={Ahmad},
+           familyi={A\bibinitperiod},
+           given={Ashfaq},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9b6ff03a44b3c9c2d1bcf45dfe9fc6de}{%
+           family={Khan},
+           familyi={K\bibinitperiod},
+           given={Shahid\bibnamedelima Ahmed},
+           giveni={S\bibinitperiod\bibinitdelim A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=540f1cf3a9d017b0fcd732ada3e88dcf}{%
+           family={Khan},
+           familyi={K\bibinitperiod},
+           given={Zahoor\bibnamedelima Ali},
+           giveni={Z\bibinitperiod\bibinitdelim A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=30568608a0fe89c3385eeab58a4f61d5}{%
+           family={Alrajeh},
+           familyi={A\bibinitperiod},
+           given={Nabil},
+           giveni={N\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9314b3b2cbe16590406f9cf2be975117}{%
+           family={Qasim},
+           familyi={Q\bibinitperiod},
+           given={Umar},
+           giveni={U\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{76d719b4d7c0be413bcf03b44b3a1215}
+      \strng{fullhash}{172c652acd071811887eebb52225fa80}
+      \strng{fullhashraw}{172c652acd071811887eebb52225fa80}
+      \strng{bibnamehash}{172c652acd071811887eebb52225fa80}
+      \strng{authorbibnamehash}{172c652acd071811887eebb52225fa80}
+      \strng{authornamehash}{76d719b4d7c0be413bcf03b44b3a1215}
+      \strng{authorfullhash}{172c652acd071811887eebb52225fa80}
+      \strng{authorfullhashraw}{172c652acd071811887eebb52225fa80}
+      \field{sortinit}{R}
+      \field{sortinithash}{5e1c39a9d46ffb6bebd8f801023a9486}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0378-7788}
+      \field{journaltitle}{Energy and Buildings}
+      \field{title}{Exploiting heuristic algorithms to efficiently utilize energy management controllers with renewable energy sources}
+      \field{volume}{129}
+      \field{year}{2016}
+      \field{pages}{452\bibrangedash 470}
+      \range{pages}{19}
+      \verb{doi}
+      \verb 10.1016/j.enbuild.2016.08.008
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0378778816306867
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0378778816306867
+      \endverb
+      \keyw{Smart grid,Demand side management,Multiple knapsack problems,Heuristic techniques,Time of use tariff,Inclined block rate,Renewable energy sources}
+    \endentry
+    \entry{SATPATHY2026127109}{article}{}{}
+      \name{author}{2}{}{%
+        {{un=0,uniquepart=base,hash=65ebbae6a0b9feae7d8c2ddb15177567}{%
+           family={Satpathy},
+           familyi={S\bibinitperiod},
+           given={Priya\bibnamedelima Ranjan},
+           giveni={P\bibinitperiod\bibinitdelim R\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=580982a32dca4a583d4eea237f96be3b}{%
+           family={Ramachandaramurthy},
+           familyi={R\bibinitperiod},
+           given={Vigna\bibnamedelima Kumaran},
+           giveni={V\bibinitperiod\bibinitdelim K\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{fullhash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{fullhashraw}{03996ab7048866ac7152be7ba18811b4}
+      \strng{bibnamehash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{authorbibnamehash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{authornamehash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{authorfullhash}{03996ab7048866ac7152be7ba18811b4}
+      \strng{authorfullhashraw}{03996ab7048866ac7152be7ba18811b4}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Artificial intelligence and machine learning for distributed energy resource management systems: Applications, frameworks, and future directions}
+      \field{volume}{403}
+      \field{year}{2026}
+      \field{pages}{127109}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2025.127109
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261925018392
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261925018392
+      \endverb
+      \keyw{Distributed energy resource,Artificial intelligence,Machine learning,Optimization,Forecasting,Distributed energy resource management system}
+    \endentry
+    \entry{10012434}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=0,uniquepart=base,hash=6c983fcca201356815722728d487abfa}{%
+           family={Seal},
+           familyi={S\bibinitperiod},
+           given={Sayani},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=3b51f3c2a3662d3aa388940a8080bce1}{%
+           family={Boulet},
+           familyi={B\bibinitperiod},
+           given={Benoit},
+           giveni={B\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=cc275bf37047c7bbd7e9eea74d6f6114}{%
+           family={Dehkordi},
+           familyi={D\bibinitperiod},
+           given={Vahid\bibnamedelima R.},
+           giveni={V\bibinitperiod\bibinitdelim R\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=ddddc9659667c3b2769077c1b38f13bc}{%
+           family={Bouffard},
+           familyi={B\bibinitperiod},
+           given={Francois},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=1c0150f261c2d8fb925901f543b18154}{%
+           family={Joos},
+           familyi={J\bibinitperiod},
+           given={Geza},
+           giveni={G\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{1e4a635e25b31a7e1371c7589b0d15a0}
+      \strng{fullhash}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \strng{fullhashraw}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \strng{bibnamehash}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \strng{authorbibnamehash}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \strng{authornamehash}{1e4a635e25b31a7e1371c7589b0d15a0}
+      \strng{authorfullhash}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \strng{authorfullhashraw}{eaab8d653f9d1aea377f8fd5cb1b5246}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Sustainable Energy}
+      \field{number}{3}
+      \field{title}{Centralized MPC for Home Energy Management With EV as Mobile Energy Storage Unit}
+      \field{volume}{14}
+      \field{year}{2023}
+      \field{pages}{1425\bibrangedash 1435}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.1109/TSTE.2023.3235703
+      \endverb
+      \keyw{State of charge,Batteries,Optimization,Heating systems,Schedules,Mathematical models,Heat pumps,Electric vehicle,model predictive control,monte-carlo uncertainty analysis,residential thermal comfort and energy management,stationary and mobile energy storage unit,vehicle-to-home communication}
+    \endentry
+    \entry{SHAKERI2017154}{article}{}{}
+      \name{author}{8}{}{%
+        {{un=0,uniquepart=base,hash=91ecbf88eb8f3b81edb72475284f7fb5}{%
+           family={Shakeri},
+           familyi={S\bibinitperiod},
+           given={Mohammad},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=d2db7ee99ac21e2a4935b59d1263e751}{%
+           family={Shayestegan},
+           familyi={S\bibinitperiod},
+           given={Mohsen},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=902e27fea9d9666059c59a2570eae785}{%
+           family={Abunima},
+           familyi={A\bibinitperiod},
+           given={Hamza},
+           giveni={H\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=f0cab1f2b0313770b7e6e42d498eb15a}{%
+           family={Reza},
+           familyi={R\bibinitperiod},
+           given={S.\bibnamedelimi M.\bibnamedelimi Salim},
+           giveni={S\bibinitperiod\bibinitdelim M\bibinitperiod\bibinitdelim S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=3ab847f9d3dfcfbe938f84cbfd44d50a}{%
+           family={Akhtaruzzaman},
+           familyi={A\bibinitperiod},
+           given={M.},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=b11b9f52096e30f224254da819327d6a}{%
+           family={Alamoud},
+           familyi={A\bibinitperiod},
+           given={A.\bibnamedelimi R.\bibnamedelimi M.},
+           giveni={A\bibinitperiod\bibinitdelim R\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=2eec3b8291be5a0fc5113b77d4cb065b}{%
+           family={Sopian},
+           familyi={S\bibinitperiod},
+           given={Kamaruzzaman},
+           giveni={K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=d5e28bef22b8985f4374b9e7ca609098}{%
+           family={Amin},
+           familyi={A\bibinitperiod},
+           given={Nowshad},
+           giveni={N\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{5d1c5ea3969f02dfff7dca5a6f3d5922}
+      \strng{fullhash}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \strng{fullhashraw}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \strng{bibnamehash}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \strng{authorbibnamehash}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \strng{authornamehash}{5d1c5ea3969f02dfff7dca5a6f3d5922}
+      \strng{authorfullhash}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \strng{authorfullhashraw}{8b32166c210cc3ad8e4b6f9fc0469993}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0378-7788}
+      \field{journaltitle}{Energy and Buildings}
+      \field{title}{An intelligent system architecture in home energy management systems (HEMS) for efficient demand response in smart grid}
+      \field{volume}{138}
+      \field{year}{2017}
+      \field{pages}{154\bibrangedash 164}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.1016/j.enbuild.2016.12.026
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0378778816318369
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0378778816318369
+      \endverb
+      \keyw{Power distribution,Smart grid,Demand response,Home energy management systems (HEMS),Smart appliance}
+    \endentry
+    \entry{9733029}{article}{}{}
+      \name{author}{2}{}{%
+        {{un=0,uniquepart=base,hash=14dd0089472217b2efde18a63bb1d85d}{%
+           family={Shuvo},
+           familyi={S\bibinitperiod},
+           given={Salman\bibnamedelima Sadiq},
+           giveni={S\bibinitperiod\bibinitdelim S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=4c947bcf8cc343fbd5491a9fc44bc987}{%
+           family={Yilmaz},
+           familyi={Y\bibinitperiod},
+           given={Yasin},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{fullhash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{fullhashraw}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{bibnamehash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{authorbibnamehash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{authornamehash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{authorfullhash}{71d036549c9bdd9da39053dfc0cc4765}
+      \strng{authorfullhashraw}{71d036549c9bdd9da39053dfc0cc4765}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Smart Grid}
+      \field{number}{4}
+      \field{title}{Home Energy Recommendation System (HERS): A Deep Reinforcement Learning Method Based on Residents' Feedback and Activity}
+      \field{volume}{13}
+      \field{year}{2022}
+      \field{pages}{2812\bibrangedash 2821}
+      \range{pages}{10}
+      \verb{doi}
+      \verb 10.1109/TSG.2022.3158814
+      \endverb
+      \keyw{Smart homes,Costs,Smart devices,Real-time systems,Pricing,Batteries,Activity recognition,Home energy management,demand side management,customer comfort,residents' activity label,deep reinforcement learning,artificial intelligence}
+    \endentry
+    \entry{8385345}{inproceedings}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=909a2c61a3671ae6d0c676bf801fad20}{%
+           family={Sisodiya},
+           familyi={S\bibinitperiod},
+           given={Sukhlal},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=727e0ab4bd8a635677233c647b7e1d34}{%
+           family={Kumbhar},
+           familyi={K\bibinitperiod},
+           given={G.\bibnamedelimi B.},
+           giveni={G\bibinitperiod\bibinitdelim B\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=fee7297f37e2cb3aff66c7704fd2aad2}{%
+           family={Alam},
+           familyi={A\bibinitperiod},
+           given={M.\bibnamedelimi N.},
+           giveni={M\bibinitperiod\bibinitdelim N\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{fullhash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{fullhashraw}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{bibnamehash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{authorbibnamehash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{authornamehash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{authorfullhash}{b1dc54f492f13da59712e1e1a9f2880f}
+      \strng{authorfullhashraw}{b1dc54f492f13da59712e1e1a9f2880f}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2018 IEEMA Engineer Infinite Conference (eTechNxT)}
+      \field{title}{A home energy management incorporating energy storage systems with utility under demand response using PSO}
+      \field{year}{2018}
+      \field{pages}{1\bibrangedash 6}
+      \range{pages}{6}
+      \verb{doi}
+      \verb 10.1109/ETECHNXT.2018.8385345
+      \endverb
+      \keyw{Water heating,Resistance heating,Energy storage,Load management,Uninterruptible power systems,Heat pumps,Home energy management system,demand response,energy storage systems,particle swarm optimization,demand-side management,demand-side resource}
+    \endentry
+    \entry{9336258}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=1,uniquepart=given,hash=55f210233ac686af68eba11a97bd84e2}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Lu},
+           giveni={L\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=0bba9206f2664cfee4c6eca3484f393f}{%
+           family={Qin},
+           familyi={Q\bibinitperiod},
+           given={Zian},
+           giveni={Z\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=f2aa88c2987fff591882ba1a41a630b9}{%
+           family={Slangen},
+           familyi={S\bibinitperiod},
+           given={Tim},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=623cb0055e2c89e6785acb699a23b035}{%
+           family={Bauer},
+           familyi={B\bibinitperiod},
+           given={Pavol},
+           giveni={P\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=c148be1643910f641a9ac7a8cd0dd89f}{%
+           family={{van Wijk}},
+           familyi={v\bibinitperiod},
+           given={Thijs},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{3752792493b58c489e6b8ef2dca41ee4}
+      \strng{fullhash}{d8ffe60ab5db21d76be9150555da4a02}
+      \strng{fullhashraw}{d8ffe60ab5db21d76be9150555da4a02}
+      \strng{bibnamehash}{d8ffe60ab5db21d76be9150555da4a02}
+      \strng{authorbibnamehash}{d8ffe60ab5db21d76be9150555da4a02}
+      \strng{authornamehash}{3752792493b58c489e6b8ef2dca41ee4}
+      \strng{authorfullhash}{d8ffe60ab5db21d76be9150555da4a02}
+      \strng{authorfullhashraw}{d8ffe60ab5db21d76be9150555da4a02}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Open Journal of Power Electronics}
+      \field{title}{Grid Impact of Electric Vehicle Fast Charging Stations: Trends, Standards, Issues and Mitigation Measures - An Overview}
+      \field{volume}{2}
+      \field{year}{2021}
+      \field{pages}{56\bibrangedash 74}
+      \range{pages}{19}
+      \verb{doi}
+      \verb 10.1109/OJPEL.2021.3054601
+      \endverb
+      \keyw{Batteries,Climate change,Power quality,Market research,Power electronics,Harmonic analysis,Charging stations,electric vehicles,power quality,power system stability}
+    \endentry
+    \entry{WANG2024123414}{article}{}{}
+      \name{author}{5}{}{%
+        {{un=1,uniquepart=given,hash=ccc99b37ef55238f9a5c0bd1b9cdc16a}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Zixuan},
+           giveni={Z\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=9709b2323737c00f5fecdcd701fc99aa}{%
+           family={Xiao},
+           familyi={X\bibinitperiod},
+           given={Fu},
+           giveni={F\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=7436a17183abf90c7edc2a41da5ade01}{%
+           family={Ran},
+           familyi={R\bibinitperiod},
+           given={Yi},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=d51e5d3345273f6078578d49948bb52c}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Yanxue},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9eda43a644030ac3eceaf837cb2489ac}{%
+           family={Xu},
+           familyi={X\bibinitperiod},
+           given={Yang},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{9cb68c2e4c1e1dd6987206b571de4053}
+      \strng{fullhash}{f31306c8f333a349adf0a8b3ef2941fb}
+      \strng{fullhashraw}{f31306c8f333a349adf0a8b3ef2941fb}
+      \strng{bibnamehash}{f31306c8f333a349adf0a8b3ef2941fb}
+      \strng{authorbibnamehash}{f31306c8f333a349adf0a8b3ef2941fb}
+      \strng{authornamehash}{9cb68c2e4c1e1dd6987206b571de4053}
+      \strng{authorfullhash}{f31306c8f333a349adf0a8b3ef2941fb}
+      \strng{authorfullhashraw}{f31306c8f333a349adf0a8b3ef2941fb}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Scalable energy management approach of residential hybrid energy system using multi-agent deep reinforcement learning}
+      \field{volume}{367}
+      \field{year}{2024}
+      \field{pages}{123414}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2024.123414
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924007979
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924007979
+      \endverb
+      \keyw{Multi-agent reinforcement learning,Schedule optimization,Multi-stage,Thermal comfort,Energy cost}
+    \endentry
+    \entry{WU2024123020}{article}{}{}
+      \name{author}{7}{}{%
+        {{un=0,uniquepart=base,hash=37239a7c7b3f0425c244964f1aae4343}{%
+           family={Wu},
+           familyi={W\bibinitperiod},
+           given={Jingxuan},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=8b9efc9e49a85713fa377cb8bb9d7e5a}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Shuting},
+           giveni={S\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=4d939d790765b6419e91fe7606a4e0d0}{%
+           family={Fu},
+           familyi={F\bibinitperiod},
+           given={Aihui},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=32a80d7ba40160589047cc39eeb06901}{%
+           family={Cvetkovic},
+           familyi={C\bibinitperiod},
+           given={Milos},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=40ba765ff796ab928139f070742f6205}{%
+           family={Palensky},
+           familyi={P\bibinitperiod},
+           given={Peter},
+           giveni={P\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=3db9c04daff2bd073d6874cb85f9d168}{%
+           family={Vasquez},
+           familyi={V\bibinitperiod},
+           given={Juan\bibnamedelima C.},
+           giveni={J\bibinitperiod\bibinitdelim C\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=e39c9dd43204dc2a347b298fe3c922ba}{%
+           family={Guerrero},
+           familyi={G\bibinitperiod},
+           given={Josep\bibnamedelima M.},
+           giveni={J\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{c3e4e35ccc64d9ba87ac5337f9c1dec9}
+      \strng{fullhash}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \strng{fullhashraw}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \strng{bibnamehash}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \strng{authorbibnamehash}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \strng{authornamehash}{c3e4e35ccc64d9ba87ac5337f9c1dec9}
+      \strng{authorfullhash}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \strng{authorfullhashraw}{0bbb779ba0b97c83ccc78939de2c9b65}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Hierarchical online energy management for residential microgrids with Hybrid hydrogen--electricity Storage System}
+      \field{volume}{363}
+      \field{year}{2024}
+      \field{pages}{123020}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2024.123020
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924004033
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924004033
+      \endverb
+      \keyw{Energy management,Fuzzy logic,Hybrid storage system,Microgrid}
+    \endentry
+    \entry{8981876}{article}{}{}
+      \name{author}{6}{}{%
+        {{un=1,uniquepart=given,hash=969fd1158d2138fb1cf939d32f447be6}{%
+           family={Xu},
+           familyi={X\bibinitperiod},
+           given={Xu},
+           giveni={X\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=d6734fb57692284131b7d0ed045db323}{%
+           family={Jia},
+           familyi={J\bibinitperiod},
+           given={Youwei},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=86acdbbb888fb1622ad5366d9d67dc8f}{%
+           family={Xu},
+           familyi={X\bibinitperiod},
+           given={Yan},
+           giveni={Y\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=8d8722b3667b4b72d3c1d3a946567e65}{%
+           family={Xu},
+           familyi={X\bibinitperiod},
+           given={Zhao},
+           giveni={Z\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=a0469a50362bd5131e038754f34e3e7a}{%
+           family={Chai},
+           familyi={C\bibinitperiod},
+           given={Songjian},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=dbffc620cbc22caf4435018e11fdbd06}{%
+           family={Lai},
+           familyi={L\bibinitperiod},
+           given={Chun\bibnamedelima Sing},
+           giveni={C\bibinitperiod\bibinitdelim S\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{0f9c27498de120bef07c34ff7c279f35}
+      \strng{fullhash}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \strng{fullhashraw}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \strng{bibnamehash}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \strng{authorbibnamehash}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \strng{authornamehash}{0f9c27498de120bef07c34ff7c279f35}
+      \strng{authorfullhash}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \strng{authorfullhashraw}{f198d07c4e48c411d96dd99a85a8ddd6}
+      \field{sortinit}{X}
+      \field{sortinithash}{1965c258adceecf23ce3d67b05113442}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Smart Grid}
+      \field{number}{4}
+      \field{title}{A Multi-Agent Reinforcement Learning-Based Data-Driven Method for Home Energy Management}
+      \field{volume}{11}
+      \field{year}{2020}
+      \field{pages}{3201\bibrangedash 3211}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.1109/TSG.2020.2971427
+      \endverb
+      \keyw{Home appliances,Energy consumption,Energy management,Reinforcement learning,Decision making,Uncertainty,Optimization,data-driven method,home energy management,finite Markov decision process,neural network,Q-learning algorithm,demand response}
+    \endentry
+    \entry{7450180}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=1,uniquepart=given,hash=b7a01953210b558b4146902bc09d3564}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Dong},
+           giveni={D\bibinitperiod},
+           givenun=1}}%
+        {{un=1,uniquepart=given,hash=5af48dbe5bf1b594ed3c643bbc867204}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Shuhui},
+           giveni={S\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=7e4290bad319dc9b96a098c8eee04fc8}{%
+           family={Sun},
+           familyi={S\bibinitperiod},
+           given={Min},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=12c0efb8c883b8641d5381f1a4dc1dbb}{%
+           family={O'Neill},
+           familyi={O\bibinitperiod},
+           given={Zheng},
+           giveni={Z\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{543494e666a9c768833de440b0d178ae}
+      \strng{fullhash}{543494e666a9c768833de440b0d178ae}
+      \strng{fullhashraw}{543494e666a9c768833de440b0d178ae}
+      \strng{bibnamehash}{543494e666a9c768833de440b0d178ae}
+      \strng{authorbibnamehash}{543494e666a9c768833de440b0d178ae}
+      \strng{authornamehash}{543494e666a9c768833de440b0d178ae}
+      \strng{authorfullhash}{543494e666a9c768833de440b0d178ae}
+      \strng{authorfullhashraw}{543494e666a9c768833de440b0d178ae}
+      \field{sortinit}{Z}
+      \field{sortinithash}{96892c0b0a36bb8557c40c49813d48b3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Smart Grid}
+      \field{number}{4}
+      \field{title}{An Optimal and Learning-Based Demand Response and Home Energy Management System}
+      \field{volume}{7}
+      \field{year}{2016}
+      \field{pages}{1790\bibrangedash 1801}
+      \range{pages}{12}
+      \verb{doi}
+      \verb 10.1109/TSG.2016.2552169
+      \endverb
+      \keyw{Home appliances,Energy consumption,Load management,Neural networks,Load modeling,Demand response,Smart grids,Optimization,dynamic electricity price,building energy consumption}
+    \endentry
+    \entry{ZHANG2024124155}{article}{}{}
+      \name{author}{8}{}{%
+        {{un=1,uniquepart=given,hash=2e2ff87f9b12042fe800eec629e9053d}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Yiwen},
+           giveni={Y\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=73145bead020f0b81dd955a88b9f031b}{%
+           family={Lin},
+           familyi={L\bibinitperiod},
+           given={Rui},
+           giveni={R\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=37f95655e6ee418f6bd3987b77c62d8f}{%
+           family={Mei},
+           familyi={M\bibinitperiod},
+           given={Zhen},
+           giveni={Z\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=bf96ca02e7e240221fb67b3950343d88}{%
+           family={Lyu},
+           familyi={L\bibinitperiod},
+           given={Minghao},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=86c65960ba44281c15b4c8da12670403}{%
+           family={Jiang},
+           familyi={J\bibinitperiod},
+           given={Huaiguang},
+           giveni={H\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=68da067b66af9e3dbf1b6fd6696eec9a}{%
+           family={Xue},
+           familyi={X\bibinitperiod},
+           given={Ying},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=c085572f860d99d03a37c331ee13ff68}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Jun},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=25f432fef8dd26d510c4831d9eccea73}{%
+           family={Gao},
+           familyi={G\bibinitperiod},
+           given={David\bibnamedelima Wenzhong},
+           giveni={D\bibinitperiod\bibinitdelim W\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{8f6a5a3290cf6931071a82cc5bcb2dc0}
+      \strng{fullhash}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \strng{fullhashraw}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \strng{bibnamehash}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \strng{authorbibnamehash}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \strng{authornamehash}{8f6a5a3290cf6931071a82cc5bcb2dc0}
+      \strng{authorfullhash}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \strng{authorfullhashraw}{8e1a4133ae0743ec10be04edfdfb5d5a}
+      \field{sortinit}{Z}
+      \field{sortinithash}{96892c0b0a36bb8557c40c49813d48b3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{0306-2619}
+      \field{journaltitle}{Applied Energy}
+      \field{title}{Interior-point policy optimization based multi-agent deep reinforcement learning method for secure home energy management under various uncertainties}
+      \field{volume}{376}
+      \field{year}{2024}
+      \field{pages}{124155}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1016/j.apenergy.2024.124155
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924015381
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S0306261924015381
+      \endverb
+      \keyw{Home energy management,Safe deep reinforcement learning,Multi-agent system,Demand response,Deep neural network,Uncertainty}
+    \endentry
+    \entry{ZHENG2014STORAGE}{report}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=fc91054a3652cb9796bc92028be5340a}{%
+           family={Zheng},
+           familyi={Z\bibinitperiod},
+           given={Menglian},
+           giveni={M\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=2db9743e6a778d7b0766390876407682}{%
+           family={Meinrenken},
+           familyi={M\bibinitperiod},
+           given={Christoph\bibnamedelima J.},
+           giveni={C\bibinitperiod\bibinitdelim J\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=7c907bacc6880d858c5b3a009d7bfc99}{%
+           family={Lackner},
+           familyi={L\bibinitperiod},
+           given={Klaus\bibnamedelima S.},
+           giveni={K\bibinitperiod\bibinitdelim S\bibinitperiod},
+           givenun=0}}%
+      }
+      \list{institution}{1}{%
+        {Columbia University}%
+      }
+      \strng{namehash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{fullhash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{fullhashraw}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{bibnamehash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{authorbibnamehash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{authornamehash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{authorfullhash}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \strng{authorfullhashraw}{ebede9afbf52c3eb8a5f8fb364a039e3}
+      \field{sortinit}{Z}
+      \field{sortinithash}{96892c0b0a36bb8557c40c49813d48b3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{month}{6}
+      \field{number}{14-978}
+      \field{title}{Electricity storage in buildings for residential sector demand response: Control algorithms and economic viability evaluation}
+      \field{type}{NIST GCR}
+      \field{year}{2014}
+    \endentry
+    \entry{ZHOU201630}{article}{}{}
+      \name{author}{7}{}{%
+        {{un=0,uniquepart=base,hash=847b802eb49a8d64e0694a5f417c19e7}{%
+           family={Zhou},
+           familyi={Z\bibinitperiod},
+           given={Bin},
+           giveni={B\bibinitperiod},
+           givenun=0}}%
+        {{un=1,uniquepart=given,hash=e7ed332e0ad6d80272ac348046fc9c7d}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Wentao},
+           giveni={W\bibinitperiod},
+           givenun=1}}%
+        {{un=0,uniquepart=base,hash=e84082fe33ffe4608a373f7a2bbc9d5b}{%
+           family={Chan},
+           familyi={C\bibinitperiod},
+           given={Ka\bibnamedelima Wing},
+           giveni={K\bibinitperiod\bibinitdelim W\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=27dfb7af03262a173d0e68bfb558b1a4}{%
+           family={Cao},
+           familyi={C\bibinitperiod},
+           given={Yijia},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=76424ca91f05bb165f723cd530c828f8}{%
+           family={Kuang},
+           familyi={K\bibinitperiod},
+           given={Yonghong},
+           giveni={Y\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=f184e2dbf642dd5904c4de423f29ccc9}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Xi},
+           giveni={X\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=d79f978d123aba9f75bbbb35ea6bc515}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Xiong},
+           giveni={X\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{e990427c1f6757bef0340ba5823be4fd}
+      \strng{fullhash}{affae9396171a1d324a3dc28fe0ef23b}
+      \strng{fullhashraw}{affae9396171a1d324a3dc28fe0ef23b}
+      \strng{bibnamehash}{affae9396171a1d324a3dc28fe0ef23b}
+      \strng{authorbibnamehash}{affae9396171a1d324a3dc28fe0ef23b}
+      \strng{authornamehash}{e990427c1f6757bef0340ba5823be4fd}
+      \strng{authorfullhash}{affae9396171a1d324a3dc28fe0ef23b}
+      \strng{authorfullhashraw}{affae9396171a1d324a3dc28fe0ef23b}
+      \field{sortinit}{Z}
+      \field{sortinithash}{96892c0b0a36bb8557c40c49813d48b3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{1364-0321}
+      \field{journaltitle}{Renewable and Sustainable Energy Reviews}
+      \field{title}{Smart home energy management systems: Concept, configurations, and scheduling strategies}
+      \field{volume}{61}
+      \field{year}{2016}
+      \field{pages}{30\bibrangedash 40}
+      \range{pages}{11}
+      \verb{doi}
+      \verb 10.1016/j.rser.2016.03.047
+      \endverb
+      \verb{urlraw}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032116002823
+      \endverb
+      \verb{url}
+      \verb https://www.sciencedirect.com/science/article/pii/S1364032116002823
+      \endverb
+      \keyw{Renewable energy,Home energy management system,Home energy storage system,Home appliance scheduling,Smart house}
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+

@@ -1,0 +1,136 @@
+% !TeX program = xelatex
+\documentclass[12pt,a4paper]{ctexart}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{eso-pic}
+\usepackage{hyperref}
+
+\onehalfspacing
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setlist{nosep,leftmargin=2em}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\emergencystretch=2em
+\ctexset{
+  section = {format = \large\bfseries\raggedright, beforeskip = 1.0ex, afterskip = 0.6ex},
+  subsection = {format = \normalsize\bfseries\raggedright, beforeskip = 0.8ex, afterskip = 0.4ex}
+}
+\begin{document}
+\pagestyle{plain}
+\thispagestyle{plain}
+\AddToShipoutPictureFG*{%
+  \AtPageUpperLeft{%
+    \raisebox{-1.3cm}{\makebox[\paperwidth][r]{\includegraphics[height=1.2cm]{logos/tum.pdf}\hspace*{1.8cm}}}%
+  }%
+}
+{\raggedright
+{\LARGE\bfseries Exposé\par}
+\vspace{0.5em}
+{\large Building Energy Management System Based on Multi-Agent Deep Reinforcement Learning\par}
+\vspace{0.8em}
+Master's Thesis for the degree of Master of Science (M.Sc.) in Energy and Process Engineering\par
+\vspace{0.8em}
+Yuxin Wen\par
+10.03.2026\par
+\vspace{1.5em}
+}
+
+\section{Title of Master Thesis}
+
+The title of the thesis is: Building Energy Management System Based on Multi-Agent Deep Reinforcement Learning.
+
+This thesis investigates coordinated energy management for multiple prosumers in a low-voltage distribution network. Each prosumer has household loads, rooftop PV, a stationary battery, and residential EV charging demand. The objective is to coordinate battery operation, PV utilization, and EV charging under dynamic electricity prices. At the same time, the controller should meet user mobility needs and distribution network safety constraints.
+
+\section{Abstract}
+
+\subsection{Background and Motivation}
+
+Residential PV systems, stationary battery energy storage systems, and electric vehicles are becoming common in distribution networks. As a result, residential users are changing from passive electricity consumers into prosumers. They can generate electricity, store energy, and adjust part of their demand. In a single household, PV generation can reduce electricity purchased from the grid. The battery can be charged during low-price periods and discharged during high-price periods. EV charging can also be scheduled according to mobility needs and electricity prices. When several prosumers are connected to the same low-voltage network, these local decisions are no longer only household-level economic decisions. EV charging, battery operation, and PV utilization change the feeder net load together. This can affect distribution network safety.
+
+HEMS is an important tool for demand-side management and renewable energy use. Existing HEMS studies have discussed energy management architectures, device models, and scheduling strategies (Zhou et al., 2016; Beaudin and Zareipour, 2015; Ali et al., 2022). MPC and optimization-based methods can handle device constraints and forecast information in an explicit way. They have shown good performance in residential energy storage, EV scheduling, and demand response (Chen et al., 2013; Jin et al., 2017; Seal et al., 2023). However, the problem becomes larger when multiple prosumers, EVs, BESSs, PV systems, dynamic prices, and grid constraints are considered together. The computational burden also increases. Reinforcement learning and multi-agent deep reinforcement learning offer another approach. They can learn online scheduling policies through interaction with the environment and support centralized training with decentralized execution (Xu et al., 2020; Lee et al., 2020; Wang et al., 2024).
+
+\subsection{Problem Statement and Objective}
+
+This thesis tend to solve the following research problem: how can stationary batteries, PV systems, and EV charging be coordinated among multiple prosumers in a low-voltage distribution network? The controller should reduce operating cost, satisfy the EV departure SoC requirement, and reduce distribution network safety issues. The problem has temporal and multi-agent coupling. Battery SoC and EV SoC make current actions influence future feasible actions. In addition, the actions of several prosumers affect the network operating state through power flow calculations.
+
+To address this problem, this thesis develops a low-voltage distribution network simulation environment based on pandapower. The problem is then studied with a MADRL-based approach. The proposed method is compared with baseline controllers. The evaluation uses total cost, battery arbitrage profit, EV charging cost, departure SoC feasibility, and distribution network safety.
+
+\subsection{Research Questions and Hypotheses}
+
+The research question is: Can MADRL learn a control policy for a multi-prosumer low-voltage distribution network with EVs, BESSs, and PV systems? The policy should reduce cost, satisfy EV mobility requirements, and maintain distribution network safety.
+
+Based on this research question, the following hypotheses are proposed before conducting the study:
+\begin{enumerate}
+  \item Compared with rule-based controllers, MADRL can use electricity prices, SoC, PV generation, and load demand to learn a more flexible resource-coupling policy. This may improve EV charging cost and battery arbitrage performance.
+  \item A reward function that only uses the EV departure penalty may suffer from sparse rewards. It may therefore fail to satisfy the EV departure SoC requirement in a stable way. Additional reward components are needed to improve EV feasibility.
+  \item EV hard correction can enforce EV mobility feasibility at the action execution layer. However, the EV constraint alone cannot ensure distribution network safety. Grid safety projection can reduce voltage violations and transformer overloading, but it may reduce battery arbitrage profit.
+\end{enumerate}
+
+\subsection{Planned Methodology}
+
+This study is planned as follows. First, a simulation environment with three prosumers will be built. It will use a SimBench low-voltage distribution network topology and pandapower power flow calculations. Each prosumer includes household load, PV generation, a 100 kWh stationary battery, and one 60 kWh EV. The EV is assumed to arrive home at 18:00 and depart at 07:00. Its arrival SoC is 0.30, and its target departure SoC is 0.90. Second, an LSTM model will forecast electricity prices, load demand, and PV generation. These forecasts provide horizon information for about the next 12 hours. Third, a MADRL controller will be developed. Each agent outputs a three-dimensional continuous action for battery power, PV utilization, and EV charging power. Training follows centralized training and decentralized execution. The critic uses the joint state and joint actions, while the actor uses local observations and forecast sequences during execution. Fourth, several constraint-handling mechanisms will be introduced. These include a soft EV penalty, Progress penalty, hard EV correction, emergency charging, and grid safety projection. Their effects will then be analyzed. Finally, MADRL will be compared with baseline control methods.
+
+\subsection{Expected Results}
+
+The expected outcome of this study is to show the advantages of MADRL over rule-based methods in a multi-prosumer scenario. The study will also examine how EV constraint handling and grid safety projection affect the learned policy. The thesis is expected to make four contributions. First, it will establish a simulation framework that integrates EVs, BESSs, PV systems, a forecasting module, and power flow feedback. Second, it will propose and evaluate constraint-handling approaches for the EV departure SoC requirement. Third, it will quantify the trade-offs between MADRL and baseline controllers. The main criteria are economic performance, EV feasibility, and distribution network safety. Fourth, it will provide an experimental basis for future work on projection-aware training, robust forecasting, and larger multi-prosumer distribution networks.
+
+\section{Proposed Outline of the Thesis}
+
+The proposed structure of this thesis is as follows:
+
+\begin{enumerate}
+  \item \textbf{Introduction}: Introduces the background of coordinated control for residential distributed energy resources (DERs), EVs, and low-voltage distribution networks. It presents the economic and grid safety challenges of multi-prosumer energy management and outlines the thesis structure.
+  \item \textbf{State of the Art}: Reviews the literature on HEMS, MPC, DRL/MADRL, EV charging scheduling, and distribution network safety constraints. It also identifies the research gaps between single-household HEMS, optimization-based methods, and safe MADRL.
+  \item \textbf{System Modelling and Problem Formulation}: Develops the models of prosumers, PV systems, BESSs, EVs, electricity prices, net load, and pandapower power flow. It also defines voltage, line, and transformer constraints, together with the optimization objective.
+  \item \textbf{Methodology}: Presents the LSTM forecasting model and the observation, action, and reward design of MADRL. It also describes grid safety projection, EV soft/hard/emergency constraint handling, and the Local MPC, ADMM-MPC, and rule-based baseline controllers.
+  \item \textbf{Experimental Setup}: Describes the data sources, training and evaluation periods, device parameters, network configuration, training settings, and evaluation metrics.
+  \item \textbf{Results and Discussion}: Analyzes the LSTM forecasting accuracy, MADRL convergence, and the results under different EV constraint-handling strategies. It also discusses the impact of grid safety projection and compares the controllers with MPC and rule-based methods.
+  \item \textbf{Conclusion and Outlook}: Summarizes the main findings and discusses future research directions. These include projection-aware MADRL, robust forecasting, larger distribution networks, and hybrid control methods.
+\end{enumerate}
+
+\section{Work Plan and Timeline}
+
+This thesis is planned to be completed within six months. The work plan is shown in the table below.
+
+\begin{center}
+\begin{tabular}{p{0.18\textwidth}p{0.72\textwidth}}
+\toprule
+Phase & Main Tasks \\
+\midrule
+Month 1 & Define the research problem, search the literature, and complete the first draft of the background, motivation, and literature review. \\
+Month 2 & Develop the system model, including prosumer loads, PV systems, BESSs, EVs, electricity prices, net load, and pandapower power flow constraints. Formulate the optimization objective and define the evaluation metrics. \\
+Month 3 & Implement and validate the LSTM forecasting module, the MADRL environment interface, the observation and action design, the reward function, and the basic training framework. \\
+Month 4 & Complete the implementation of EV constraint handling, grid safety projection, and baseline controllers. Conduct the main training and evaluation experiments. \\
+Month 5 & Summarize the experimental results and analyze the trade-offs among economic performance, EV feasibility, battery arbitrage, and distribution network safety. Complete the Results and Discussion chapter. \\
+Month 6 & Complete the Conclusion and Outlook chapter. Unify the notation, figures, tables, references, and formatting. Polish the language, proofread the thesis, and prepare the submission. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\clearpage
+\section*{Reference}
+
+\begin{enumerate}
+  \item Ali, A. O., Elmarghany, M. R., Abdelsalam, M. M., Sabry, M. N., and Hamed, A. M. (2022). Closed-loop home energy management system with renewable energy sources in a smart grid: A comprehensive review. \textit{Journal of Energy Storage}, 50, 104609.
+  \item Beaudin, M., and Zareipour, H. (2015). Home energy management systems: A review of modelling and complexity. \textit{Renewable and Sustainable Energy Reviews}, 45, 318--335.
+  \item Chen, C., Wang, J., Heo, Y., and Kishore, S. (2013). MPC-based appliance scheduling for residential building energy management controller. \textit{IEEE Transactions on Smart Grid}, 4(3), 1401--1410.
+  \item Dongol, D., Feldmann, T., Schmidt, M., and Bollin, E. (2018). A model predictive control based peak shaving application of battery for a household with photovoltaic system in a rural distribution grid. \textit{Sustainable Energy, Grids and Networks}, 16, 1--13.
+  \item Jin, X., Baker, K., Christensen, D., and Isley, S. (2017). Foresee: A user-centric home energy management system for energy efficiency and demand response. \textit{Applied Energy}, 205, 1583--1595.
+  \item Lee, J., Wang, W., and Niyato, D. (2020). Demand-side scheduling based on multi-agent deep actor-critic learning for smart grids. \textit{IEEE SmartGridComm}, 1--6.
+  \item Li, Y., Yu, C., Shahidehpour, M., Yang, T., Zeng, Z., and Chai, T. (2023). Deep reinforcement learning for smart grid operations: Algorithms, applications, and prospects. \textit{Proceedings of the IEEE}, 111(9), 1055--1096.
+  \item Mocanu, E., Mocanu, D. C., Nguyen, P. H., Liotta, A., Webber, M. E., Gibescu, M., and Slootweg, J. G. (2019). On-line building energy optimization using deep reinforcement learning. \textit{IEEE Transactions on Smart Grid}, 10(4), 3698--3708.
+  \item Mueller, F., de Jongh, S., Canizares, C. A., Leibfried, T., and Bhattacharya, K. (2025). Comparison of machine learning and MPC methods for control of home battery storage systems in distribution grids. \textit{Applied Energy}, 400, 126465.
+  \item Park, K., and Moon, I. (2022). Multi-agent deep reinforcement learning approach for EV charging scheduling in a smart grid. \textit{Applied Energy}, 328, 120111.
+  \item Quakernack, L., Kelker, M., and Haubrock, J. (2022). Deep reinforcement learning for autonomous control of low voltage grids with focus on grid stability in future power grids. \textit{IEEE PES ISGT-Europe}, 1--5.
+  \item Seal, S., Boulet, B., Dehkordi, V. R., Bouffard, F., and Joos, G. (2023). Centralized MPC for home energy management with EV as mobile energy storage unit. \textit{IEEE Transactions on Sustainable Energy}, 14(3), 1425--1435.
+  \item Wang, Z., Xiao, F., Ran, Y., Li, Y., and Xu, Y. (2024). Scalable energy management approach of residential hybrid energy system using multi-agent deep reinforcement learning. \textit{Applied Energy}, 367, 123414.
+  \item Xu, X., Jia, Y., Xu, Y., Xu, Z., Chai, S., and Lai, C. S. (2020). A multi-agent reinforcement learning-based data-driven method for home energy management. \textit{IEEE Transactions on Smart Grid}, 11(4), 3201--3211.
+  \item Zhang, Y., Lin, R., Mei, Z., Lyu, M., Jiang, H., Xue, Y., Zhang, J., and Gao, D. W. (2024). Interior-point policy optimization based multi-agent deep reinforcement learning method for secure home energy management under various uncertainties. \textit{Applied Energy}, 376, 124155.
+  \item Zhou, B., Li, W., Chan, K. W., Cao, Y., Kuang, Y., Liu, X., and Wang, X. (2016). Smart home energy management systems: Concept, configurations, and scheduling strategies. \textit{Renewable and Sustainable Energy Reviews}, 61, 30--40.
+\end{enumerate}
+
+\end{document}

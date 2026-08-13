@@ -1,0 +1,5 @@
+label,group,ev_avg_charge_price_eur_per_kwh,ev_energy_kwh,battery_avg_charge_price_eur_per_kwh,battery_charge_energy_kwh,battery_avg_discharge_price_eur_per_kwh,battery_discharge_energy_kwh,battery_price_spread_eur_per_kwh
+Base_soft,Soft,0.1714,1924.1712,0.1039,7209.2717,0.1589,6430.751,0.0549
+Base_Progress_soft,Soft,0.1723,1947.6669,0.13,8537.5371,0.1634,7690.9807,0.0334
+Base_hard,Hard,0.16,1797.3481,0.1275,8712.3655,0.171,7699.7998,0.0435
+Projection_hard,Hard,0.1897,1968.3301,0.1295,8939.7873,0.1742,7720.7278,0.0447

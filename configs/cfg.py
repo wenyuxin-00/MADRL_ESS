@@ -26,6 +26,7 @@ class DataCfg:
     train_end_date: str = "2019-12-31"
     eval_start_date: str = "2020-04-01"
     eval_end_date: str = "2020-04-15"
+    # eval_end_date: str = "2020-04-02"
     #总负荷 = household负荷 + heatpump负荷，pv发电量不计入总负荷
     load_components: tuple[str, ...] = ("household", "heatpump")
     pv_reference: str = "south"
@@ -62,7 +63,7 @@ class EnvCfg:
     ev_soc_max: float = 0.95
 
     # EV SOC when arriving home at 18:00
-    ev_arrival_soc: float = 0.15
+    ev_arrival_soc: float = 0.3
 
     # Required SOC when leaving home at 07:00
     ev_departure_soc_req: float = 0.90
@@ -77,6 +78,7 @@ class EnvCfg:
     # With 15-min resolution: 18:00 = step 72, 07:00 = step 28
     ev_arrival_step: int = 72
     ev_departure_step: int = 28
+    ev_state_continuity: bool = True
     ev_departure_constraint_mode: str = "soft"
     ev_hard_projection_enabled: bool = False
     ev_emergency_charging_enabled: bool = True
@@ -136,7 +138,12 @@ class RewardCfg:
     w_line_pen: float = 1.0    #线路惩罚权重，线路负载越接近或超过限制，惩罚越大
     w_trafo_pen: float = 1.0   #变压器惩罚权重，变压器负载越接近或超过限制，惩罚越大
     # EV reward parameters
+    ev_charging_cost_weight: float = 1.0
+    ev_price_aware_penalty_weight: float = 0.0
+    ev_price_aware_threshold_quantile: float = 0.70
     ev_departure_penalty_weight: float = 500.0
+    ev_departure_target_penalty_weight: float = 0.0
+    ev_progress_penalty_weight: float = 0.0
     ev_soc_regularization_weight: float = 0.005
     ev_projection_penalty_weight: float = 0.0
     ev_emergency_penalty_weight: float = 0.0

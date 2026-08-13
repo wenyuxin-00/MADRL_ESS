@@ -1,0 +1,48 @@
+\RequirePackage[l2tabu,orthodox]{nag}
+
+\documentclass[headsepline,footsepline,footinclude=false,oneside,fontsize=11pt,paper=a4,listof=totoc,bibliography=totoc]{scrbook} % one-sided
+
+\input{settings}
+
+\newcommand*{\getUniversity}{Technische Universität München}
+\newcommand*{\getFaculty}{Center for Combined Smart Energy Systems}
+\newcommand*{\getTitle}{Building Energy Management System Based on Multi-Agent Deep Reinforcement Learning}
+\newcommand*{\getAuthor}{Yuxin Wen}
+\newcommand*{\getDoctype}{Master's Thesis submitted for the degree of Master of Science (M.Sc.) in Energy and Process Engineering}
+\newcommand*{\getMentor}{Jun Zhang}
+\newcommand*{\getSupervisor}{Prof.\ Dr.\ Thomas Hamacher}
+\newcommand*{\getAdvisor}{Advisor}
+\newcommand*{\getSubmissionDate}{15.08.2026}
+\newcommand*{\getSubmissionLocation}{Munich}
+
+\begin{document}
+\pagenumbering{alph}
+
+\frontmatter{}
+
+\input{pages/title}
+\input{pages/disclaimer}
+\input{pages/acknowledgments}
+\input{pages/abstract}
+\microtypesetup{protrusion=false}
+\tableofcontents{}
+\microtypesetup{protrusion=true}
+
+
+\mainmatter{}
+
+\input{chapters/01_introduction}
+\input{chapters/02_State of Art}
+\input{chapters/03_System Modelling and Problem Formulation}
+\input{chapters/04_Methodology}
+\input{chapters/05_Experimental Setup}
+\input{chapters/06_Results and Discussion}
+\input{chapters/07_Conclusion and Outlook} 
+
+
+\appendix{}
+\listoffigures{}
+\listoftables{}
+\printbibliography{}
+
+\end{document}

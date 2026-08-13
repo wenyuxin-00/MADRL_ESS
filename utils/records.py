@@ -14,7 +14,7 @@ from envs.grid_env import build_env
 from utils.price import IMPORT_PRICE_MARKUP_KEY, get_import_price_markup
 from utils.run_artifacts import save_eval_result
 
-RECORD_SCHEMA_VERSION = 2
+RECORD_SCHEMA_VERSION = 3
 WHOLESALE_PRICE_SIGNAL, WHOLESALE_PRICE_PRED_COLUMN = "wholesale_price", "wholesale_price_pred"
 IMPORT_PRICE_COLUMN, IMPORT_PRICE_PRED_COLUMN = "import_price", "import_price_pred"
 BATTERY_POWER_COLUMN = "battery_power_kw"
@@ -93,11 +93,16 @@ def _series_or_zero(frame: pd.DataFrame, column: str) -> pd.Series:
     return frame[column].astype(float) if column in frame.columns else pd.Series(0.0, index=frame.index, dtype=float)
 
 
+def _ev_charging_cost_weight(cfg: Cfg) -> float:
+    mode = str(getattr(cfg.env, "ev_departure_constraint_mode", "soft")).lower()
+    return float(getattr(cfg.reward, "ev_charging_cost_weight", 1.0)) if mode in {"soft", "hard"} else 1.0
+
+
 def compute_ev_cost_summary(rollout: RolloutResult, cfg: Cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
     agent = rollout.agent_df.copy()
     if agent.empty:
-        cost_ts = pd.DataFrame(columns=["episode_idx", "step", "timestamp", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
-        return cost_ts, pd.DataFrame([{"battery_total_cost_eur": 0.0, "ev_total_cost_eur": 0.0, "pv_total_cost_eur": 0.0, "total_cost_eur": 0.0}])
+        cost_ts = pd.DataFrame(columns=["episode_idx", "step", "timestamp", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur", "ev_charge_requested_kwh", "ev_charge_executed_kwh", "ev_charge_clipped_kwh", "ev_overcharge_gap", "ev_overcharge_penalty"])
+        return cost_ts, pd.DataFrame([{"battery_total_cost_eur": 0.0, "ev_total_cost_eur": 0.0, "pv_total_cost_eur": 0.0, "total_cost_eur": 0.0, "total_ev_charge_requested_kwh": 0.0, "total_ev_charge_executed_kwh": 0.0, "total_ev_charge_clipped_kwh": 0.0, "ev_overcharge_gap_total": 0.0, "ev_overcharge_penalty_total": 0.0}])
     dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
     step_price = rollout.step_df[[c for c in ("episode_idx", "step", "timestamp", IMPORT_PRICE_COLUMN, WHOLESALE_PRICE_SIGNAL) if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
     if IMPORT_PRICE_COLUMN not in agent.columns and IMPORT_PRICE_COLUMN in step_price.columns:
@@ -112,19 +117,35 @@ def compute_ev_cost_summary(rollout: RolloutResult, cfg: Cfg) -> tuple[pd.DataFr
         battery_cost = agent["e_bat"].astype(float) * agent[IMPORT_PRICE_COLUMN].astype(float) * dt
     else:
         battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
-    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
+    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _ev_charging_cost_weight(cfg) * _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
+    ev_charge_requested = _series_or_zero(agent, "ev_charge_kw_requested") if "ev_charge_kw_requested" in agent.columns else _series_or_zero(agent, "ev_charge_kw")
+    ev_charge_executed = _series_or_zero(agent, "ev_charge_kw_executed") if "ev_charge_kw_executed" in agent.columns else _series_or_zero(agent, "ev_charge_kw")
+    ev_charge_clipped = _series_or_zero(agent, "ev_charge_kw_clipped") if "ev_charge_kw_clipped" in agent.columns else (ev_charge_requested - ev_charge_executed).clip(lower=0.0)
+    ev_overcharge_gap = _series_or_zero(agent, "ev_overcharge_gap")
+    ev_overcharge_penalty = _series_or_zero(agent, "ev_overcharge_penalty")
     per_agent = agent[[c for c in ("episode_idx", "step", "timestamp", "agent_id") if c in agent.columns]].copy()
     per_agent["battery_cost_eur"] = battery_cost
     per_agent["ev_cost_eur"] = ev_cost
     per_agent["pv_cost_eur"] = _series_or_zero(agent, "pv_cost_eur")
     per_agent["total_cost_eur"] = per_agent[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
+    per_agent["ev_charge_requested_kwh"] = ev_charge_requested.clip(lower=0.0) * dt
+    per_agent["ev_charge_executed_kwh"] = ev_charge_executed.clip(lower=0.0) * dt
+    per_agent["ev_charge_clipped_kwh"] = ev_charge_clipped.clip(lower=0.0) * dt
+    per_agent["ev_overcharge_gap"] = ev_overcharge_gap
+    per_agent["ev_overcharge_penalty"] = ev_overcharge_penalty
     group_cols = [c for c in ("episode_idx", "step", "timestamp") if c in per_agent.columns]
-    cost_ts = per_agent.groupby(group_cols, as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1).sort_values([c for c in ("episode_idx", "step") if c in group_cols]).reset_index(drop=True)
+    cost_columns = ["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur", "ev_charge_requested_kwh", "ev_charge_executed_kwh", "ev_charge_clipped_kwh", "ev_overcharge_gap", "ev_overcharge_penalty"]
+    cost_ts = per_agent.groupby(group_cols, as_index=False)[cost_columns].sum(min_count=1).sort_values([c for c in ("episode_idx", "step") if c in group_cols]).reset_index(drop=True)
     return cost_ts, pd.DataFrame([{
         "battery_total_cost_eur": float(cost_ts["battery_cost_eur"].sum()),
         "ev_total_cost_eur": float(cost_ts["ev_cost_eur"].sum()),
         "pv_total_cost_eur": float(cost_ts["pv_cost_eur"].sum()),
         "total_cost_eur": float(cost_ts["total_cost_eur"].sum()),
+        "total_ev_charge_requested_kwh": float(cost_ts["ev_charge_requested_kwh"].sum()),
+        "total_ev_charge_executed_kwh": float(cost_ts["ev_charge_executed_kwh"].sum()),
+        "total_ev_charge_clipped_kwh": float(cost_ts["ev_charge_clipped_kwh"].sum()),
+        "ev_overcharge_gap_total": float(cost_ts["ev_overcharge_gap"].sum()),
+        "ev_overcharge_penalty_total": float(cost_ts["ev_overcharge_penalty"].sum()),
         "pv_cost_note": "PV cost currently set to zero unless curtailment price/penalty is configured.",
     }])
 
@@ -132,7 +153,7 @@ def compute_ev_cost_summary(rollout: RolloutResult, cfg: Cfg) -> tuple[pd.DataFr
 def compute_ev_agent_cost_summary(rollout: RolloutResult, cfg: Cfg) -> pd.DataFrame:
     agent = rollout.agent_df.copy()
     if agent.empty or "agent_id" not in agent.columns:
-        return pd.DataFrame(columns=["agent", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"])
+        return pd.DataFrame(columns=["agent", "battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur", "ev_charge_requested_kwh", "ev_charge_executed_kwh", "ev_charge_clipped_kwh", "ev_overcharge_gap", "ev_overcharge_penalty"])
     step_price = rollout.step_df[[c for c in ("episode_idx", "step", IMPORT_PRICE_COLUMN) if c in rollout.step_df.columns]].drop_duplicates(["episode_idx", "step"])
     if IMPORT_PRICE_COLUMN not in agent.columns and IMPORT_PRICE_COLUMN in step_price.columns:
         agent = agent.merge(step_price, on=["episode_idx", "step"], how="left")
@@ -145,10 +166,104 @@ def compute_ev_agent_cost_summary(rollout: RolloutResult, cfg: Cfg) -> pd.DataFr
         battery_cost = agent["e_bat"].astype(float) * agent[IMPORT_PRICE_COLUMN].astype(float) * dt
     else:
         battery_cost = pd.Series(np.nan, index=agent.index, dtype=float)
-    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
-    frame = pd.DataFrame({"agent": agent["agent_id"].astype(int), "battery_cost_eur": battery_cost, "ev_cost_eur": ev_cost, "pv_cost_eur": _series_or_zero(agent, "pv_cost_eur")})
+    ev_cost = agent["ev_charging_cost_eur"].astype(float) if "ev_charging_cost_eur" in agent.columns else _ev_charging_cost_weight(cfg) * _series_or_zero(agent, "ev_charge_kw").clip(lower=0.0) * _series_or_zero(agent, IMPORT_PRICE_COLUMN) * dt
+    ev_charge_requested = _series_or_zero(agent, "ev_charge_kw_requested") if "ev_charge_kw_requested" in agent.columns else _series_or_zero(agent, "ev_charge_kw")
+    ev_charge_executed = _series_or_zero(agent, "ev_charge_kw_executed") if "ev_charge_kw_executed" in agent.columns else _series_or_zero(agent, "ev_charge_kw")
+    ev_charge_clipped = _series_or_zero(agent, "ev_charge_kw_clipped") if "ev_charge_kw_clipped" in agent.columns else (ev_charge_requested - ev_charge_executed).clip(lower=0.0)
+    frame = pd.DataFrame({
+        "agent": agent["agent_id"].astype(int), "battery_cost_eur": battery_cost, "ev_cost_eur": ev_cost,
+        "pv_cost_eur": _series_or_zero(agent, "pv_cost_eur"),
+        "ev_charge_requested_kwh": ev_charge_requested.clip(lower=0.0) * dt,
+        "ev_charge_executed_kwh": ev_charge_executed.clip(lower=0.0) * dt,
+        "ev_charge_clipped_kwh": ev_charge_clipped.clip(lower=0.0) * dt,
+        "ev_overcharge_gap": _series_or_zero(agent, "ev_overcharge_gap"),
+        "ev_overcharge_penalty": _series_or_zero(agent, "ev_overcharge_penalty"),
+    })
     frame["total_cost_eur"] = frame[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur"]].sum(axis=1, min_count=1)
-    return frame.groupby("agent", as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur"]].sum(min_count=1)
+    return frame.groupby("agent", as_index=False)[["battery_cost_eur", "ev_cost_eur", "pv_cost_eur", "total_cost_eur", "ev_charge_requested_kwh", "ev_charge_executed_kwh", "ev_charge_clipped_kwh", "ev_overcharge_gap", "ev_overcharge_penalty"]].sum(min_count=1)
+
+
+def _ev_session_empty() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        "controller", "agent", "session_start_episode_idx", "session_end_episode_idx", "session_start_timestamp", "session_departure_timestamp",
+        "ev_session_energy_kwh", "ev_session_cost_eur", "departure_soc", "required_soc", "departure_gap",
+        "theoretical_minimum_energy_kwh", "actual_theoretical_ratio",
+    ])
+
+
+def compute_ev_session_summary(rollout: RolloutResult, cfg: Cfg) -> pd.DataFrame:
+    agent = rollout.agent_df.copy()
+    if agent.empty or not {"episode_idx", "step", "agent_id", "ev_charge_kw", "ev_soc"}.issubset(agent.columns):
+        return _ev_session_empty()
+    dt = float(rollout.meta.get("dt_hours", getattr(cfg.env, "dt_hours", 0.25)))
+    episode_steps = int(getattr(cfg.env, "episode_steps", 96))
+    arrival_step = int(getattr(cfg.env, "ev_arrival_step", 72)) % episode_steps
+    departure_step = int(getattr(cfg.env, "ev_departure_step", 28)) % episode_steps
+    required_soc = float(getattr(cfg.env, "ev_departure_soc_req", rollout.meta.get("ev_departure_soc_req", 0.90)))
+    arrival_soc = float(getattr(cfg.env, "ev_arrival_soc", 0.30))
+    efficiency = max(float(getattr(cfg.env, "ev_efficiency", 0.95)), 1e-6)
+    capacities = np.asarray(getattr(cfg.env, "ev_capacity_kwh", (60.0,)), dtype=np.float64).reshape(-1)
+    agent = agent.sort_values(["episode_idx", "agent_id", "step"]).copy()
+    agent["daily_step"] = agent["step"].astype(int) % episode_steps
+    episodes = set(int(value) for value in agent["episode_idx"].unique())
+    rows: list[dict[str, Any]] = []
+    cross_midnight = arrival_step > departure_step
+    for start_episode in sorted(episodes):
+        end_episode = start_episode + 1 if cross_midnight else start_episode
+        if end_episode not in episodes:
+            continue
+        if cross_midnight:
+            session_mask = ((agent["episode_idx"].astype(int) == start_episode) & (agent["daily_step"] >= arrival_step)) | ((agent["episode_idx"].astype(int) == end_episode) & (agent["daily_step"] < departure_step))
+        else:
+            session_mask = (agent["episode_idx"].astype(int) == start_episode) & (agent["daily_step"] >= arrival_step) & (agent["daily_step"] < departure_step)
+        departure_mask = (agent["episode_idx"].astype(int) == end_episode) & (agent["daily_step"] == departure_step)
+        for agent_id, frame in agent.loc[session_mask].groupby("agent_id", sort=True):
+            departure = agent.loc[departure_mask & (agent["agent_id"].astype(int) == int(agent_id))]
+            if frame.empty or departure.empty:
+                continue
+            cap = float(capacities[int(agent_id)]) if int(agent_id) < capacities.size else float(capacities[-1])
+            theoretical = max(0.0, required_soc - arrival_soc) * cap / efficiency
+            energy = float(frame["ev_charge_kw"].astype(float).clip(lower=0.0).sum() * dt)
+            cost = float(frame["ev_charging_cost_eur"].astype(float).sum()) if "ev_charging_cost_eur" in frame.columns else 0.0
+            departure_soc = float(departure["ev_soc"].astype(float).iloc[0])
+            departure_gap = float(departure["ev_departure_gap"].astype(float).iloc[0]) if "ev_departure_gap" in departure.columns else max(0.0, required_soc - departure_soc)
+            rows.append({
+                "controller": str(rollout.meta.get("controller", "")), "agent": int(agent_id),
+                "session_start_episode_idx": int(start_episode), "session_end_episode_idx": int(end_episode),
+                "session_start_timestamp": frame["timestamp"].iloc[0] if "timestamp" in frame.columns else pd.NaT,
+                "session_departure_timestamp": departure["timestamp"].iloc[0] if "timestamp" in departure.columns else pd.NaT,
+                "ev_session_energy_kwh": energy, "ev_session_cost_eur": cost, "departure_soc": departure_soc,
+                "required_soc": required_soc, "departure_gap": departure_gap,
+                "theoretical_minimum_energy_kwh": theoretical,
+                "actual_theoretical_ratio": energy / theoretical if theoretical > 1e-9 else np.nan,
+            })
+    return pd.DataFrame(rows) if rows else _ev_session_empty()
+
+
+def compute_ev_session_cost_summary(rollout: RolloutResult, cfg: Cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
+    sessions = compute_ev_session_summary(rollout, cfg)
+    if sessions.empty:
+        return sessions, pd.DataFrame(columns=[
+            "controller", "agent", "session_count", "ev_session_energy_total_kwh", "ev_session_energy_mean_kwh",
+            "ev_session_cost_total_eur", "ev_session_cost_mean_eur", "departure_soc_mean", "departure_soc_min",
+            "departure_gap_mean", "departure_gap_max", "theoretical_minimum_energy_per_session_kwh",
+            "theoretical_minimum_energy_total_kwh", "actual_theoretical_ratio",
+        ])
+    summary = sessions.groupby(["controller", "agent"], as_index=False).agg(
+        session_count=("ev_session_energy_kwh", "count"),
+        ev_session_energy_total_kwh=("ev_session_energy_kwh", "sum"),
+        ev_session_energy_mean_kwh=("ev_session_energy_kwh", "mean"),
+        ev_session_cost_total_eur=("ev_session_cost_eur", "sum"),
+        ev_session_cost_mean_eur=("ev_session_cost_eur", "mean"),
+        departure_soc_mean=("departure_soc", "mean"),
+        departure_soc_min=("departure_soc", "min"),
+        departure_gap_mean=("departure_gap", "mean"),
+        departure_gap_max=("departure_gap", "max"),
+        theoretical_minimum_energy_per_session_kwh=("theoretical_minimum_energy_kwh", "mean"),
+        theoretical_minimum_energy_total_kwh=("theoretical_minimum_energy_kwh", "sum"),
+    )
+    summary["actual_theoretical_ratio"] = summary["ev_session_energy_total_kwh"] / summary["theoretical_minimum_energy_total_kwh"].replace(0.0, np.nan)
+    return sessions, summary
 
 
 def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mode: str, n_episodes: int | None = None, label: str | None = None) -> RolloutResult:
@@ -181,7 +296,25 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
             ev_cost = _agent_vector(info, "ev_charging_cost_eur", n)
             ev_departure_gap = _agent_vector(info, "ev_departure_gap", n)
             ev_departure_penalty = _agent_vector(info, "ev_departure_penalty", n)
+            ev_overcharge_gap = _agent_vector(info, "ev_overcharge_gap", n)
+            ev_overcharge_penalty = _agent_vector(info, "ev_overcharge_penalty", n)
+            ev_progress_target_soc = _agent_vector(info, "ev_progress_target_soc", n)
+            ev_progress_gap = _agent_vector(info, "ev_progress_gap", n)
+            ev_progress_penalty = _agent_vector(info, "ev_progress_penalty", n)
+            ev_price_aware_penalty = _agent_vector(info, "ev_price_aware_penalty", n)
+            ev_price_excess_norm = _agent_vector(info, "ev_price_excess_norm", n)
+            ev_price_aware_threshold = float(np.asarray(info.get("ev_price_aware_threshold", 0.0), dtype=np.float32))
             ev_charge_kw_rl = _agent_vector(info, "ev_charge_kw_rl", n)
+            ev_soc_headroom_kwh = _agent_vector(info, "ev_soc_headroom_kwh", n)
+            ev_charge_kw_requested = _agent_vector(info, "ev_charge_kw_requested", n, default=0.0)
+            ev_charge_kw_executed = _agent_vector(info, "ev_charge_kw_executed", n, default=0.0)
+            if not np.any(ev_charge_kw_requested):
+                ev_charge_kw_requested = ev_charge_kw.copy()
+            if not np.any(ev_charge_kw_executed):
+                ev_charge_kw_executed = ev_charge_kw.copy()
+            ev_charge_kw_clipped = _agent_vector(info, "ev_charge_kw_clipped", n, default=0.0)
+            if not np.any(ev_charge_kw_clipped):
+                ev_charge_kw_clipped = np.maximum(ev_charge_kw_requested - ev_charge_kw_executed, 0.0).astype(np.float32)
             ev_required_min_charge_kw = _agent_vector(info, "ev_required_min_charge_kw", n)
             ev_projection_gap_kw = _agent_vector(info, "ev_projection_gap_kw", n)
             ev_hard_infeasible = _agent_vector(info, "ev_hard_infeasible", n)
@@ -210,7 +343,16 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                 "battery_discharge_total": discharge_total, "ev_charge_total": float(np.sum(ev_charge_kw)), "ev_charging_cost_eur": ev_cost_total,
                 "ev_available": int(np.max(ev_available) > 0.0), "ev_departure_gap_total": float(np.sum(ev_departure_gap)),
                 "ev_departure_penalty_total": float(np.sum(ev_departure_penalty)),
-                "ev_charge_total_rl": float(np.sum(ev_charge_kw_rl)), "ev_projection_gap_total": float(np.sum(ev_projection_gap_kw)),
+                "ev_overcharge_gap_total": float(np.sum(ev_overcharge_gap)), "ev_overcharge_penalty_total": float(np.sum(ev_overcharge_penalty)),
+                "ev_progress_gap_total": float(np.sum(ev_progress_gap)), "ev_progress_penalty_total": float(np.sum(ev_progress_penalty)),
+                "ev_price_aware_penalty_total": float(np.sum(ev_price_aware_penalty)), "ev_price_excess_norm": float(np.max(ev_price_excess_norm)),
+                "ev_price_aware_threshold": ev_price_aware_threshold,
+                "ev_charge_total_rl": float(np.sum(ev_charge_kw_rl)), "ev_charge_total_requested": float(np.sum(ev_charge_kw_requested)),
+                "ev_charge_total_executed": float(np.sum(ev_charge_kw_executed)), "ev_charge_total_clipped": float(np.sum(ev_charge_kw_clipped)),
+                "ev_charge_requested_kwh": float(np.sum(ev_charge_kw_requested) * float(cfg.env.dt_hours)),
+                "ev_charge_executed_kwh": float(np.sum(ev_charge_kw_executed) * float(cfg.env.dt_hours)),
+                "ev_charge_clipped_kwh": float(np.sum(ev_charge_kw_clipped) * float(cfg.env.dt_hours)),
+                "ev_soc_headroom_kwh_total": float(np.sum(ev_soc_headroom_kwh)), "ev_projection_gap_total": float(np.sum(ev_projection_gap_kw)),
                 "ev_required_min_charge_total": float(np.sum(ev_required_min_charge_kw)), "ev_hard_infeasible": int(np.any(ev_hard_infeasible > 0.0)),
                 "ev_emergency_active": int(np.any(ev_emergency_active > 0.0)), "ev_emergency_added_total": float(np.sum(ev_emergency_added_kw)),
                 "ev_emergency_required_total": float(np.sum(ev_emergency_required_kw)), "ev_control_mode": str(info.get("ev_control_mode", info.get("ev_constraint_mode", "soft"))),
@@ -242,7 +384,13 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
                     "ev_charge_kw": float(ev_charge_kw[agent_id]), "ev_soc": float(ev_soc[agent_id]), "ev_available": int(ev_available[agent_id]),
                     "ev_charging_cost_eur": float(ev_cost[agent_id]), "ev_departure_gap": float(ev_departure_gap[agent_id]),
                     "ev_departure_penalty": float(ev_departure_penalty[agent_id]),
-                    "ev_charge_kw_rl": float(ev_charge_kw_rl[agent_id]), "ev_required_min_charge_kw": float(ev_required_min_charge_kw[agent_id]),
+                    "ev_overcharge_gap": float(ev_overcharge_gap[agent_id]), "ev_overcharge_penalty": float(ev_overcharge_penalty[agent_id]),
+                    "ev_progress_target_soc": float(ev_progress_target_soc[agent_id]), "ev_progress_gap": float(ev_progress_gap[agent_id]),
+                    "ev_progress_penalty": float(ev_progress_penalty[agent_id]), "ev_price_aware_penalty": float(ev_price_aware_penalty[agent_id]),
+                    "ev_price_excess_norm": float(ev_price_excess_norm[agent_id]), "ev_price_aware_threshold": ev_price_aware_threshold,
+                    "ev_charge_kw_rl": float(ev_charge_kw_rl[agent_id]), "ev_soc_headroom_kwh": float(ev_soc_headroom_kwh[agent_id]),
+                    "ev_charge_kw_requested": float(ev_charge_kw_requested[agent_id]), "ev_charge_kw_executed": float(ev_charge_kw_executed[agent_id]),
+                    "ev_charge_kw_clipped": float(ev_charge_kw_clipped[agent_id]), "ev_required_min_charge_kw": float(ev_required_min_charge_kw[agent_id]),
                     "ev_projection_gap_kw": float(ev_projection_gap_kw[agent_id]), "ev_hard_infeasible": int(ev_hard_infeasible[agent_id] > 0.0),
                     "ev_emergency_active": int(ev_emergency_active[agent_id] > 0.0), "ev_emergency_required_kw": float(ev_emergency_required_kw[agent_id]),
                     "ev_emergency_added_kw": float(ev_emergency_added_kw[agent_id]),
@@ -259,7 +407,7 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
     env.close()
     step_df = _storage_step_columns(pd.DataFrame(step_rows), float(cfg.env.dt_hours))
     agent_df, grid_df = pd.DataFrame(agent_rows), pd.DataFrame(grid_rows)
-    summary = agent_df.groupby(["controller", "agent_id", "agent_profile"], as_index=False).agg(reward=("reward", "sum"), storage_profit_eur=("storage_profit_eur", "sum"), mean_soc=("soc", "mean"))
+    summary = agent_df.groupby(["controller", "agent_id", "agent_profile"], as_index=False).agg(reward=("reward", "sum"), storage_profit_eur=("storage_profit_eur", "sum"), mean_soc=("soc", "mean"), ev_overcharge_gap=("ev_overcharge_gap", "sum"), ev_overcharge_penalty=("ev_overcharge_penalty", "sum"), ev_price_aware_penalty=("ev_price_aware_penalty", "sum"))
     meta = {
         "controller": controller_label, "controller_key": controller_key, "forecast_mode": forecast_mode, "prediction_mode": forecast_mode,
         "cfg_hash": cfg.hash8(), "eval_episode_indices": selected, "agent_bus_ids": tuple(int(x) for x in cfg.grid.agent_bus_ids),
@@ -267,7 +415,11 @@ def collect_rollout(cfg: Cfg, controller, share_data: ShareData, *, forecast_mod
         "trafo_loading_limit_pct": 100.0, "loading_limit_pct": 100.0, "dt_hours": float(cfg.env.dt_hours),
         "ev_enabled": bool(getattr(cfg.env, "ev_enabled", False)), "ev_departure_soc_req": float(getattr(cfg.env, "ev_departure_soc_req", 0.90)),
         "ev_departure_step": int(getattr(cfg.env, "ev_departure_step", 28)),
+        "ev_state_continuity": bool(getattr(cfg.env, "ev_state_continuity", False)),
         "ev_departure_constraint_mode": str(getattr(cfg.env, "ev_departure_constraint_mode", "soft")),
+        "ev_departure_target_penalty_weight": float(getattr(cfg.reward, "ev_departure_target_penalty_weight", 0.0)),
+        "ev_price_aware_penalty_weight": float(getattr(cfg.reward, "ev_price_aware_penalty_weight", 0.0)),
+        "ev_price_aware_threshold_quantile": float(getattr(cfg.reward, "ev_price_aware_threshold_quantile", 0.70)),
         "ev_hard_projection_enabled": bool(getattr(cfg.env, "ev_hard_projection_enabled", False)),
         "ev_emergency_charging_enabled": bool(getattr(cfg.env, "ev_emergency_charging_enabled", False)),
         "ev_emergency_window_hours": float(getattr(cfg.env, "ev_emergency_window_hours", 1.0)),

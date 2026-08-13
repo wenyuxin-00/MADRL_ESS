@@ -1,0 +1,9 @@
+label,voltage_violation_count,voltage_violation_steps,min_vm_pu,max_vm_pu,trafo_overload_steps,trafo_loading_max_pct
+Base_hard,1.0,1.0,0.9718,1.0505,19.0,156.2632
+Projection_Costweight_hard,0.0,0.0,0.975,1.0447,1.0,121.1033
+Projection_Priceaware_hard,0.0,0.0,0.9722,1.046,3.0,103.5555
+Projection_hard,0.0,0.0,0.9707,1.0456,4.0,108.542
+Projection_hard (SoC0.91),0.0,0.0,0.9722,1.0461,4.0,101.6157
+ADMM-MPC Hard,0.0,0.0,0.9736,1.0486,20.0,118.9399
+Local MPC Hard,25.0,25.0,0.9663,1.0549,121.0,163.6277
+Rule-based with Battery,3.0,3.0,0.9682,1.0511,41.0,128.7618

@@ -1,0 +1,278 @@
+﻿% !TeX root = ../main.tex
+
+\chapter{Experimental Setup}\label{chapter:experimental-setup}
+
+This chapter describes the data, device parameters, training parameters, grid configuration, and evaluation metrics used in the experiments in this thesis.
+
+\section{Dataset and Simulation Period}
+
+% Modified: consolidate all numerical load settings that were previously repeated in Chapter 3.
+The data used in this thesis are located in the project directory \texttt{datasets/prosumer/}. In accordance with the general load model in Section~\ref{sec:prosumer-load}, the load-component set used in the experiments is
+\[
+  \mathcal{C}^{L}=\{\mathrm{household},\mathrm{heat\ pump}\}.
+\]
+The corresponding data are read from \texttt{household.csv} and \texttt{heatpump.csv}. The selected single-family-house profiles are \(\mathrm{SFH12}\), \(\mathrm{SFH18}\), and \(\mathrm{SFH20}\) for the three prosumers, respectively. Each component is multiplied by the same prosumer-specific load scaling factor,
+\[
+  s^L_1=s^L_2=s^L_3=20.
+\]
+Timestamps are read as Coordinated Universal Time and converted to the \texttt{Europe/Berlin} time zone so that the load, PV, electricity-price, and EV connection schedules use a common local-time reference.
+
+Training and evaluation use different years and date ranges. The current configuration is shown in Table~\ref{tab:dataset-period}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{Dataset and Simulation Time Period.}\label{tab:dataset-period}
+  \begin{tabular}{lll}
+    \toprule
+    Item & Setting & Description \\
+    \midrule
+    Data Directory & \texttt{datasets/prosumer} & Load, PV, and electricity price data \\
+    Load Components & Household, heat pump & Summed for each prosumer \\
+    Load Scale \(s^L_i\) & 20, 20, 20 & Applied to both load components \\
+    Time Zone & \texttt{Europe/Berlin} & Common local-time reference \\
+    Training Year & 2019 & Used for LSTM and MADRL training \\
+    Training Dates & 2019-01-01 to 2019-12-31 & Main training data period \\
+    Evaluation Year & 2020 & Used for controller evaluation \\
+    Evaluation Dates & 2020-04-01 to 2020-04-15 & Main evaluation data period \\
+    Time Step & 0.25 h & 15-minute resolution \\
+    Daily Steps & 96 & One natural day episode \\
+    Load Profiles & SFH12, SFH18, SFH20 & Three prosumers \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+During the evaluation phase, 15 evaluation episodes are selected by default. Each episode corresponds to the operation process of one day, where the controller reads observations and outputs actions at each time step, and the environment updates the system state.
+
+\section{Battery and EV Parameters}
+
+Battery parameters are shown in Table~\ref{tab:battery-params}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{Stationary battery parameters.}\label{tab:battery-params}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Value & Description \\
+    \midrule
+    \(C^b_i\) & 100 kWh & Battery capacity for each prosumer \\
+    \(SOC^b_{\min}\) & 0.05 & Minimum battery SoC \\
+    \(SOC^b_{\max}\) & 0.95 & Maximum battery SoC \\
+    \(SOC^b_{0}\) & 0.05 & Initial battery SoC for evaluation \\
+    \(\eta_b\) & 0.95 & Battery charging/discharging efficiency \\
+    \(r^b_{\max}\) & 0.5 & Maximum charging/discharging rate \\
+    \(P^{b,\max}_i\) & 50 kW & Maximum charging/discharging power \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The maximum power of the battery is given by its capacity and maximum charging rate:
+\[
+  P^{b,\max}_i=r^b_{\max}C^b_i=0.5\times 100=50\ \mathrm{kW}.
+\]
+This setting allows the battery to charge when prices are low or PV generation is sufficient, and discharge when prices are high or load is significant, while keeping the SoC within the bounds \([0.05,0.95]\).
+
+EV parameters are shown in Table~\ref{tab:ev-params}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{EV parameters.}\label{tab:ev-params}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Value & Description \\
+    \midrule
+    \(C^{ev}_i\) & 60 kWh & Battery capacity for each EV \\
+    \(SOC^{ev}_{\min}\) & 0.10 & Minimum EV SoC \\
+    \(SOC^{ev}_{\max}\) & 0.95 & Maximum EV SoC \\
+    \(SOC^{ev}_{arr}\) & 0.30 & SoC at home arrival \\
+    \(SOC^{ev}_{req}\) & 0.90 & Required SoC at departure \\
+    \(P^{ev,\max}_i\) & 11 kW & Maximum charging power for home charging \\
+    \(\eta_{ev}\) & 0.95 & EV charging efficiency \\
+    \(t^{arr}\) & 72 & Home arrival time (18:00) \\
+    \(t^{dep}\) & 28 & Home departure time (07:00) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Training Parameters}
+
+\subsection{LSTM Training Parameters}
+
+The LSTM forecasting module predicts the electricity price, load demand, and PV generation. The historical input window is set to
+\[
+  h=192,
+\]
+corresponding to the previous 48 hours, while the prediction horizon is
+\[
+  H=49,
+\]
+corresponding to the current time step and approximately the following 12 hours. The LSTM training parameters are summarized in Table~\ref{tab:lstm-training-params}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{LSTM forecasting model training parameters.}\label{tab:lstm-training-params}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    history window & 192 \\
+    sequence length & 49 \\
+    batch size & 1024 \\
+    train ratio & 0.70  \\
+    validation ratio & 0.15  \\
+    price epochs & 50 \\
+    price hidden size & 128 \\
+    price layers & 2 \\
+    load epochs & 20 \\
+    load hidden size & 64 \\
+    PV epochs & 20 \\
+    PV hidden size & 64 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{MADRL Training Parameters}
+
+The training parameters of the MADRL framework are summarized in Table~\ref{tab:madrl-training-params}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{MADRL training parameters.}\label{tab:madrl-training-params}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    action dimension & 3 \\
+    hidden dimension & 256 \\
+    discount factor \(\gamma\) & 0.999 \\
+    soft update \(\tau_{\mathrm{soft}}\) & 0.01 \\
+    policy update frequency & 2 \\
+    policy noise & 0.2 \\
+    noise clip & 0.5 \\
+    % Modified: all reported MADRL experiments use 1000 training episodes, consistent with the convergence analysis in Chapter 6.
+    train episodes & 1000 \\
+    number of environments & 1 \\
+    replay buffer size & 50000 \\
+    batch size & 128 \\
+    actor learning rate & \(10^{-4}\) \\
+    critic learning rate & \(10^{-4}\) \\
+    n-step return & 48 \\
+    exploration noise & 0.4 to 0.2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% Modified: use readable controller names throughout the thesis; retain the original result labels only in this reproducibility mapping.
+The MADRL approaches are referred to by readable method names throughout the thesis. ``Base'' denotes a controller without an additional reward-shaping or grid-projection mechanism, while ``Projected'' indicates that grid safety projection is applied before action execution. Table~\ref{tab:madrl-name-mapping} provides the one-to-one correspondence between the thesis terminology and the labels stored in the experimental results and plotting notebooks.
+
+\begin{table}[htpb]
+  \centering
+  % Modified: Use the normal thesis table font size for consistency with the other chapters.
+  \caption{Correspondence between readable MADRL method names and experimental result labels.}\label{tab:madrl-name-mapping}
+  \begin{tabular}{ll}
+    \toprule
+    Thesis name & Experimental result label \\
+    \midrule
+    Base Soft & \texttt{Base\_soft} \\
+    Cost-Weighted Soft & \texttt{Base\_Costweight\_soft} \\
+    Progress Soft & \texttt{Base\_Progress\_soft} \\
+    Projected Progress Soft & \texttt{Projection\_Progress\_soft} \\
+    Emergency Projected Soft & \texttt{Projection\_EV\_EME\_soft} \\
+    Emergency Soft & \texttt{Base\_EME\_soft} \\
+    Base Hard & \texttt{Base\_hard} \\
+    Cost-Weighted Projected Hard & \texttt{Projection\_Costweight\_hard} \\
+    Price-Aware Projected Hard & \texttt{Projection\_Priceaware\_hard} \\
+    Projected Hard & \texttt{Projection\_hard} \\
+    Projected Hard (EV SoC Upper Limit 0.91) & \texttt{Projection\_hard (SoC0.91)} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Network Configuration}
+
+The network security limits adopted in the experiments are summarized in Table~\ref{tab:network-config}.
+
+\begin{table}[htpb]
+  \centering
+  \caption{Network configuration and security limits.}\label{tab:network-config}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    SimBench code & \texttt{1-LV-rural1--0-sw} \\
+    agent bus ids & 12, 4, 2 \\
+    power flow solver & Newton--Raphson\\
+    \(V_{\min}\) & 0.95 p.u. \\
+    \(V_{\max}\) & 1.05 p.u.\\
+    line loading limit & 100\%  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+\section{Evaluation Metrics}
+
+Evaluation metrics can be divided into four categories: economic metrics, grid safety metrics, EV departure SoC metrics, and diagnostic metrics for the relationship between EV/battery and electricity prices. These metrics are used to evaluate the controller's performance from different perspectives, but this chapter only defines the metrics without discussing specific results.
+
+\subsection{Economic Metrics}
+
+The economic metrics are used to evaluate the operating cost of the controller and the economic benefits achieved through energy storage. The main metrics include:
+\[
+  \mathcal{C}^{bat}_{total}
+  =
+  \sum_{t,i}
+  \max(P^b_{i,t},0)\tilde p_t\Delta t
+  -
+  \sum_{t,i}
+  \max(-P^b_{i,t},0)\tilde p_t\Delta t,
+\]
+\[
+  \mathcal{C}^{ev}_{total}
+  =
+  \sum_{t,i}
+  P^{ev}_{i,t}\tilde p_t\Delta t,
+\]
+\[
+  \mathcal{C}^{total}=\mathcal{C}^{bat}_{total}+\mathcal{C}^{ev}_{total}+\mathcal{C}^{pv}_{total}.
+\]
+Besides the total cost, the records also include storage charge cost, storage discharge revenue, storage profit, and episode reward.
+
+\subsection{Grid Safety Metrics}
+
+Grid safety metrics are derived from the pandapower power flow results. They mainly include:
+\[
+  \mathrm{min}\ V_{b,t},\qquad
+  \mathrm{max}\ V_{b,t},
+\]
+\[
+  \mathrm{voltage\ violation\ steps},
+\]
+\[
+  \mathrm{feeder\ netload\ ramp\ mean\ abs}.
+\]
+where voltage violation steps represents the number of time steps where at least one bus voltage violates the bounds; feeder netload ramp is used to measure the severity of changes in the feeder's net load.
+
+\subsection{EV Departure SoC Metrics}
+
+EV metrics are used to evaluate whether users' travel demands are met. The core metrics include departure SoC, departure gap, EV session energy, and EV session cost. The departure SoC gap is defined as
+\[
+  g^{dep}_{i}
+  =
+  \max(0,SOC^{ev}_{req}-SOC^{ev}_{i,t^{dep}}).
+\]
+If \(g^{dep}_{i}=0\), it indicates that agent \(i\) meets the target SoC when departing; if \(g^{dep}_{i}>0\), it indicates that the departure demand is not fully satisfied. The evaluation also records the total charging amount for each EV session:
+\[
+  E^{ev,session}_{i}
+  =
+  \sum_{t\in\mathcal{T}^{ev}}P^{ev}_{i,t}\Delta t,
+\]
+
+\subsection{Relationship between EV, Battery Power and Electricity Prices}
+
+To analyze whether the controller has learned price-aware scheduling, this paper also records the time-aligned sequences of EV charging power, battery charging/discharging power, and import price. 
+\[
+  P^{ev}_{i,t}\ \mathrm{vs.}\ \tilde p_t,
+\]
+\[
+  P^b_{i,t}\ \mathrm{vs.}\ \tilde p_t.
+\]
+A controller with good price responsiveness should schedule EV charging and battery charging predominantly during periods of low electricity prices, while battery discharging should occur primarily during periods of high electricity prices. 

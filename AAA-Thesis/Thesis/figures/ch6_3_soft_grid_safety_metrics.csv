@@ -1,0 +1,10 @@
+label,voltage_violation_count,voltage_violation_steps,min_vm_pu,max_vm_pu,trafo_overload_steps,trafo_loading_max_pct
+Base_soft,2.0,2.0,0.9681,1.0508,56.0,195.2229
+Base_Costweight_soft,0.0,0.0,0.9708,1.0477,21.0,157.4219
+Base_Progress_soft,1.0,1.0,0.9675,1.0527,27.0,136.9688
+Projection_Progress_soft,0.0,0.0,0.9746,1.0451,2.0,105.2204
+Projection_EV_EME_soft,0.0,0.0,0.971,1.0462,10.0,103.8125
+Base_EME_soft,1.0,1.0,0.9705,1.0501,23.0,206.1108
+ADMM-MPC Soft,0.0,0.0,0.9736,1.0486,0.0,97.7487
+Local MPC Soft,19.0,19.0,0.9663,1.051,108.0,168.4757
+Rule-based with Battery,3.0,3.0,0.9682,1.0511,41.0,128.7618

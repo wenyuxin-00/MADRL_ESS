@@ -1,0 +1,9 @@
+label,weighted_charge_price_eur_per_kwh,total_ev_energy_kwh,low_price_energy_kwh,mid_price_energy_kwh,high_price_energy_kwh,low_price_share,high_price_share
+Base_hard,0.16,1797.3481,594.0903,478.2528,725.0051,0.3305,0.4034
+Projection_Costweight_hard,0.1604,1804.7353,614.3439,472.4862,717.9052,0.3404,0.3978
+Projection_Priceaware_hard,0.1614,1805.3694,557.6324,551.2002,696.5368,0.3089,0.3858
+Projection_hard,0.1897,1968.3301,485.9161,361.8494,1120.5646,0.2469,0.5693
+Projection_hard (SoC0.91),0.1616,1784.4082,516.6654,595.4787,672.2641,0.2895,0.3767
+ADMM-MPC Hard,0.1382,1705.2736,663.792,583.1083,458.3733,0.3893,0.2688
+Local MPC Hard,0.1382,1705.263,663.7894,583.1052,458.3684,0.3893,0.2688
+Rule-based with Battery,0.1963,1970.5261,459.6315,327.6315,1183.2631,0.2333,0.6005

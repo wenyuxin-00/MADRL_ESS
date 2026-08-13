@@ -1,0 +1,38 @@
+\contentsline {section}{\numberline {1}先不看公式：MPC 到底在做什么}{3}{section.1}%
+\contentsline {section}{\numberline {2}优化问题是什么：给完全没学过算法的读者}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}决策变量：控制器手里的旋钮}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}约束条件：物理世界的边界}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}目标函数：什么叫“最好”}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}读 MPC 公式的小技巧}{5}{subsection.2.4}%
+\contentsline {section}{\numberline {3}MPC 和 Rule-based 的区别}{5}{section.3}%
+\contentsline {section}{\numberline {4}本项目中的两种 MPC}{5}{section.4}%
+\contentsline {section}{\numberline {5}符号说明}{6}{section.5}%
+\contentsline {section}{\numberline {6}Local MPC：每个用户自己规划}{6}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Local MPC 一步一步做什么}{6}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}为什么电池要拆成充电和放电}{7}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}静态电池约束}{7}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}PV 在 MPC 中如何处理}{8}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}EV 约束}{8}{subsection.6.5}%
+\contentsline {subsection}{\numberline {6.6}局部功率平衡}{9}{subsection.6.6}%
+\contentsline {subsection}{\numberline {6.7}Local MPC 的目标函数}{10}{subsection.6.7}%
+\contentsline {subsection}{\numberline {6.8}Local MPC 的优点和局限}{10}{subsection.6.8}%
+\contentsline {section}{\numberline {7}ADMM MPC：让多个用户边自私边协调}{10}{section.7}%
+\contentsline {subsection}{\numberline {7.1}为什么需要 ADMM}{10}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}先用故事理解 ADMM}{11}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}ADMM 中三个新概念}{11}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}被协调的量：净负荷贡献}{11}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}局部子问题：每个 agent 怎样被协调}{12}{subsection.7.5}%
+\contentsline {subsection}{\numberline {7.6}聚合投影：把总功率拉回安全范围}{12}{subsection.7.6}%
+\contentsline {subsection}{\numberline {7.7}对偶变量更新：记住偏差}{13}{subsection.7.7}%
+\contentsline {subsection}{\numberline {7.8}什么时候停止迭代}{13}{subsection.7.8}%
+\contentsline {subsection}{\numberline {7.9}第一步动作投影：为什么还要再修一次}{13}{subsection.7.9}%
+\contentsline {subsection}{\numberline {7.10}ADMM MPC 的优点和局限}{14}{subsection.7.10}%
+\contentsline {section}{\numberline {8}soft 和 hard 模式：到底软在哪里，硬在哪里}{14}{section.8}%
+\contentsline {subsection}{\numberline {8.1}先给核心直觉}{14}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}soft 模式的数学表达}{15}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}hard 模式在本项目 MPC 中的实现}{15}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}hard projection 怎么算}{16}{subsection.8.4}%
+\contentsline {subsection}{\numberline {8.5}soft 和 hard 行为差异}{16}{subsection.8.5}%
+\contentsline {section}{\numberline {9}Local MPC 和 ADMM MPC 在 soft/hard 下的对比}{17}{section.9}%
+\contentsline {section}{\numberline {10}Global MISOCP 和两种 MPC 的关系}{17}{section.10}%
+\contentsline {section}{\numberline {11}从零基础角度总结}{18}{section.11}%

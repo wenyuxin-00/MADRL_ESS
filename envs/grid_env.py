@@ -33,6 +33,22 @@ def _ev_available(cfg: Cfg, step: int) -> bool:
     return bool(daily_step >= arr or daily_step < dep) if arr > dep else bool(arr <= daily_step < dep)
 
 
+def _ev_connected_progress(cfg: Cfg, step: int) -> float:
+    base = int(cfg.env.episode_steps)
+    daily_step = int(step) % base
+    if not _ev_available(cfg, daily_step):
+        return 0.0
+    arr = int(cfg.env.ev_arrival_step) % base; dep = int(cfg.env.ev_departure_step) % base
+    total = (base - arr + dep) if arr > dep else max(dep - arr, 0)
+    elapsed = (daily_step - arr) if daily_step >= arr else (base - arr + daily_step)
+    return float(np.clip(float(elapsed) / max(float(total), 1.0), 0.0, 1.0))
+
+
+def ev_progress_target_soc(cfg: Cfg, step: int) -> float:
+    alpha = _ev_connected_progress(cfg, step)
+    return float(cfg.env.ev_arrival_soc) + alpha * (float(cfg.env.ev_departure_soc_req) - float(cfg.env.ev_arrival_soc))
+
+
 def _is_ev_departure_step(cfg: Cfg, step: int) -> bool:
     return int(step) % int(cfg.env.episode_steps) == int(cfg.env.ev_departure_step)
 
@@ -263,6 +279,7 @@ class GridEnv:
         self.rng = np.random.default_rng(int(cfg.runtime.seed))
         self.cur_step = 0; self.episode = 0; self.soc = np.full((self.n,), float(cfg.env.init_soc), dtype=np.float32)
         self.ev_soc = np.full((self.n,), float(cfg.env.ev_arrival_soc), dtype=np.float32)
+        self._last_ev_soc: np.ndarray | None = None
         self.train_step_calls = 0; self.target_train_steps = max(1, int(cfg.train.train_episodes) * self.steps)
         self.import_price_markup_eur_per_kwh = float(cfg.reward.import_price_markup_eur_per_kwh)
         self.num_available_episodes = max(1, int(self.data["price"].shape[0]) - self.train_days + 1)
@@ -278,8 +295,12 @@ class GridEnv:
             self.soc = self.rng.uniform(low, high, size=self.n).astype(np.float32)
         else:
             self.soc = np.full((self.n,), float(self.cfg.env.init_soc), dtype=np.float32)
-        self.ev_soc = np.full((self.n,), float(self.cfg.env.ev_arrival_soc), dtype=np.float32)
-        return self._obs(), {"episode_idx": self.episode, "initial_soc": self.soc.copy(), "initial_ev_soc": self.ev_soc.copy()}
+        used_previous_ev_soc = bool(self.cfg.env.ev_enabled) and bool(self.cfg.env.ev_state_continuity) and self._last_ev_soc is not None
+        if used_previous_ev_soc:
+            self.ev_soc = np.asarray(self._last_ev_soc, dtype=np.float32).reshape(self.n).copy()
+        else:
+            self.ev_soc = np.full((self.n,), float(self.cfg.env.ev_arrival_soc), dtype=np.float32)
+        return self._obs(), {"episode_idx": self.episode, "initial_soc": self.soc.copy(), "initial_ev_soc": self.ev_soc.copy(), "ev_state_continuity_enabled": bool(self.cfg.env.ev_state_continuity), "ev_soc_from_previous_episode": used_previous_ev_soc}
 
     def _cursor(self) -> tuple[int, int]:
         return self.episode + self.cur_step // self.base_steps, self.cur_step % self.base_steps
@@ -350,14 +371,28 @@ class GridEnv:
             ev_required_min_charge_kw = np.zeros((self.n,), dtype=np.float32)
             ev_hard_infeasible = np.zeros((self.n,), dtype=bool)
             ev_control_mode = "soft"
+        ev_charge_kw_requested = np.maximum(ev_charge_kw, 0.0).astype(np.float32)
+        ev_soc_headroom_kwh = (np.maximum(0.0, float(self.cfg.env.ev_soc_max) - self.ev_soc) * self.ev_cap).astype(np.float32)
+        ev_headroom_kw = (ev_soc_headroom_kwh / max(dt * float(self.cfg.env.ev_efficiency), 1e-6)).astype(np.float32)
+        ev_charge_kw = np.minimum(ev_charge_kw_requested, ev_headroom_kw).astype(np.float32)
+        ev_charge_kw_clipped = np.maximum(ev_charge_kw_requested - ev_charge_kw, 0.0).astype(np.float32)
+        if ev_control_mode == "hard":
+            ev_projection_gap_kw = np.maximum(ev_charge_kw - ev_charge_kw_rl, 0.0).astype(np.float32)
+        elif ev_control_mode == "emergency":
+            ev_emergency_added_kw = np.maximum(ev_charge_kw - ev_charge_kw_rl, 0.0).astype(np.float32)
         ev_delta_soc = (ev_charge_kw * dt * float(self.cfg.env.ev_efficiency) / self.ev_cap).astype(np.float32)
         next_ev_soc = np.clip(self.ev_soc + ev_delta_soc, float(self.cfg.env.ev_soc_min), float(self.cfg.env.ev_soc_max)).astype(np.float32)
         pv_effective = np.clip(pv * (0.5 * (pv_action + 1.0)), 0.0, pv).astype(np.float32)
         net = load - pv_effective + charge_kw + ev_charge_kw
         storage_price = price + float(self.cfg.reward.import_price_markup_eur_per_kwh)
         storage_profit = (np.maximum(-charge_kw, 0.0) - np.maximum(charge_kw, 0.0)) * storage_price * dt
-        ev_charging_cost = (ev_charge_kw * storage_price * dt).astype(np.float32)
+        ev_charging_cost_weight = float(self.cfg.reward.ev_charging_cost_weight) if ev_constraint_mode in {"soft", "hard"} else 1.0
+        ev_charging_cost = (ev_charging_cost_weight * ev_charge_kw * storage_price * dt).astype(np.float32)
         ev_reward = -ev_charging_cost
+        price_window = self.data["price"][self.episode:self.episode + self.train_days, :self.base_steps].reshape(-1)[:self.episode_length]
+        ev_price_aware_threshold = float(np.quantile(price_window, float(self.cfg.reward.ev_price_aware_threshold_quantile))) if price_window.size else float(price)
+        ev_price_excess_norm = float(max(0.0, storage_price - ev_price_aware_threshold) / max(ev_price_aware_threshold, 1e-6))
+        ev_price_aware_penalty = (float(self.cfg.reward.ev_price_aware_penalty_weight) * ev_charge_kw * np.float32(ev_price_excess_norm) * np.float32(dt)).astype(np.float32)
         ev_projection_penalty = (float(self.cfg.reward.ev_projection_penalty_weight) * np.abs(ev_projection_gap_kw) * np.float32(dt)).astype(np.float32)
         ev_emergency_penalty = (float(self.cfg.reward.ev_emergency_penalty_weight) * np.abs(ev_emergency_added_kw) * np.float32(dt)).astype(np.float32)
         pf = self.grid_core.step(net)
@@ -377,18 +412,37 @@ class GridEnv:
         if _is_ev_departure_step(self.cfg, step):
             ev_departure_gap = np.maximum(0.0, float(self.cfg.env.ev_departure_soc_req) - next_ev_soc).astype(np.float32)
             ev_departure_penalty = (float(self.cfg.reward.ev_departure_penalty_weight) * ev_departure_gap ** 2).astype(np.float32)
+            if ev_constraint_mode == "hard":
+                ev_overcharge_gap = np.maximum(0.0, next_ev_soc - float(self.cfg.env.ev_departure_soc_req)).astype(np.float32)
+                ev_overcharge_penalty = (float(self.cfg.reward.ev_departure_target_penalty_weight) * ev_overcharge_gap ** 2).astype(np.float32)
+            else:
+                ev_overcharge_gap = np.zeros((self.n,), dtype=np.float32)
+                ev_overcharge_penalty = np.zeros((self.n,), dtype=np.float32)
         else:
             ev_departure_gap = np.zeros((self.n,), dtype=np.float32)
             ev_departure_penalty = np.zeros((self.n,), dtype=np.float32)
+            ev_overcharge_gap = np.zeros((self.n,), dtype=np.float32)
+            ev_overcharge_penalty = np.zeros((self.n,), dtype=np.float32)
+        ev_progress_weight = float(getattr(self.cfg.reward, "ev_progress_penalty_weight", 0.0))
+        if ev_constraint_mode == "soft" and bool(ev_available > 0.0) and ev_progress_weight > 0.0:
+            ev_progress_target = np.full((self.n,), ev_progress_target_soc(self.cfg, step), dtype=np.float32)
+            ev_progress_gap = np.maximum(0.0, ev_progress_target - next_ev_soc).astype(np.float32)
+            ev_progress_penalty = (ev_progress_weight * ev_progress_gap ** 2).astype(np.float32)
+        else:
+            ev_progress_target = np.zeros((self.n,), dtype=np.float32)
+            ev_progress_gap = np.zeros((self.n,), dtype=np.float32)
+            ev_progress_penalty = np.zeros((self.n,), dtype=np.float32)
         progress = float(np.clip((self.train_step_calls + 1) * int(self.cfg.train.num_envs) / self.target_train_steps, 0.0, 1.0))
         throughput_weight = float(self.cfg.reward.throughput_bonus_eur_per_kwh_max) * float(np.clip((0.80 - progress) / 0.60, 0.0, 1.0))
         throughput_bonus = (throughput_weight * np.abs(charge_kw) * np.float32(dt)).astype(np.float32)
-        reward = (storage_profit + ev_reward - action_penalty - soc_regularization - ev_soc_regularization - ev_departure_penalty - ev_projection_penalty - ev_emergency_penalty + throughput_bonus - safe_v - safe_line - safe_trafo).astype(np.float32)
+        reward = (storage_profit + ev_reward - action_penalty - soc_regularization - ev_soc_regularization - ev_departure_penalty - ev_overcharge_penalty - ev_progress_penalty - ev_price_aware_penalty - ev_projection_penalty - ev_emergency_penalty + throughput_bonus - safe_v - safe_line - safe_trafo).astype(np.float32)
         self.soc = np.clip(next_soc, self.cfg.env.soc_min, self.cfg.env.soc_max).astype(np.float32)
         self.ev_soc = next_ev_soc.copy()
         self.cur_step += 1; self.train_step_calls += int(self.split == "train"); done = self.cur_step >= self.steps
+        if done:
+            self._last_ev_soc = self.ev_soc.copy()
         obs = self._obs() if not done else self._terminal_obs()
-        info = {"episode_done": done, "storage_profit_eur": float(np.sum(storage_profit)), "voltage_violation_count": int(np.sum(v_viol > 0.0)), "min_vm_pu": float(np.min(vm)), "max_vm_pu": float(np.max(vm)), "trafo_loading_pct": trafo_pct.astype(np.float32), "line_loading_pct": line_pct.astype(np.float32), "vm_pu": vm, "soc": self.soc.copy(), "ev_soc": self.ev_soc.copy(), "ev_available": float(ev_available), "net_load": net.astype(np.float32), "pv_effective": pv_effective.astype(np.float32), "pv_curtail": (pv - pv_effective).astype(np.float32), "ev_constraint_mode": ev_constraint_mode, "ev_control_mode": ev_control_mode, "ev_charge_kw_rl": ev_charge_kw_rl.astype(np.float32), "ev_charge_kw": ev_charge_kw.astype(np.float32), "ev_required_min_charge_kw": ev_required_min_charge_kw.astype(np.float32), "ev_projection_gap_kw": ev_projection_gap_kw.astype(np.float32), "ev_hard_infeasible": ev_hard_infeasible.astype(bool), "ev_emergency_active": ev_emergency_active.astype(bool), "ev_emergency_required_kw": ev_emergency_required_kw.astype(np.float32), "ev_emergency_added_kw": ev_emergency_added_kw.astype(np.float32), "ev_charging_cost_eur": ev_charging_cost.astype(np.float32), "ev_departure_gap": ev_departure_gap.astype(np.float32), "ev_departure_penalty": ev_departure_penalty.astype(np.float32), "ev_soc_regularization": ev_soc_regularization.astype(np.float32), "madrl_r_inc": storage_profit.astype(np.float32), "madrl_r_action_penalty": action_penalty, "madrl_r_soc_regularization": soc_regularization, "madrl_r_ev_soc_regularization": ev_soc_regularization, "madrl_r_ev_departure_penalty": ev_departure_penalty, "madrl_r_ev_projection_penalty": ev_projection_penalty, "madrl_r_ev_emergency_penalty": ev_emergency_penalty, "madrl_r_throughput_bonus": throughput_bonus, "madrl_r_safe_v": safe_v.astype(np.float32), "madrl_r_safe_line": safe_line, "madrl_r_safe_trafo": safe_trafo, "madrl_r_safe_total": (safe_v + safe_line + safe_trafo).astype(np.float32), "madrl_r_total_internal": reward.astype(np.float32), "madrl_throughput_kwh": (np.abs(charge_kw) * np.float32(dt)).astype(np.float32), "madrl_throughput_bonus_weight": throughput_weight}
+        info = {"episode_done": done, "storage_profit_eur": float(np.sum(storage_profit)), "voltage_violation_count": int(np.sum(v_viol > 0.0)), "min_vm_pu": float(np.min(vm)), "max_vm_pu": float(np.max(vm)), "trafo_loading_pct": trafo_pct.astype(np.float32), "line_loading_pct": line_pct.astype(np.float32), "vm_pu": vm, "soc": self.soc.copy(), "ev_soc": self.ev_soc.copy(), "final_ev_soc": self.ev_soc.copy() if done else np.full((self.n,), np.nan, dtype=np.float32), "ev_available": float(ev_available), "net_load": net.astype(np.float32), "pv_effective": pv_effective.astype(np.float32), "pv_curtail": (pv - pv_effective).astype(np.float32), "ev_constraint_mode": ev_constraint_mode, "ev_control_mode": ev_control_mode, "ev_charge_kw_rl": ev_charge_kw_rl.astype(np.float32), "ev_soc_headroom_kwh": ev_soc_headroom_kwh.astype(np.float32), "ev_charge_kw_requested": ev_charge_kw_requested.astype(np.float32), "ev_charge_kw_executed": ev_charge_kw.astype(np.float32), "ev_charge_kw_clipped": ev_charge_kw_clipped.astype(np.float32), "ev_charge_kw": ev_charge_kw.astype(np.float32), "ev_required_min_charge_kw": ev_required_min_charge_kw.astype(np.float32), "ev_projection_gap_kw": ev_projection_gap_kw.astype(np.float32), "ev_hard_infeasible": ev_hard_infeasible.astype(bool), "ev_emergency_active": ev_emergency_active.astype(bool), "ev_emergency_required_kw": ev_emergency_required_kw.astype(np.float32), "ev_emergency_added_kw": ev_emergency_added_kw.astype(np.float32), "ev_charging_cost_eur": ev_charging_cost.astype(np.float32), "ev_price_aware_threshold": ev_price_aware_threshold, "ev_price_excess_norm": ev_price_excess_norm, "ev_price_aware_penalty": ev_price_aware_penalty.astype(np.float32), "ev_departure_gap": ev_departure_gap.astype(np.float32), "ev_departure_penalty": ev_departure_penalty.astype(np.float32), "ev_overcharge_gap": ev_overcharge_gap.astype(np.float32), "ev_overcharge_penalty": ev_overcharge_penalty.astype(np.float32), "ev_progress_target_soc": ev_progress_target.astype(np.float32), "ev_progress_gap": ev_progress_gap.astype(np.float32), "ev_progress_penalty": ev_progress_penalty.astype(np.float32), "ev_soc_regularization": ev_soc_regularization.astype(np.float32), "madrl_r_inc": storage_profit.astype(np.float32), "madrl_r_action_penalty": action_penalty, "madrl_r_soc_regularization": soc_regularization, "madrl_r_ev_soc_regularization": ev_soc_regularization, "madrl_r_ev_departure_penalty": ev_departure_penalty, "madrl_r_ev_overcharge_penalty": ev_overcharge_penalty, "madrl_r_ev_progress_penalty": ev_progress_penalty, "madrl_r_ev_price_aware_penalty": ev_price_aware_penalty, "madrl_r_ev_projection_penalty": ev_projection_penalty, "madrl_r_ev_emergency_penalty": ev_emergency_penalty, "madrl_r_throughput_bonus": throughput_bonus, "madrl_r_safe_v": safe_v.astype(np.float32), "madrl_r_safe_line": safe_line, "madrl_r_safe_trafo": safe_trafo, "madrl_r_safe_total": (safe_v + safe_line + safe_trafo).astype(np.float32), "madrl_r_total_internal": reward.astype(np.float32), "madrl_throughput_kwh": (np.abs(charge_kw) * np.float32(dt)).astype(np.float32), "madrl_throughput_bonus_weight": throughput_weight}
         return obs, reward.astype(np.float32), done, False, info
 
     def close(self) -> None:

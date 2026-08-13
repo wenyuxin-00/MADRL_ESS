@@ -1,0 +1,26 @@
+\babel@toc {american}{}\relax 
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {5.1}{\ignorespaces Dataset and Simulation Time Period.}}{42}{table.caption.6}%
+\contentsline {table}{\numberline {5.2}{\ignorespaces Stationary battery parameters.}}{42}{table.caption.7}%
+\contentsline {table}{\numberline {5.3}{\ignorespaces EV parameters.}}{43}{table.caption.8}%
+\contentsline {table}{\numberline {5.4}{\ignorespaces LSTM forecasting model training parameters.}}{44}{table.caption.9}%
+\contentsline {table}{\numberline {5.5}{\ignorespaces MADRL training parameters.}}{45}{table.caption.10}%
+\contentsline {table}{\numberline {5.6}{\ignorespaces Correspondence between readable MADRL method names and experimental result labels.}}{45}{table.caption.11}%
+\contentsline {table}{\numberline {5.7}{\ignorespaces Network configuration and security limits.}}{46}{table.caption.12}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {6.1}{\ignorespaces LSTM forecasting performance on the held-out test data}}{49}{table.caption.13}%
+\contentsline {table}{\numberline {6.2}{\ignorespaces Comparison of non-projected Base controllers over 15 evaluation days}}{52}{table.caption.16}%
+\contentsline {table}{\numberline {6.3}{\ignorespaces Comparison of projected MADRL controllers over 15 evaluation days}}{56}{table.caption.20}%
+\contentsline {table}{\numberline {6.4}{\ignorespaces Economic, EV, and grid comparison of selected MADRL controllers and benchmarks}}{61}{table.caption.24}%
+\contentsline {table}{\numberline {6.5}{\ignorespaces Price-response indicators among selected MADRL controllers}}{64}{table.caption.27}%
+\contentsline {table}{\numberline {6.6}{\ignorespaces Comparison of Projected Hard with EV SoC Upper Limits of 0.95 and 0.91}}{66}{table.caption.29}%
+\addvspace {10\p@ }
+\def \@chapapp {\appendixname }
+\addvspace {10\p@ }
+\providecommand \tocbasic@end@toc@file {}\tocbasic@end@toc@file 

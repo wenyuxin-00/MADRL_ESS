@@ -1,0 +1,1142 @@
+下面是一个 25-30 分钟英文 presentation 的中文答辩稿 + 每页 PPT 应放内容。
+建议总页数：26 页。
+整体结构：
+1. Intro + Motivation
+2. System Modelling
+3. Experiment and Discussion
+4. Conclusion and Outlook
+
+
+Slide 1 Intro + Motivation
+
+PPT 放：
+
+标题：
+Multi-Agent Deep Reinforcement Learning for Coordinated Energy Management of Prosumers with EVs, Batteries, and PV
+
+关键词：
+
+- Low-voltage distribution grid with multiple prosumers
+- Coordinated scheduling of BESS, PV curtailment, and EV charging
+- Trade-off among cost, EV mobility requirement, and grid safety
+
+建议图片：
+
+- 一个简单系统图：low-voltage grid + 3 prosumers + EV/BESS/PV。
+- Background 不需要展开，1 页带过即可。
+
+答辩稿：
+
+本研究关注低压配电网中多个 prosumer 的协同能源管理问题。随着住宅侧 PV、stationary battery 和 EV charging 的增加，用户侧资源具有更高的灵活性，但也引入了新的耦合问题。一方面，电池和 EV 可以根据电价进行调度以降低运行成本；另一方面，多个用户同时充电或充放电会影响电压、线路负载和变压器负载。
+
+因此，本 thesis 的核心问题是：如何让多个 prosumer 在分布式执行的条件下，同时考虑经济性、EV 出行需求和配电网安全？为此，我构建了一个基于 pandapower 的低压配电网环境，并比较了 MADRL、MPC、ADMM-MPC 和 rule-based controller 的表现。
+
+
+Slide 2 Problem Definition
+
+PPT 放：
+
+标题：
+Problem Definition
+
+文字：
+
+- \(N=3\) prosumers connected to SimBench low-voltage grid
+- Each prosumer owns load, PV, BESS, and EV
+- Controller decides battery power, PV utilization, and EV charging
+- Objective: minimize total operating cost while satisfying device and grid constraints
+
+公式 LaTeX：
+
+```latex
+P^{net}_{i,t}=L_{i,t}-G^{use}_{i,t}+P^b_{i,t}+P^{ev}_{i,t}
+```
+
+```latex
+\min \sum_{t=0}^{T-1}\sum_{i=1}^{N}
+\tilde p_t\Delta t\left(P^b_{i,t}+P^{ev}_{i,t}\right)
+```
+
+```latex
+SOC^b_{\min}\le SOC^b_{i,t}\le SOC^b_{\max}
+```
+
+```latex
+SOC^{ev}_{i,t^{dep}}\ge SOC^{ev}_{req}
+```
+
+```latex
+V_{\min}\le V_{b,t}\le V_{\max},\qquad
+\lambda^{line}_{\ell,t}\le 100\%,\qquad
+\lambda^{tr}_{m,t}\le 100\%
+```
+
+答辩稿：
+
+首先定义系统问题。每个 prosumer 的净负荷由本地负荷、PV 利用功率、电池功率和 EV 充电功率共同决定。这里电池功率 \(P^b\) 为正表示充电，为负表示放电；EV 只允许充电，不考虑 V2G。
+
+优化目标是最小化所有 prosumer 在整个 episode 中的总运行成本。这个目标不仅包含 EV charging cost，也包含 battery charging cost 和 discharging benefit。同时系统必须满足三类约束：第一是电池 SoC 约束，第二是 EV 离家时的 SoC requirement，第三是配电网安全约束，包括电压、线路和变压器负载。
+
+这个问题的难点在于它不是一个单步决策问题。电池 SoC 和 EV SoC 会把当前动作和未来可行域耦合起来；多个 prosumer 的动作又通过 power flow 在电网中耦合起来。
+
+
+Slide 3 System Architecture
+
+PPT 放：
+
+流程图：
+
+Historical data / LSTM forecast
+-> MADRL actors
+-> action feasibility / safety projection
+-> GridEnv
+-> pandapower power flow
+-> reward and replay buffer
+
+图中标注：
+
+- input: load, PV, price
+- states: battery SoC, EV SoC, EV availability
+- actions: \(P^b\), \(G^{use}\), \(P^{ev}\)
+- feedback: cost, EV penalty, grid penalty
+
+公式 LaTeX：
+
+```latex
+x_t,\hat{x}_{t:t+H-1},SOC^b_t,SOC^{ev}_t
+\rightarrow
+o_t
+\rightarrow
+a_t
+\rightarrow
+\bar a_t
+\rightarrow
+s_{t+1},r_t
+```
+
+答辩稿：
+
+系统工作流程可以概括为一个闭环。首先，环境读取负荷、PV 和电价数据，并由 LSTM 生成未来 horizon 的预测序列。然后每个 MADRL actor 基于本地 observation 输出三维动作，分别对应 battery、PV 和 EV。
+
+动作不会直接执行，而是先经过本地可行性检查；如果启用 safety projection，还会进一步修正 battery power 和 PV curtailment。随后环境更新 SoC 和净负荷，并调用 pandapower 进行 AC power flow。最后，环境根据经济收益、EV 约束、电池正则化和电网安全状态计算 reward，并把 transition 存入 replay buffer 用于训练。
+
+
+Slide 4 EV Model
+
+PPT 放：
+
+标题：
+EV Model
+
+参数表：
+
+| Parameter | Value |
+| --- | --- |
+| \(C^{ev}\) | 60 kWh |
+| \(SOC^{ev}_{min}\) | 0.10 |
+| \(SOC^{ev}_{max}\) | 0.95 |
+| \(SOC^{ev}_{arr}\) | 0.30 |
+| \(SOC^{ev}_{req}\) | 0.90 |
+| \(P^{ev,max}\) | 11 kW |
+| \(\eta_{ev}\) | 0.95 |
+| Arrival / departure | 18:00 / 07:00 |
+
+公式 LaTeX：
+
+```latex
+t^{arr}=72,\qquad t^{dep}=28,\qquad T=96
+```
+
+```latex
+A^{ev}_t=
+\begin{cases}
+1,& t_d\ge t^{arr}\ \text{or}\ t_d<t^{dep}\\
+0,& \text{otherwise}
+\end{cases}
+```
+
+答辩稿：
+
+EV 是本研究里最重要的柔性负荷。每个 prosumer 配置一辆 EV，电池容量为 60 kWh，家用充电功率上限为 11 kW。EV 在晚上 18:00 到家，也就是第 72 个 15 分钟 step；第二天早上 07:00 离家，也就是第 28 个 step。因此连接窗口跨越午夜。
+
+EV 到家时 SoC 被重置为 0.30，离家时要求至少达到 0.90。这个设置代表用户的 mobility requirement。由于本研究不考虑 V2G，EV 在连接期间只能吸收电能，不能向建筑或电网放电。
+
+
+Slide 5 EV Dynamics and Charging Constraints
+
+PPT 放：
+
+建议图：
+
+- Overnight charging timeline：18:00 arrival -> connected charging window -> 07:00 departure target。
+
+公式 LaTeX：
+
+```latex
+P^{ev,rl}_{i,t}
+=
+A^{ev}_t
+\operatorname{clip}
+\left(\frac{a^{ev}_{i,t}+1}{2},0,1\right)
+P^{ev,\max}_i
+```
+
+```latex
+P^{ev}_{i,t}\le
+\min\left(
+A^{ev}_tP^{ev,\max}_i,
+\frac{(SOC^{ev}_{\max}-SOC^{ev}_{i,t})C^{ev}_i}
+{\Delta t\eta_{ev}}
+\right)
+```
+
+```latex
+SOC^{ev}_{i,t+1}
+=
+SOC^{ev}_{i,t}
++
+\frac{P^{ev}_{i,t}\Delta t\eta_{ev}}{C^{ev}_i}
+```
+
+```latex
+\Delta E^{ev,req}_i
+=
+\max(0,SOC^{ev}_{req}-SOC^{ev}_{arr})C^{ev}_i
+```
+
+```latex
+E^{ev,grid,req}_i
+=
+\frac{\Delta E^{ev,req}_i}{\eta_{ev}}
+=
+\frac{(0.90-0.30)\times 60}{0.95}
+\approx 37.9\ \mathrm{kWh}
+```
+
+答辩稿：
+
+MADRL actor 输出的 EV action 先被映射为一个充电功率请求。只有当 EV connected 时，这个请求才有效；否则充电功率为零。之后环境会根据 charger power limit 和 EV SoC headroom 进行裁剪，防止 EV 超过最大 SoC。
+
+EV SoC 的更新是线性的，增加量由实际充电功率、时间步长、充电效率和 EV 容量共同决定。默认参数下，从 0.30 充到 0.90 需要增加 36 kWh 的电池能量。考虑 0.95 的效率，大约需要从电网侧输入 37.9 kWh。因此，EV 约束不是一个很轻的约束，它会明显影响夜间负荷和电池调度。
+
+
+Slide 6 Battery and PV Model
+
+PPT 放：
+
+电池参数表：
+
+| Parameter | Value |
+| --- | --- |
+| \(C^b\) | 100 kWh |
+| \(SOC^b_{min},SOC^b_{max}\) | 0.05, 0.95 |
+| \(\eta_b\) | 0.95 |
+| \(r^b_{max}\) | 0.5 |
+| \(P^{b,max}\) | 50 kW |
+
+公式 LaTeX：
+
+```latex
+P^{b,\max}_i=r^b_{\max}C^b_i=0.5\times100=50\ \mathrm{kW}
+```
+
+```latex
+SOC^b_{i,t+1}=
+\begin{cases}
+SOC^b_{i,t}+\frac{P^b_{i,t}\Delta t\eta_b}{C^b_i},
+&P^b_{i,t}\ge0\\[2mm]
+SOC^b_{i,t}+\frac{P^b_{i,t}\Delta t}{\eta_b C^b_i},
+&P^b_{i,t}<0
+\end{cases}
+```
+
+```latex
+u^{pv}_{i,t}\in[0,1]
+```
+
+```latex
+G^{use}_{i,t}=u^{pv}_{i,t}G_{i,t}
+```
+
+```latex
+G^{curt}_{i,t}=G_{i,t}-G^{use}_{i,t}
+```
+
+答辩稿：
+
+每个 prosumer 也配有 100 kWh stationary battery，最大充放电功率为 50 kW。电池是系统中主要的经济调度资源：低价时充电，高价时放电，从而产生 arbitrage profit。
+
+PV 模型中，actor 不改变可用 PV 本身，而是决定 PV utilization factor。未被利用的部分被视为 curtailment。当前模型中没有显式 PV curtailment cost，因此 PV curtailment 主要通过改变 net load 和 power flow 间接影响 reward。
+
+
+Slide 7 LSTM Price Forecasting
+
+PPT 放：
+
+图片：
+AAA-Thesis/Thesis/figures/ch6_1_lstm_price_prediction_madrl_train_7days.png
+
+文字：
+
+- History window: \(h=192\), previous 48 hours
+- Forecast horizon: \(H=49\), current step and about the following 12 hours
+- Price forecast MAE: 0.0174 EUR/kWh
+- RMSE: 0.0212 EUR/kWh
+- LSTM captures trend but smooths peaks and valleys
+
+公式 LaTeX：
+
+```latex
+X_k=(y_{k-h},y_{k-h+1},\ldots,y_{k-1})
+```
+
+```latex
+Y_k=(y_k,y_{k+1},\ldots,y_{k+H-1})
+```
+
+```latex
+\hat Y_k=f_\theta(X_k,\phi_k)
+```
+
+```latex
+MAE=\frac{1}{T}\sum_{t=1}^{T}\left|\hat{p}_t-p_t\right|
+```
+
+```latex
+RMSE=\sqrt{\frac{1}{T}\sum_{t=1}^{T}\left(\hat{p}_t-p_t\right)^2}
+```
+
+答辩稿：
+
+为了让 controller 能够看到未来信息，项目使用 LSTM 预测电价、负荷和 PV。这里重点展示电价预测结果。输入窗口为过去 48 小时，输出 horizon 为当前 step 加未来约 12 小时。
+
+从结果看，LSTM 可以捕捉整体电价趋势，MAE 为 0.0174 EUR/kWh，RMSE 为 0.0212 EUR/kWh。但它对局部峰值和谷值有 smoothing effect。这一点对控制很重要：如果高价被低估，agent 可能低估放电收益；如果低价被高估，agent 可能错过充电机会。因此后续 MADRL 的经济性能不仅取决于算法本身，也受预测误差影响。
+
+
+Slide 8 MADRL Observation
+
+PPT 放：
+
+标题：
+Observation Design
+
+三块内容：
+
+1. Local observation
+2. Forecast sequence observation
+3. Safety observation
+
+公式 LaTeX：
+
+```latex
+o^{local}_{i,t}
+=
+[SOC^b_{i,t},SOC^{ev}_{i,t},A^{ev}_t,L_{i,t},G_{i,t},p_t]
+```
+
+```latex
+o^{seq}_{i,t}
+=
+[\hat p_{t:t+H-1},\hat L_{i,t:t+H-1},\hat G_{i,t:t+H-1}]
+```
+
+```latex
+o^{safe}_{i,t}
+=
+[SOC^b_{i,t},SOC^{ev}_{i,t},A^{ev}_t,L_{i,t},G_{i,t},
+C^b_i,P^{b,\max}_i,C^{ev}_i,P^{ev,\max}_i]
+```
+
+```latex
+o^{madrl}_{i,t}
+=
+[\sin(2\pi h_t/24),\cos(2\pi h_t/24),
+\sin(2\pi d_t/365.25),\cos(2\pi d_t/365.25),
+\bar{SOC}^b_{i,t},\bar{SOC}^{ev}_{i,t},A^{ev}_t]
+```
+
+答辩稿：
+
+MADRL observation 分为三个部分。第一部分是 local observation，描述当前物理状态，包括电池 SoC、EV SoC、EV 是否连接、当前负荷、PV 和电价。
+
+第二部分是 forecast sequence，用于让 actor 感知未来电价、负荷和 PV 的变化。例如，电价序列可以帮助 actor 判断现在是否应该充电或放电。
+
+第三部分是 safety observation，主要服务于 feasibility check 和 safety projection。它包含设备容量、功率上限和当前 SoC，因此可以判断当前 action 是否会导致物理不可行。
+
+
+Slide 9 MADRL Action Design
+
+PPT 放：
+
+标题：
+Action Design
+
+公式 LaTeX：
+
+```latex
+a_{i,t}=[a^b_{i,t},a^{pv}_{i,t},a^{ev}_{i,t}]\in[-1,1]^3
+```
+
+```latex
+P^{b,low}_{i,t}
+=
+-\min
+\left(
+P^{b,\max}_i,
+\frac{(SOC^b_{i,t}-SOC^b_{\min})C^b_i\eta_b}{\Delta t}
+\right)
+```
+
+```latex
+P^{b,up}_{i,t}
+=
+\min
+\left(
+P^{b,\max}_i,
+\frac{(SOC^b_{\max}-SOC^b_{i,t})C^b_i}{\eta_b\Delta t}
+\right)
+```
+
+```latex
+P^b_{i,t}
+=
+P^{b,low}_{i,t}
++
+\frac{a^b_{i,t}+1}{2}
+(P^{b,up}_{i,t}-P^{b,low}_{i,t})
+```
+
+```latex
+u^{pv}_{i,t}
+=
+\operatorname{clip}
+\left(\frac{a^{pv}_{i,t}+1}{2},0,1\right)
+```
+
+```latex
+P^{ev,rl}_{i,t}=A^{ev}_tu^{ev}_{i,t}P^{ev,\max}_i
+```
+
+答辩稿：
+
+每个 agent 的 action 是三维连续动作。battery action 控制充放电，PV action 控制利用率，EV action 控制充电功率。
+
+一个关键设计是 battery action 不直接乘以最大功率，而是先根据当前 SoC 计算本时间步可行的 power interval。这样 actor 即使输出边界动作，执行动作也不会直接导致 battery SoC 越界。这种 action mapping 降低了学习难度，因为 critic 不需要学习大量由物理不可行动作导致的无效反馈。
+
+
+Slide 10 Reward Function Overview
+
+PPT 放：
+
+总 reward 公式。
+
+组件说明表：
+
+| Term | Meaning |
+| --- | --- |
+| \(r^{bat}\) | battery arbitrage |
+| \(C^{ev}\) | EV charging cost |
+| \(L^{ev,dep}\) | departure SoC violation |
+| \(L^{ev,prog}\) | gradual charging guidance |
+| \(L^{ev,price}\) | discourage high-price EV charging |
+| \(L^V,L^{line},L^{tr}\) | grid safety penalty |
+| \(r^{bat,thr}\) | early exploration bonus |
+
+公式 LaTeX：
+
+```latex
+\begin{aligned}
+r_{i,t}={}&
+r^{bat}_{i,t}
+-C^{ev}_{i,t}
+-L^{bat,act}_{i,t}
+-L^{bat,soc}_{i,t}
+-L^{ev,dep}_{i,t}
+-L^{ev,prog}_{i,t}\\
+&-L^{ev,price}_{i,t}
+-L^{ev,proj}_{i,t}
+-L^{ev,eme}_{i,t}
++r^{bat,thr}_{i,t}
+-L^V_{i,t}
+-L^{line}_{i,t}
+-L^{tr}_{i,t}
+\end{aligned}
+```
+
+```latex
+r^{bat}_{i,t}
+=
+[\max(-P^b_{i,t},0)-\max(P^b_{i,t},0)]
+\tilde p_t\Delta t
+```
+
+```latex
+C^{ev}_{i,t}
+=
+w^{ev}_{cost}P^{ev}_{i,t}\tilde p_t\Delta t
+```
+
+```latex
+L^{ev,dep}_{i,t}
+=
+w^{ev}_{dep}
+\left[\max(0,SOC^{ev}_{req}-SOC^{ev}_{i,t+1})\right]^2
+```
+
+答辩稿：
+
+Reward 设计同时包含经济目标、EV mobility requirement、电池行为和电网安全。battery reward 鼓励低价充电、高价放电；EV cost 使 agent 避免不必要的高价充电；departure penalty 约束离家 SoC；progress penalty 提供更密集的 EV 充电引导；price-aware penalty 在 hard 线中用于减少高价时段充电。
+
+这里要强调，reward 不是单纯为了最小成本。它实际上在塑造 agent 的学习方向。如果某个约束只在 episode 的少数时间步给出反馈，比如 departure penalty 只在 07:00 触发，那么学习信号会比较 sparse，actor 很难稳定学到整晚的充电节奏。这也是后面 soft 线中引入 progress penalty 的原因。
+
+
+Slide 11 Grid Safety Projection
+
+PPT 放：
+
+流程图：
+
+Raw action
+-> local SoC feasibility
+-> safety projection on \([P^b,G^{curt}]\)
+-> final action
+-> pandapower validation
+
+文字强调：
+
+- Projection modifies BESS and PV curtailment
+- EV charging is not directly projected by grid safety layer
+- Improves safety but changes action-reward relationship
+
+公式 LaTeX：
+
+```latex
+x_t=
+[P^b_{1,t},\ldots,P^b_{N,t},
+G^{curt}_{1,t},\ldots,G^{curt}_{N,t}]
+```
+
+```latex
+P^{base}_{i,t}=L_{i,t}-G_{i,t}+P^{ev}_{i,t}
+```
+
+```latex
+V_t\approx V^{base}+S^V\Delta P_t
+```
+
+```latex
+\lambda^{line}_t\approx \lambda^{base}+S^{line}\Delta P_t
+```
+
+```latex
+r_j^Tx\le b_j
+```
+
+```latex
+x\leftarrow
+x-\frac{\max(0,r_j^Tx-b_j)}{\|r_j\|_2^2}r_j
+```
+
+答辩稿：
+
+Safety projection 是 reward penalty 之外的硬修正机制。它不是等 unsafe action 执行后再惩罚，而是在动作执行前直接修正动作。
+
+投影变量只包括 battery power 和 PV curtailment，不包括 EV charging。原因是 EV 代表用户出行需求，本文把 EV 约束单独处理。投影器通过有限差分估计 voltage 和 line loading 对 net injection 的 sensitivity，然后把安全约束写成 half-space，并逐行进行 projection。
+
+算法上，这会带来一个重要影响：actor 输出的 raw action 和环境中实际执行的 action 不再完全一致。因此 projection 虽然提升电网安全，但也可能改变 policy gradient 看到的 action-reward relationship，使得 actor 学到的 battery arbitrage 策略被频繁裁剪。这一点是后面分析 projection 经济性下降的关键。
+
+
+Slide 12 MADRL Training Algorithm
+
+PPT 放：
+
+标题：
+MADRL Training: CTDE + TD3-style Actor-Critic
+
+流程图：
+
+Initialize actors/critics
+-> collect transitions
+-> replay buffer
+-> critic update
+-> delayed actor update
+-> target soft update
+
+公式 LaTeX：
+
+```latex
+a_{i,t}=\pi_i(o_{i,t};\theta_i)
+```
+
+```latex
+Q_i(o_{1:N,t},a_{1:N,t};\phi_i)
+```
+
+```latex
+R^{(n)}_{i,t}
+=
+\sum_{k=0}^{n-1}\gamma^kr_{i,t+k},
+\qquad n=48
+```
+
+```latex
+y_{i,t}
+=
+R^{(n)}_{i,t}
++
+\gamma^n(1-d_t)
+\min
+\left(
+Q'_{i,1}(o_{t+n},a'_{t+n}),
+Q'_{i,2}(o_{t+n},a'_{t+n})
+\right)
+```
+
+```latex
+L^Q_i
+=
+\left(Q_{i,1}(o_t,a_t)-y_{i,t}\right)^2
++
+\left(Q_{i,2}(o_t,a_t)-y_{i,t}\right)^2
+```
+
+```latex
+a^{pol}_{i,t}
+=
+\operatorname{guard}(\pi_i(o_{i,t}))
+```
+
+```latex
+L^\pi_i
+=
+-Q_{i,1}(o_t,a_{1,t},\ldots,a^{pol}_{i,t},\ldots,a_{N,t})
+```
+
+```latex
+\theta'_i\leftarrow(1-\tau)\theta'_i+\tau\theta_i
+```
+
+```latex
+\phi'_i\leftarrow(1-\tau)\phi'_i+\tau\phi_i
+```
+
+答辩稿：
+
+MADRL 采用 centralized training and decentralized execution。执行时，每个 actor 只使用自己的 observation；训练时，critic 接收所有 agents 的 joint observation 和 joint action，从而学习 agent 之间通过电网产生的耦合影响。
+
+训练算法接近 multi-agent TD3。每个 agent 有 actor 和 twin critics，以减少 Q-value overestimation。Replay buffer 使用 n-step return，这里 \(n=48\)，对应约 12 小时，因此 reward target 可以覆盖 EV 夜间充电窗口中的长时序影响。
+
+Actor update 时，只替换 joint action 中当前 agent 的动作，其他 agent 的动作保持 batch 中的值。这使 critic 可以评估单个 agent 政策改进对联合系统的边际影响。
+
+
+Slide 13 Baseline Controllers
+
+PPT 放：
+
+表格：
+
+| Controller | Main idea | Strength | Limitation |
+| --- | --- | --- | --- |
+| Local MPC | per-agent rolling optimization | low EV cost | no grid coordination |
+| ADMM-MPC | distributed coordination with transformer bound | better system coordination | solver-based |
+| Rule-based no battery | max EV charging | simple | no price/grid awareness |
+| Rule-based + battery | price threshold battery control | simple arbitrage | fixed rule, no forecast coupling |
+
+公式 LaTeX：
+
+```latex
+\min
+\sum_{\tau}
+\tilde p_{\tau}\Delta t
+(c_{i,\tau}-d_{i,\tau}+P^{ev}_{i,\tau})
++
+\epsilon_b\Delta t(c_{i,\tau}+d_{i,\tau})
++
+w^{ev}_{dep}g_i^2
+```
+
+```latex
+-\bar P^{tr}
+\le
+\sum_i q_{i,\tau}
+\le
+\bar P^{tr}
+```
+
+```latex
+P^b_{i,t}=
+\begin{cases}
+\alpha_c P^{b,\max}_i,& \tilde p_t\le p^{low}\\
+-\alpha_d P^{b,\max}_i,& \tilde p_t\ge p^{high}\\
+0,& p^{low}<\tilde p_t<p^{high}
+\end{cases}
+```
+
+答辩稿：
+
+Baseline 用于说明 MADRL 相对简单规则和优化方法的优劣。Local MPC 每个 prosumer 独立求解，因此经济性通常较好，但缺少 network-level coordination。ADMM-MPC 在 Local MPC 基础上增加 transformer aggregation constraint，因此安全性更好。
+
+Rule-based controller 则作为简单参考。无电池版本只要 EV connected 且未满就以最大功率充电；有电池版本额外根据电价分位数进行电池充放电。这类方法计算成本低，但不能主动利用 forecast，也不能学习 load、PV、price、EV SoC 和 grid 状态之间的复杂关系。
+
+
+Slide 14 Experiment Setup + Convergence
+
+PPT 放：
+
+左侧 setup 表：
+
+| Item | Setting |
+| --- | --- |
+| Training year | 2019 |
+| Evaluation | 2020-04-01 to 2020-04-15 |
+| Time step | 15 min |
+| Eval episodes | 15 days |
+| Forecast horizon | 49 steps |
+| MADRL episodes | 1000 for final experiments |
+
+右侧图片：
+AAA-Thesis/Thesis/figures/ch6_2_madrl_convergence_madrl_base_100_vs_1000.png
+
+文字：
+
+- 100 episodes: unstable reward
+- 1000 episodes: higher final reward, lower fluctuation
+- Later experiments use 1000 episodes
+
+公式 LaTeX：
+
+```latex
+\Delta t=0.25\ \mathrm{h},\qquad T=96
+```
+
+```latex
+\gamma=0.999,\qquad \tau=0.01,\qquad n=48
+```
+
+答辩稿：
+
+实验使用 2019 年数据训练，2020 年 4 月 1 日到 4 月 15 日进行 evaluation，共 15 个 daily episodes。评价指标分为经济性、EV departure SoC、电网安全和价格响应性。
+
+在正式比较控制器前，我先验证了 MADRL 的训练长度。100 episodes 下 reward 仍然波动较大，而 1000 episodes 下最终 reward 明显提高，critic loss 后期也更稳定。因此后续实验采用 1000 episodes 作为主要训练设置。
+
+
+Slide 15 Soft Constraint Logic Chain
+
+PPT 放：
+
+标题：
+Soft EV Constraint: Development Logic
+
+流程图：
+
+MADRL Base
+-> Base + Cost Weight
+-> Base + Progress
+-> Projection + Progress
+-> Emergency variants
+-> compare with MPC/rule-based
+
+文字：
+
+- Soft mode executes the EV charging power requested by the actor.
+- EV departure target is mainly learned through reward.
+- Main issue: sparse departure penalty and difficult credit assignment.
+
+公式 LaTeX：
+
+```latex
+P^{ev}_{i,t}=P^{ev,rl}_{i,t}
+```
+
+```latex
+L^{ev,dep}_{i,t}
+=
+w^{ev}_{dep}
+\left[
+\max(0,SOC^{ev}_{req}-SOC^{ev}_{i,t+1})
+\right]^2
+```
+
+答辩稿：
+
+接下来进入实验部分。首先是 soft EV constraint。Soft mode 中，EV 充电动作基本按 actor 请求执行，departure requirement 主要通过 reward 学习。因此它的优点是 policy freedom 高，agent 有机会学习 price-aware charging；缺点是 EV departure penalty 很稀疏，学习不稳定。
+
+soft 线的实验逻辑是逐步修正这个问题：先看 MADRL Base 的问题，再加入 cost weight，然后加入 progress penalty，之后再测试 safety projection 和 emergency charging。
+
+
+Slide 16 Soft Base Result
+
+PPT 放：
+
+表格：
+
+| Controller | Total cost | Storage profit | EV cost | Below target | Max trafo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MADRL Base | 57.39 | 272.39 | 329.78 | 2 | 195.22% |
+
+建议图片：
+AAA-Thesis/Thesis/figures/ch6_3_soft_logic_chain_total_cost.png
+
+或者：
+AAA-Thesis/Thesis/figures/ch6_3_soft_departure_soc_15days.png
+
+答辩稿：
+
+MADRL Base 在 soft setting 下取得最低的 MADRL total cost，为 57.39 EUR，主要来自很强的 battery arbitrage，storage profit 达到 272.39 EUR。但它不是一个真正 robust 的控制器，因为 EV departure SoC 有 2 次低于目标，而且 max transformer loading 达到 195.22%。
+
+更深层的算法原因是，Base reward 中 battery profit 是每个 step 都存在的 dense signal，而 EV departure penalty 只在离家时刻触发，是 sparse signal。Actor-critic 训练中，critic 更容易学习即时且频繁的 battery arbitrage reward，而 EV 约束的 credit assignment 更难。因此 agent 倾向于优先优化电池收益，而不是稳定满足整晚的 EV 充电轨迹。
+
+
+Slide 17 Soft: Cost Weight
+
+PPT 放：
+
+公式：
+
+```latex
+C^{ev}_{i,t}
+=
+w^{ev}_{cost}P^{ev}_{i,t}\tilde p_t\Delta t
+```
+
+```latex
+w^{ev}_{cost}=1.5
+```
+
+表格：
+
+| Controller | Total cost | Storage profit | EV cost | Below target |
+| --- | ---: | ---: | ---: | ---: |
+| Base | 57.39 | 272.39 | 329.78 | 2 |
+| Base + Cost Weight | 251.64 | 102.75 | 354.39 | 0 |
+
+答辩稿：
+
+第一个改进是增加 EV cost weight，把 EV charging cost 在 reward 中放大到 1.5 倍。结果上，它确实解决了 departure SoC 问题，below target 从 2 次变为 0 次。
+
+但 total cost 明显升高，storage profit 大幅下降。表面上看是电池收益少了，但更深层原因是 cost weight 改变了 reward scale，使 critic 对 EV charging 行为的价值估计变得更加保守。Agent 为了避免未来 departure penalty 和较大的 EV cost，倾向于更早、更稳定地完成 EV charging，而不是精确等待低价时段。同时，EV charging 和 battery arbitrage 在夜间竞争同一段低价窗口，EV reward 权重提高后，battery policy 的自由度被压缩。因此它解决了 feasibility，但牺牲了 battery arbitrage learning。
+
+
+Slide 18 Soft: Progress Penalty
+
+PPT 放：
+
+公式：
+
+```latex
+SOC^{ev,prog}_t
+=
+SOC^{ev}_{arr}
++
+\alpha_t(SOC^{ev}_{req}-SOC^{ev}_{arr})
+```
+
+```latex
+g^{prog}_{i,t}
+=
+\max(0,SOC^{ev,prog}_t-SOC^{ev}_{i,t+1})
+```
+
+```latex
+L^{ev,prog}_{i,t}
+=
+w^{ev}_{prog}
+\left(g^{prog}_{i,t}\right)^2
+```
+
+```latex
+w^{ev}_{prog}=50
+```
+
+表格：
+
+| Controller | Total cost | Storage profit | EV cost | Below target |
+| --- | ---: | ---: | ---: | ---: |
+| Base + Cost Weight | 251.64 | 102.75 | 354.39 | 0 |
+| Base + Progress | 188.69 | 146.98 | 335.68 | 0 |
+
+建议图片：
+AAA-Thesis/Thesis/figures/ch6_3_soft_departure_soc_15days.png
+
+答辩稿：
+
+Progress penalty 是更有效的 soft 改进。它不是简单提高 EV charging cost 的权重，而是在 EV 连接窗口内构建一条从 arrival SoC 到 required SoC 的线性参考轨迹。如果实际 EV SoC 落后于这条轨迹，就产生 penalty。
+
+算法上，这相当于把原本只在 departure step 出现的 sparse constraint 转换成 dense temporal guidance。Critic 可以在整个夜间窗口中持续观察到 EV SoC 是否落后，因此 credit assignment 更容易，actor 也更容易学到“逐步充电”而不是“最后补救”。
+
+结果上，Base + Progress 同样实现 0 次 below target，但 total cost 低于 Cost Weight，storage profit 也更高。这说明 progress penalty 比单纯调 reward weight 更适合表达 EV mobility constraint。
+
+
+Slide 19 Soft: Safety Projection and Emergency
+
+PPT 放：
+
+表格：
+
+| Controller | Total cost | Storage profit | Below target | Voltage vio. | Max trafo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base + Progress | 188.69 | 146.98 | 0 | 1 | 136.97% |
+| Projection + Progress | 462.56 | -109.01 | 1 | 0 | 105.22% |
+| Base + EV EME | 94.28 | 100.93 | 45 | 1 | 206.11% |
+
+建议图片：
+AAA-Thesis/Thesis/figures/ch6_3_soft_grid_safety_comparison.png
+
+或者：
+AAA-Thesis/Thesis/figures/ch6_3_soft_battery_power_price_episode0.png
+
+公式 LaTeX：
+
+```latex
+P^{ev}_{i,t}
+=
+\max(P^{ev,rl}_{i,t},P^{ev,eme}_{i,t})
+```
+
+```latex
+P^{ev,eme}_{i,t}
+=
+\min
+\left(
+P^{ev,\max}_i,
+\frac{E^{need}_{i,t}}{K^{rem}_t\Delta t\eta_{ev}}
+\right)
+```
+
+答辩稿：
+
+接下来加入 grid safety projection。Projection + Progress 显著提高安全性，voltage violation 降为 0，max transformer loading 降到 105.22%。但它的 economic performance 明显变差，storage profit 变成负数。
+
+这里不能只说“电池收益少”。更深层原因是 projection 改变了 actor action 和 executed action 之间的映射。Actor 想根据电价进行高功率充放电，但 projection 在电网接近安全边界时会修正 battery power 和 PV curtailment。于是 critic 学到的 Q-value 受到两个机制共同影响：一方面 raw action 表达 actor 的意图，另一方面 executed action 才决定 reward。这个 mismatch 会削弱 actor 对 price signal 的学习，尤其是 battery arbitrage 这种依赖精确时序的策略。
+
+Emergency charging 在 soft 线中表现也不好。原因是它只在离家前短窗口补救，而不是在整个 connection window 内保持可行性。这样会产生充电集中，可能错过低价时段，也可能叠加到电网高负荷时段，因此既不稳定满足 EV target，也可能加重 grid stress。
+
+
+Slide 20 Hard Constraint Implementation
+
+PPT 放：
+
+标题：
+Hard EV Constraint
+
+文字：
+
+- Preserve feasibility of departure SoC
+- Actor can charge more, but not less than minimum required
+- Turns sparse EV requirement into execution-layer feasibility correction
+
+公式 LaTeX：
+
+```latex
+\Delta SOC^{future,\max}_{i,t}
+=
+\frac{K^{future}_tP^{ev,\max}_i\Delta t\eta_{ev}}{C^{ev}_i}
+```
+
+```latex
+P^{ev,req}_{i,t}
+=
+\max
+\left(
+0,
+\frac{(SOC^{ev}_{req}-\Delta SOC^{future,\max}_{i,t}-SOC^{ev}_{i,t})C^{ev}_i}
+{\Delta t\eta_{ev}}
+\right)
+```
+
+```latex
+P^{ev}_{i,t}
+=
+\min
+\left(
+P^{ev,\max}_i,
+\max(P^{ev,rl}_{i,t},P^{ev,req}_{i,t})
+\right)
+```
+
+答辩稿：
+
+Hard mode 的核心思想是把 EV departure requirement 从 reward learning 问题转移到 action execution 层。每个 step 计算未来剩余连接时间内最多还能增加多少 SoC。如果当前不充足，从当前 step 开始就可能无法在离家前达到目标，那么环境会计算一个 minimum required charging power。
+
+最终执行功率是 actor 请求功率和 required minimum power 的最大值。也就是说，actor 仍然可以选择更高的充电功率，但不能选择低于维持可行性的功率。
+
+算法上，hard mode 减少了 EV feasibility 对 reward learning 的依赖，因此降低了 sparse reward 带来的 credit assignment 难度。但它也引入了 action correction，可能与 actor 的原始经济调度意图发生冲突。
+
+
+Slide 21 Hard Constraint Logic Chain
+
+PPT 放：
+
+流程图：
+
+Base Hard
+-> Projection + CostWeight
+-> Projection + PriceAware
+-> Projection Hard
+-> Projection Hard with \(SOC^{ev}_{max}=0.91\)
+
+文字：
+
+- Does hard EV feasibility preserve economic performance?
+- How does grid projection interact with EV hard correction?
+- Can price-aware penalty reduce high-price charging?
+
+答辩稿：
+
+hard 线的实验逻辑和 soft 线不同。由于 EV feasibility 已经在执行层被处理，问题不再是“能否学会 departure requirement”，而是：在满足 EV hard constraint 的同时，是否还能保持 battery arbitrage、低价 EV charging 和 grid safety。
+
+因此，我先测试 Base Hard，然后加入 grid projection 和 cost weight，再测试 price-aware penalty，最后比较 Projection Hard 以及降低 EV SoC 上限后的版本。
+
+
+Slide 22 Hard: Base Hard
+
+PPT 放：
+
+表格：
+
+| Controller | Total cost | EV cost | Storage profit | Below target | Max trafo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Hard | 81.67 | 287.53 | 205.87 | 1 | 156.26% |
+
+建议图片：
+AAA-Thesis/Thesis/figures/ch6_4_hard_logic_chain_total_cost.png
+
+答辩稿：
+
+Base Hard 在 hard 线中取得最好的 MADRL 经济表现，total cost 为 81.67 EUR，EV cost 为 287.53 EUR，storage profit 为 205.87 EUR。相比 soft Base + Progress，hard mode 直接保证 EV 约束，因此 EV charging 更接近最低需要，而不是为了避免 penalty 过度保守充电。
+
+但是 Base Hard 的 grid safety 仍然不足，max transformer loading 达到 156.26%。原因是 EV hard constraint 只保证 mobility requirement，并不会自动限制 battery arbitrage 对电网的影响。Actor 仍然可能在低价时段同时让多个 battery 高功率充电，或者在高价时段集中放电，从而造成 transformer loading 或 voltage 问题。
+
+从算法角度看，hard EV correction 解决的是局部 EV 可行性，但 critic 学到的经济最优策略仍然可能利用所有剩余 action freedom 进行 aggressive battery arbitrage。因此需要额外的 grid-level correction。
+
+
+Slide 23 Hard: CostWeight and PriceAware
+
+PPT 放：
+
+CostWeight 结果：
+
+| Controller | Total cost | EV cost | Storage profit | Max trafo |
+| --- | ---: | ---: | ---: | ---: |
+| Projection + CostWeight | 356.28 | 289.48 | -66.81 | 121.10% |
+
+PriceAware 结果：
+
+| Controller | Total cost | EV cost | Storage profit | High-price share |
+| --- | ---: | ---: | ---: | ---: |
+| Projection + PriceAware | 238.89 | 291.35 | 52.46 | 38.58% |
+
+公式 LaTeX：
+
+```latex
+p^{thr}=Q_{0.70}(\{p_t\})
+```
+
+```latex
+\delta^p_t
+=
+\frac{\max(0,\tilde p_t-p^{thr})}{\max(p^{thr},10^{-6})}
+```
+
+```latex
+L^{ev,price}_{i,t}
+=
+w^{ev}_{price}P^{ev}_{i,t}\delta^p_t\Delta t
+```
+
+答辩稿：
+
+在 hard 线中，Projection + CostWeight 的目标是同时提高 grid safety 和 EV cost awareness。它确实把 voltage violation 降到 0，并降低 transformer loading，但 total cost 升到 356.28 EUR，storage profit 变为负数。
+
+算法原因是 projection 和 cost weight 同时压缩了 policy 的有效动作空间。CostWeight 改变 EV 相关 reward scale，而 projection 又修正 battery action。Actor 面对的是一个更难学习的环境：EV 动作会被 hard correction 影响，battery 动作会被 safety projection 修正，多重 correction 叠加后，critic 估计的 Q landscape 更不平滑，导致 battery arbitrage 学习被破坏。
+
+PriceAware penalty 的设计是：当当前电价高于 episode 内 70% 分位数时，对 EV charging 增加额外 penalty。它确实略微降低了高价充电比例，但没有显著降低 EV cost，也没有恢复 battery profit。原因是 EV charging 的可调度空间已经被 hard feasibility 和 connection window 限制；同时 grid projection 继续限制 battery 的补偿能力。因此 price-aware penalty 的边际作用被约束层削弱了。
+
+
+Slide 24 Hard: Projection Hard and SOCmax Variant
+
+PPT 放：
+
+表格：
+
+| Controller | Total cost | EV cost | Storage profit | Below target | Voltage vio. | Max trafo |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Projection Hard | 186.04 | 373.42 | 187.39 | 0 | 0 | 108.54% |
+| Projection Hard \(SOC^{ev}_{max}=0.91\) | 494.25 | 288.43 | -205.82 | 3 | 0 | 101.62% |
+
+建议图片：
+AAA-Thesis/Thesis/figures/ch6_4_hard_departure_soc_15days.png
+
+或者：
+AAA-Thesis/Thesis/figures/ch6_4_hard_battery_power_price_episode0.png
+
+答辩稿：
+
+Projection Hard 不额外加入 EV cost weight 或 price-aware penalty，只使用 EV hard correction 和 grid safety projection。结果显示，它是 hard 线中最稳健的控制器之一：voltage violation 为 0，max transformer loading 为 108.54%，同时 storage profit 仍然保持 187.39 EUR。
+
+它的问题是 EV overcharging，平均 departure SoC 达到 0.95，因此 EV cost 较高。为减少过充，进一步测试了 \(SOC^{ev}_{max}=0.91\)。这个版本确实降低了 EV cost，从 373.42 降到 288.43，但 total cost 反而恶化，storage profit 变成 -205.82。
+
+更深层原因是，EV SoC 上限改变后，夜间 EV load profile 也改变了。原来的 battery policy 是在某种 EV load pattern 下学到的；当 EV 可吸收能量减少后，局部 net load 和 SoC trajectory 改变，projection 对 battery action 的修正方式也改变。结果 battery 虽然仍有较大功率动作，但充放电时机不再匹配电价，导致 arbitrage 结构被破坏。因此，简单降低 EV upper bound 并不能自动提升系统经济性。
+
+
+Slide 25 Final Comparison: Best Controllers and Trade-off
+
+PPT 放：
+
+表格：
+
+| Controller | EV cost | Storage profit | Mean dep. SoC | Below target | Voltage vio. | Max trafo |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Soft Base | 329.78 | 272.39 | 0.9460 | 2 | 2 | 195.22% |
+| Soft Base + Progress | 335.68 | 146.98 | 0.9500 | 0 | 1 | 136.97% |
+| Base Hard | 287.53 | 205.87 | 0.9098 | 1 | 1 | 156.26% |
+| Projection Hard | 373.42 | 187.39 | 0.9500 | 0 | 0 | 108.54% |
+
+建议图：
+
+- Trade-off triangle:
+  - Economy
+  - EV feasibility
+  - Grid safety
+
+结论箭头：
+
+- Best economy among MADRL hard: Base Hard
+- Best soft trade-off: Soft Base + Progress
+- Most robust: Projection Hard
+
+答辩稿：
+
+最终选取四个代表性的 MADRL controller 进行比较。Soft Base 的 battery arbitrage 最强，storage profit 最高，但 EV feasibility 和 grid safety 不足。Soft Base + Progress 通过 dense EV guidance 解决了 EV departure 问题，并改善了 grid stress，是 soft framework 下较好的折中。
+
+Base Hard 的 EV cost 最低，说明 hard feasibility correction 可以让 EV charging 更接近最低需求，同时保留较强 battery arbitrage。但它仍然存在 transformer overloading 风险。Projection Hard 则是最 robust 的方案：它实现了 0 voltage violation 和最低的 grid risk，同时仍然保持一定 battery profit，但代价是 EV charging cost 增加。
+
+因此，MADRL 的优势不是在所有指标上压倒 MPC，而是相比 rule-based controller 能学习更灵活的 price-aware 和 resource-coupling 策略；同时，通过 progress penalty 或 safety projection，可以把 EV feasibility 和 grid safety 纳入控制框架。
+
+
+Slide 26 Conclusion and Outlook
+
+PPT 放：
+
+Conclusion：
+
+1. MADRL learns coordinated scheduling of BESS, EV, and PV under grid feedback.
+2. Soft reward-only EV control suffers from sparse departure signal; progress penalty improves learning.
+3. Hard EV correction improves feasibility but must be combined carefully with grid projection.
+4. Safety projection improves voltage and transformer safety but may weaken battery arbitrage due to action mismatch.
+
+Outlook：
+
+- Projection-aware training
+- Better EV overcharging control
+- Joint optimization of EV and grid safety constraints
+- More robust forecast integration
+- Larger network and more heterogeneous prosumers
+
+答辩稿：
+
+总结来说，本 thesis 构建了一个多 prosumer 的低压配电网能源管理框架，并将 EV、stationary battery、PV、LSTM forecast、pandapower power flow 和 MADRL training 集成到同一个实验链中。
+
+实验表明，MADRL 可以学习到比 rule-based 更灵活的调度策略，尤其是 battery arbitrage 和 EV charging 与电价之间的关系。但 reward-only 的 soft EV constraint 存在 sparse signal 问题，因此 progress penalty 能显著改善 EV feasibility。Hard EV correction 可以更直接地保证 departure requirement，但它和 safety projection 叠加后，会改变 actor action 和 executed action 之间的关系，从而影响学习稳定性和经济性。
+
+最终，如果优先考虑经济性，Base Hard 是较好的 MADRL controller；如果优先考虑 EV feasibility 和 grid safety，Projection Hard 是更稳健的选择。未来工作可以从 projection-aware training、更精细的 EV overcharging control，以及更大规模、更异构的 prosumer 网络继续扩展。

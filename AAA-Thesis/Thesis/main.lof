@@ -1,0 +1,28 @@
+\babel@toc {american}{}\relax 
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces Overall architecture of the system investigated in this thesis.}}{13}{figure.caption.4}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces The work flow of the MADRL energy management framework.}}{24}{figure.caption.5}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {6.1}{\ignorespaces LSTM day-ahead price prediction over the evaluation period.}}{50}{figure.caption.14}%
+\contentsline {figure}{\numberline {6.2}{\ignorespaces Convergence comparison of Base Soft under different numbers of training episodes.}}{51}{figure.caption.15}%
+\contentsline {figure}{\numberline {6.3}{\ignorespaces EV and battery charging competition during low-price periods under Cost-Weighted Soft. Blue shading denotes low-price periods, while red shading marks intervals in which EV and battery charging overlap.}}{53}{figure.caption.17}%
+\contentsline {figure}{\numberline {6.4}{\ignorespaces Minimum EV departure SoC among the non-projected Base controllers.}}{54}{figure.caption.18}%
+\contentsline {figure}{\numberline {6.5}{\ignorespaces EV charging behaviour of Base Soft, Cost-Weighted Soft, and Progress Soft.}}{55}{figure.caption.19}%
+\contentsline {figure}{\numberline {6.6}{\ignorespaces Interaction between EV cost weighting, hard correction, and grid projection.}}{57}{figure.caption.21}%
+\contentsline {figure}{\numberline {6.7}{\ignorespaces Effect of the price-aware penalty under hard EV correction.}}{58}{figure.caption.22}%
+\contentsline {figure}{\numberline {6.8}{\ignorespaces Battery power and price for the hard-constraint controllers in the first evaluation episode.}}{60}{figure.caption.23}%
+\contentsline {figure}{\numberline {6.9}{\ignorespaces EV charging behaviour and electricity price among selected MADRL controllers.}}{63}{figure.caption.25}%
+\contentsline {figure}{\numberline {6.10}{\ignorespaces Battery operation and electricity price among selected MADRL controllers.}}{63}{figure.caption.26}%
+\contentsline {figure}{\numberline {6.11}{\ignorespaces Departure-SoC failure of the EME variants relative to the other soft controllers.}}{65}{figure.caption.28}%
+\contentsline {figure}{\numberline {6.12}{\ignorespaces EV charging power and import price for Projected Hard and Projected Hard with the EV SoC upper limit of 0.91 during an overnight connection window.}}{67}{figure.caption.30}%
+\contentsline {figure}{\numberline {6.13}{\ignorespaces Battery charging--discharging power and import price for Projected Hard and Projected Hard with the EV SoC upper limit of 0.91 during the same overnight window. Positive battery power denotes charging.}}{68}{figure.caption.31}%
+\addvspace {10\p@ }
+\def \@chapapp {\appendixname }
+\addvspace {10\p@ }
+\providecommand \tocbasic@end@toc@file {}\tocbasic@end@toc@file 

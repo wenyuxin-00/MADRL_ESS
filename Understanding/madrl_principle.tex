@@ -1,0 +1,1284 @@
+\documentclass[UTF8,zihao=-4]{ctexart}
+\usepackage[a4paper,margin=2.35cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,longtable,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{listings}
+
+\hypersetup{colorlinks=true,linkcolor=blue!55!black,urlcolor=blue!55!black}
+\setlist[itemize]{leftmargin=2em,itemsep=0.24em}
+\setlist[enumerate]{leftmargin=2em,itemsep=0.24em}
+\lstset{basicstyle=\ttfamily\small,breaklines=true,frame=single,columns=fullflexible}
+
+\title{MADRL 算法完整讲解\\{\large 从零基础强化学习到项目中的 MATD3、reward function 和 safety projection}}
+\author{MADRL\_ESS 项目理解笔记}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{这份文档怎么读}
+
+本文件默认读者没有学过 DRL，也没有学过 MADRL。因此前几节不会直接讲代码，而是先回答一些最基础的问题：
+\begin{itemize}
+  \item 什么是强化学习；
+  \item 什么是状态、观测、动作、奖励；
+  \item 为什么要关心未来累计奖励；
+  \item Q 值、Bellman target、critic、actor 到底是什么意思；
+  \item replay buffer、target network、twin critic 为什么存在。
+\end{itemize}
+
+后半部分再回到本项目，讲清楚：
+\begin{itemize}
+  \item 项目里的 MADRL 训练流程；
+  \item actor 和 critic 的输入输出；
+  \item reward function 的每一项；
+  \item PV 在这里如何作为预测输入和可控弃光变量进入净负荷；
+  \item safety penalty 和 safety projection 的区别；
+  \item \texttt{MADRL\_BASE}、\texttt{MADRL\_PENALTY}、\texttt{MADRL\_PROJECTION} 三个方案的差异。
+\end{itemize}
+
+EV 和静态电池的详细物理建模已经在前面的文档中讲过，这里只在解释动作、reward 和 projection 时简要使用。
+
+\section{强化学习最基本的故事}
+
+\subsection{强化学习不是“直接给答案”}
+
+监督学习里，我们通常给模型很多样本，例如“这张图是猫”“这张图是狗”，模型学习输入到标签的对应关系。
+
+强化学习不同。强化学习没有每一步的标准答案。它更像训练一个会试错的控制器：
+\begin{equation}
+\text{看见当前情况}
+\rightarrow
+\text{做一个动作}
+\rightarrow
+\text{环境发生变化}
+\rightarrow
+\text{得到奖励或惩罚}.
+\end{equation}
+
+控制器一开始可能乱做。它通过大量试错慢慢学会：哪些动作长期来看更好，哪些动作虽然眼前不错但以后会出问题。
+
+在本项目中，这个故事对应为：
+\begin{itemize}
+  \item 环境：低压配电网、家庭负荷、PV、静态电池、EV；
+  \item 智能体 agent：每个 prosumer 的控制器；
+  \item 动作：电池充放电、PV 使用/弃光、EV 充电；
+  \item 奖励：电费收益、EV 成本、SoC 惩罚、电压/线路/变压器安全惩罚等。
+\end{itemize}
+
+\subsection{一个时间步发生了什么}
+
+强化学习通常按离散时间步运行。本项目里一个时间步是：
+\begin{equation}
+\Delta t=0.25\text{ 小时}=15\text{ 分钟}.
+\end{equation}
+
+在时间步 $t$，闭环是：
+\begin{enumerate}
+  \item 环境给出观测 $o_t$；
+  \item actor 根据观测输出动作 $a_t$；
+  \item 动作经过本地物理裁剪和可选 safety projection；
+  \item 环境执行动作，更新电池 SoC、EV SoC、PV 利用、净负荷；
+  \item pandapower 计算潮流，得到电压、线路负载率、变压器负载率；
+  \item 环境计算 reward；
+  \item 进入下一步 $t+1$。
+\end{enumerate}
+
+写成公式就是：
+\begin{equation}
+o_t \xrightarrow{\pi} a_t
+\xrightarrow{\text{env.step}}
+(r_t,o_{t+1}).
+\end{equation}
+
+\section{状态、观测、动作、奖励}
+
+\subsection{状态和观测}
+
+理论上，状态 $s_t$ 表示环境在时刻 $t$ 的完整真实情况。如果知道完整状态，就等于知道系统现在的一切。
+
+但实际控制器通常看不到所有信息，所以项目里更重要的是观测 $o_t$。观测是 agent 能看到、能输入神经网络的信息。
+
+对第 $i$ 个 agent：
+\begin{equation}
+o_{i,t}=\text{agent }i\text{ 在 }t\text{ 时刻看到的信息}.
+\end{equation}
+
+本项目的 actor 观测包括：
+\begin{itemize}
+  \item 时间周期特征，例如一天中的时间、一年中的日期；
+  \item 静态电池 SoC；
+  \item EV SoC；
+  \item EV 是否连接；
+  \item 未来价格窗口；
+  \item 未来负荷预测；
+  \item 未来 PV 预测。
+\end{itemize}
+
+\subsection{动作}
+
+每个 agent 的动作是三维连续动作：
+\begin{equation}
+a_{i,t}
+=
+\left[
+a^{bat}_{i,t},
+a^{pv}_{i,t},
+a^{ev}_{i,t}
+\right],
+\qquad
+a_{i,t}\in[-1,1]^3.
+\end{equation}
+
+三个维度含义是：
+\begin{itemize}
+  \item $a^{bat}$：电池动作，之后会映射成电池功率；
+  \item $a^{pv}$：PV 动作，之后会映射成 PV 利用率；
+  \item $a^{ev}$：EV 动作，之后会映射成 EV 充电功率。
+\end{itemize}
+
+注意：actor 输出的不是直接 kW，而是归一化动作。这样神经网络永远只需要输出 $[-1,1]$ 范围内的数，物理单位转换由环境和后处理完成。
+
+\subsection{奖励}
+
+奖励 $r_{i,t}$ 是 agent 学习的方向。奖励越高，说明这个动作越值得保留；奖励越低，说明这个动作带来成本或风险。
+
+本项目的 reward 不是单纯电费，而是多项组合。代码中的总 reward 可以概括为：
+\begin{equation}
+\begin{aligned}
+r_{i,t}
+=&
+R^{stor}_{i,t}
++ 
+R^{ev}_{i,t}
+-L^{act}_{i,t}
+-L^{soc}_{i,t}
+-L^{ev,soc}_{i,t}\\
+&-L^{ev,dep}_{i,t}
+-L^{ev,over}_{i,t}
+-L^{ev,prog}_{i,t}
+-L^{ev,price}_{i,t}\\
+&-L^{ev,proj}_{i,t}
+-L^{ev,eme}_{i,t}
++B^{through}_{i,t}\\
+&-L^v_{i,t}
+-L^\ell_{i,t}
+-L^{tr}_{i,t}.
+\end{aligned}
+\end{equation}
+
+这里第一行有一个容易漏看的点：$R^{ev}_{i,t}$ 本身是负的 EV 充电成本，所以它在公式中以加号出现。更直观地说：
+\begin{equation}
+R^{ev}_{i,t}=-C^{ev}_{i,t}.
+\end{equation}
+
+\section{为什么不能只看当前奖励}
+
+\subsection{当前省钱不一定长期好}
+
+如果 agent 只追求当前 15 分钟奖励，它可能学出很短视的策略。例如：
+\begin{itemize}
+  \item 当前电价高，所以 EV 不充电；
+  \item 但一直拖到离家前，EV SoC 不够；
+  \item 最后被离家惩罚或 hard projection 强制高价充电。
+\end{itemize}
+
+因此强化学习要关心未来累计奖励，叫 return。
+
+\subsection{return 是什么}
+
+从时刻 $t$ 开始，未来总回报为：
+\begin{equation}
+G_t
+=
+r_t+\gamma r_{t+1}+\gamma^2 r_{t+2}+\gamma^3 r_{t+3}+\cdots.
+\end{equation}
+
+$\gamma$ 叫折扣因子，范围是：
+\begin{equation}
+0\le \gamma\le 1.
+\end{equation}
+
+如果 $\gamma=0$，算法只看当前奖励。如果 $\gamma$ 接近 1，算法会很重视未来。本项目默认：
+\begin{equation}
+\gamma=0.999.
+\end{equation}
+
+这说明能源调度需要长视野，因为电池 SoC、EV 离家需求和电网峰值都不是一步动作能解释完的。
+
+\section{Q 值：critic 在估计什么}
+
+\subsection{Q 值的通俗解释}
+
+Q 值可以理解成：
+\begin{quote}
+如果我现在在这种情况下做这个动作，从现在到未来总共大概能拿多少分。
+\end{quote}
+
+数学上：
+\begin{equation}
+Q^\pi(s_t,a_t)
+=
+\mathbb{E}
+\left[
+\sum_{k=0}^{\infty}\gamma^k r_{t+k}
+\mid
+s_t,a_t,\pi
+\right].
+\end{equation}
+
+这里 $\pi$ 是之后继续使用的策略。$Q^\pi(s_t,a_t)$ 不是只评价当前动作的即时奖励，而是评价“当前动作加上后续策略”带来的长期价值。
+
+如果把它说得更生活化：
+\begin{quote}
+Q 值不是问“这一口饭好不好吃”，而是问“这样吃下去，整顿饭体验会不会好”。
+\end{quote}
+
+\subsection{为什么 critic 需要看联合动作}
+
+本项目是多智能体电网系统。某个 agent 的动作会影响公共电网状态：
+\begin{equation}
+\bm a_t=(a_{1,t},a_{2,t},\dots,a_{N,t})
+\rightarrow
+\text{潮流}
+\rightarrow
+\text{安全惩罚}.
+\end{equation}
+
+因此项目中的 critic 不是只看 agent 自己，而是看联合观测和联合动作：
+\begin{equation}
+Q_i(\bm{o}_t,\bm{a}_t).
+\end{equation}
+
+其中：
+\begin{equation}
+\bm{o}_t=(o_{1,t},o_{2,t},\dots,o_{N,t}),
+\qquad
+\bm{a}_t=(a_{1,t},a_{2,t},\dots,a_{N,t}).
+\end{equation}
+
+这让 critic 能学习“大家同时这样做”对第 $i$ 个 agent reward 的长期影响。
+
+\section{Bellman 方程和 Bellman target}
+
+\subsection{Bellman 方程的直觉}
+
+Bellman 方程是强化学习里最核心的想法之一。它说：
+\begin{quote}
+当前动作的长期价值 = 当前这一步奖励 + 下一步继续行动的长期价值。
+\end{quote}
+
+公式是：
+\begin{equation}
+Q(s_t,a_t)
+\approx
+r_t+\gamma Q(s_{t+1},a_{t+1}).
+\end{equation}
+
+这句话非常重要。它把一个很长的未来问题，拆成了“眼前一步 + 剩下未来”。
+
+\subsection{Bellman target 是什么}
+
+critic 是神经网络，它会输出一个预测值：
+\begin{equation}
+\hat Q=Q_\phi(s_t,a_t).
+\end{equation}
+
+但训练神经网络需要一个“目标答案”。Bellman target 就是用 Bellman 方程临时构造出来的目标答案：
+\begin{equation}
+y_t=r_t+\gamma Q_{\phi^-}(s_{t+1},a_{t+1}).
+\end{equation}
+
+这里 $\phi^-$ 表示 target critic 的参数。target critic 是一个变化较慢的 critic，用它生成目标值会更稳定。
+
+critic 的训练目标是让自己的预测接近 Bellman target：
+\begin{equation}
+L^{critic}
+=
+\left(
+Q_\phi(s_t,a_t)-y_t
+\right)^2.
+\end{equation}
+
+所以 Bellman target 可以理解为：
+\begin{quote}
+用“已经拿到的当前奖励”和“对未来的旧网络估计”拼出来的训练标签。
+\end{quote}
+
+\subsection{本项目为什么用 n-step target}
+
+如果只用一步 target：
+\begin{equation}
+y_t=r_t+\gamma Q(s_{t+1},a_{t+1}),
+\end{equation}
+critic 每次只直接看到一步 reward，长期信号传播比较慢。
+
+本项目使用 n-step return。先把未来 $n$ 步真实 reward 加起来，再接上未来 Q 估计：
+\begin{equation}
+y_{i,t}
+=
+\sum_{k=0}^{n-1}\gamma^k r_{i,t+k}
++
+\gamma^n
+\min
+\left(
+Q^{target}_{i,1}(\bm{o}_{t+n},\bm{a}'_{t+n}),
+Q^{target}_{i,2}(\bm{o}_{t+n},\bm{a}'_{t+n})
+\right).
+\end{equation}
+
+代码中 $n=\texttt{cfg.train.n\_step\_return}$，默认是 48。每步 15 分钟，所以 48 步约等于 12 小时。这对 EV 夜间充电很有意义，因为晚上是否充电会影响早晨离家。
+
+\subsection{bootstrap 是什么}
+
+上式最后的 Q 值叫 bootstrap 项。bootstrap 的意思是：
+\begin{quote}
+真实 reward 只累加到某一步，后面太远的未来不直接展开，而是用 critic 的估计接上。
+\end{quote}
+
+在代码的 \texttt{ReplayBuffer} 中，n-step transition 会保存：
+\begin{itemize}
+  \item n-step reward；
+  \item next observation；
+  \item bootstrap discount。
+\end{itemize}
+
+如果 episode 已结束，后面没有未来了，bootstrap discount 就是 0；如果 episode 没结束，bootstrap discount 就是 $\gamma^n$。
+
+\section{Actor 和 critic}
+
+\subsection{Actor：负责做动作}
+
+Actor 是策略网络。它把观测映射为动作：
+\begin{equation}
+a_{i,t}=\pi_{\theta_i}(o_{i,t}).
+\end{equation}
+
+项目中每个 agent 有一个自己的 actor。代码在 \texttt{models/assembly.py} 的 \texttt{Actor} 类中定义，结构是：
+\begin{equation}
+\text{输入}
+\rightarrow
+\text{Linear}
+\rightarrow
+\text{ReLU}
+\rightarrow
+\text{Linear}
+\rightarrow
+\text{ReLU}
+\rightarrow
+\text{Linear}
+\rightarrow
+\tanh.
+\end{equation}
+
+最后的 $\tanh$ 把输出压到 $[-1,1]$。
+
+\subsection{Critic：负责评价动作}
+
+Critic 是价值网络。它输入联合观测和联合动作，输出 Q 值：
+\begin{equation}
+Q_{i,\phi_i}(\bm{o}_t,\bm{a}_t).
+\end{equation}
+
+项目中每个 agent 有自己的 critic，而且是 twin critic：
+\begin{equation}
+Q_{i,1},\qquad Q_{i,2}.
+\end{equation}
+
+twin critic 的作用是降低 Q 值过高估计。target Q 取二者较小值：
+\begin{equation}
+\min(Q_{i,1}^{target},Q_{i,2}^{target}).
+\end{equation}
+
+如果只用一个 critic，actor 可能会利用 critic 的错误高估，选择看似价值很高但实际不好的动作。取较小值是一种保守策略。
+
+\subsection{Actor 怎么学习}
+
+Actor 的目标是选择 critic 认为长期价值更高的动作：
+\begin{equation}
+\max_{\theta_i}
+Q_{i,1}(\bm{o}_t,\bm{a}^{policy}_t).
+\end{equation}
+
+代码里通常通过最小化负值实现：
+\begin{equation}
+L^{actor}_i
+=
+-
+\mathbb{E}
+\left[
+Q_{i,1}(\bm{o}_t,\bm{a}^{policy}_t)
+\right].
+\end{equation}
+
+所以可以把训练关系理解为：
+\begin{quote}
+critic 学会打分，actor 学会拿高分。
+\end{quote}
+
+\section{Replay buffer：为什么要存经验}
+
+\subsection{transition 是什么}
+
+一次交互会产生一条经验，叫 transition：
+\begin{equation}
+(\bm{o}_t,\bm{a}_t,\bm{r}_t,\bm{o}_{t+1},done).
+\end{equation}
+
+它记录了：当时看到了什么、做了什么、拿到什么 reward、下一步看到了什么、episode 是否结束。
+
+\subsection{为什么不能边走边只学最新一步}
+
+如果只用最新一步训练，数据强相关，训练容易抖动。例如一天中的相邻 15 分钟非常相似，神经网络连续看到高度相似样本，可能学得不稳。
+
+Replay buffer 是经验池。项目把很多 transition 存起来，训练时随机抽样：
+\begin{equation}
+\mathcal{B}\sim \text{ReplayBuffer}.
+\end{equation}
+
+好处是：
+\begin{itemize}
+  \item 打乱时间相关性；
+  \item 旧经验可以重复使用；
+  \item batch 训练更稳定。
+\end{itemize}
+
+\section{TD3 和 MATD3：项目算法骨架}
+
+\subsection{TD3 是什么}
+
+TD3 是一种适合连续动作空间的 actor-critic 算法。它有三个核心技巧：
+\begin{itemize}
+  \item twin critic：两个 critic 取较小值，降低过高估计；
+  \item target policy smoothing：target action 加一点小噪声，避免 critic 对某个精确动作点过拟合；
+  \item delayed actor update：critic 先多学几步，actor 不要太频繁更新。
+\end{itemize}
+
+本项目的主线接近 MATD3，也就是多智能体版本的 TD3。
+
+\subsection{Target network：慢一点的老师}
+
+项目中 actor 和 critic 都有 target network：
+\begin{equation}
+\pi_{\theta_i}^{target},
+\qquad
+Q_{\phi_i}^{target}.
+\end{equation}
+
+它们不是每一步直接复制在线网络，而是慢慢更新：
+\begin{equation}
+\theta^{target}
+\leftarrow
+(1-\tau)\theta^{target}
++\tau\theta.
+\end{equation}
+
+项目默认：
+\begin{equation}
+\tau=0.01.
+\end{equation}
+
+这叫 soft update。直觉上，target network 是一个慢一点的老师，避免训练目标变化太快。
+
+\subsection{Target policy smoothing}
+
+计算下一步 target action 时，项目先用 target actor 生成动作，再加噪声：
+\begin{equation}
+\bm{a}'_{t+n}
+=
+\operatorname{clip}
+\left(
+\pi^{target}(\bm{o}_{t+n})+\epsilon,
+-1,1
+\right).
+\end{equation}
+
+噪声也会被裁剪：
+\begin{equation}
+\epsilon\sim\mathcal{N}(0,\sigma^2),
+\qquad
+\epsilon\in[-c,c].
+\end{equation}
+
+项目中：
+\begin{equation}
+\texttt{policy\_noise}=0.2,\qquad
+\texttt{noise\_clip}=0.5.
+\end{equation}
+
+这个技巧的意思是：critic 不应该只在某个非常精确的动作点上给高分，而应该在动作附近也比较平滑。
+
+\subsection{Delayed actor update}
+
+项目不是每次 critic 更新都更新 actor，而是每隔若干次更新 actor：
+\begin{equation}
+\texttt{policy\_update\_freq}=2.
+\end{equation}
+
+原因是 actor 依赖 critic 的评价。如果 critic 还没学准，actor 太早跟着 critic 走，可能越学越偏。让 critic 先多学一点，actor 再更新，通常更稳定。
+
+\section{集中训练、分散执行 CTDE}
+
+\subsection{为什么需要 CTDE}
+
+本项目有多个 agent。执行时，每个家庭不一定能看到全网所有信息，所以 actor 分散执行：
+\begin{equation}
+a_{i,t}=\pi_{\theta_i}(o_{i,t}).
+\end{equation}
+
+但训练时，critic 可以看到联合观测和联合动作：
+\begin{equation}
+Q_i(\bm{o}_t,\bm{a}_t).
+\end{equation}
+
+这叫 centralized training, decentralized execution，简称 CTDE。
+
+\subsection{CTDE 的好处}
+
+CTDE 的好处是：
+\begin{itemize}
+  \item 执行时简单，每个 agent 只用自己的 actor；
+  \item 训练时更聪明，critic 能看到多 agent 的相互影响；
+  \item 适合电网这类耦合系统，因为一个用户动作会影响公共电压和变压器。
+\end{itemize}
+
+\section{项目中的观测输入}
+
+\subsection{Actor 输入}
+
+代码中 actor 输入由 \texttt{actor\_features} 拼接：
+\begin{equation}
+o^{actor}_{i,t}
+=
+\left[
+o^{local}_{i,t},
+\rho^p_{t:t+H-1},
+\sigma^p_{t:t+H-1},
+\hat L_{i,t:t+H-1},
+\hat G_{i,t:t+H-1}
+\right].
+\end{equation}
+
+各部分含义：
+\begin{itemize}
+  \item $o^{local}$：本地状态，包含时间周期特征、电池 SoC、EV SoC、EV 是否连接；
+  \item $\rho^p$：未来价格在窗口中的相对高低；
+  \item $\sigma^p$：未来价格窗口的价差强度；
+  \item $\hat L$：未来负荷预测；
+  \item $\hat G$：未来 PV 预测。
+\end{itemize}
+
+代码中 actor 输入维度是：
+\begin{equation}
+7+4H.
+\end{equation}
+
+$H=\texttt{cfg.obs.sequence\_length}$，默认是 49。
+
+\subsection{Critic 输入}
+
+critic 输入由 \texttt{critic\_features} 拼接：
+\begin{equation}
+o^{critic}_t
+=
+\left[
+\bm{o}^{local}_t,
+\rho^p_{t:t+H-1},
+\sigma^p_{t:t+H-1},
+\hat{\bm L}_{t:t+H-1},
+\hat{\bm G}_{t:t+H-1},
+\bm a_t
+\right].
+\end{equation}
+
+它比 actor 输入更多，因为它包含所有 agent 的局部信息、所有 agent 的负荷和 PV 序列，以及联合动作。
+
+\section{项目中的动作后处理}
+
+\subsection{为什么 raw action 不能直接执行}
+
+actor 输出的是 raw action，范围在 $[-1,1]$。但是物理系统有很多边界：
+\begin{itemize}
+  \item 电池 SoC 不能超过上下限；
+  \item PV 弃光不能超过当前可用 PV；
+  \item EV 不在家不能充电；
+  \item safety projection 可能还要为了电网安全修正动作。
+\end{itemize}
+
+因此项目动作流程是：
+\begin{equation}
+\text{raw action}
+\rightarrow
+\text{SoC 可行映射}
+\rightarrow
+\text{可选 safety projection}
+\rightarrow
+\text{本地可行性裁剪}
+\rightarrow
+\text{环境执行}.
+\end{equation}
+
+\subsection{电池动作映射}
+
+项目先根据当前 SoC 计算电池本步可行功率区间：
+\begin{equation}
+P^b_{i,t}\in[\underline P^b_{i,t},\overline P^b_{i,t}].
+\end{equation}
+
+然后把 raw battery action 从 $[-1,1]$ 映射到该区间：
+\begin{equation}
+P^b_{i,t}
+=
+\underline P^b_{i,t}
++
+\frac{a^{raw,bat}_{i,t}+1}{2}
+\left(
+\overline P^b_{i,t}-\underline P^b_{i,t}
+\right).
+\end{equation}
+
+这样 actor 即使输出 $1$ 或 $-1$，也不会直接把电池推到 SoC 越界。
+
+\section{PV 在项目中如何处理}
+
+\subsection{PV 是预测输入，不是 actor 创造出来的}
+
+PV 可用功率来自数据和预测：
+\begin{equation}
+G_{i,t}.
+\end{equation}
+
+actor 不能改变太阳真实发多少电。它只能决定使用多少 PV，弃掉多少 PV。
+
+因此有两个量：
+\begin{itemize}
+  \item $G_{i,t}$：可用 PV；
+  \item $G^{use}_{i,t}$：实际利用 PV。
+\end{itemize}
+
+\subsection{PV action 到利用率}
+
+actor 输出：
+\begin{equation}
+a^{pv}_{i,t}\in[-1,1].
+\end{equation}
+
+环境把它映射成 PV 利用率：
+\begin{equation}
+\lambda^{pv}_{i,t}
+=
+\operatorname{clip}
+\left(
+\frac{a^{pv}_{i,t}+1}{2},
+0,
+1
+\right).
+\end{equation}
+
+实际使用 PV：
+\begin{equation}
+G^{use}_{i,t}
+=
+\operatorname{clip}
+\left(
+G_{i,t}\lambda^{pv}_{i,t},
+0,
+G_{i,t}
+\right).
+\end{equation}
+
+弃光：
+\begin{equation}
+G^{curt}_{i,t}=G_{i,t}-G^{use}_{i,t}.
+\end{equation}
+
+如果 $a^{pv}=1$，PV 全部使用。如果 $a^{pv}=-1$，PV 全部弃掉。
+
+\subsection{PV 如何影响净负荷}
+
+净负荷是：
+\begin{equation}
+P^{net}_{i,t}
+=
+L_{i,t}
+-
+G^{use}_{i,t}
++
+P^b_{i,t}
++
+P^{ev}_{i,t}.
+\end{equation}
+
+所以 PV 使用越多，净负荷越低；PV 弃光越多，净负荷越高：
+\begin{equation}
+G^{curt}_{i,t}\uparrow
+\Rightarrow
+G^{use}_{i,t}\downarrow
+\Rightarrow
+P^{net}_{i,t}\uparrow.
+\end{equation}
+
+这也是 safety projection 能通过 PV 弃光改善电网安全的原因。例如 PV 过多可能造成反向潮流或电压升高，增加弃光可以降低注入。
+
+\subsection{PV 有没有直接 reward 惩罚}
+
+当前项目中没有一个显式的“弃光成本”主项。PV 主要通过净负荷影响潮流，再影响安全 penalty：
+\begin{equation}
+G^{curt}
+\rightarrow
+P^{net}
+\rightarrow
+\text{pandapower 潮流}
+\rightarrow
+L^v,L^\ell,L^{tr}.
+\end{equation}
+
+所以 PV 的价值更多是间接体现：它改变电网状态和电池/EV 调度机会。
+
+\section{项目 reward function 逐项解释}
+
+\subsection{总公式}
+
+代码在 \texttt{envs/grid\_env.py} 的 \texttt{GridEnv.step} 中计算 reward。总公式可以写成：
+\begin{equation}
+\begin{aligned}
+r_{i,t}
+=&
+R^{stor}_{i,t}
+-
+C^{ev}_{i,t}
+-L^{act}_{i,t}
+-L^{soc}_{i,t}
+-L^{ev,soc}_{i,t}\\
+&-L^{ev,dep}_{i,t}
+-L^{ev,over}_{i,t}
+-L^{ev,prog}_{i,t}
+-L^{ev,price}_{i,t}\\
+&-L^{ev,proj}_{i,t}
+-L^{ev,eme}_{i,t}
++B^{through}_{i,t}\\
+&-L^v_{i,t}
+-L^\ell_{i,t}
+-L^{tr}_{i,t}.
+\end{aligned}
+\end{equation}
+
+下面逐项解释。
+
+\subsection{电池收益}
+
+电池功率 $P^b_{i,t}$ 正数表示充电，负数表示放电。代码中的电池收益为：
+\begin{equation}
+R^{stor}_{i,t}
+=
+\left[
+\max(-P^b_{i,t},0)
+-
+\max(P^b_{i,t},0)
+\right]
+\tilde p_t\Delta t.
+\end{equation}
+
+如果电池放电，$P^b<0$，第一项为正，表示减少购电或获得等价收益。如果电池充电，第二项为正，但前面有负号，表示成本。
+
+\subsection{EV 充电成本}
+
+EV 充电成本为：
+\begin{equation}
+C^{ev}_{i,t}
+=
+w^{ev}_{cost}
+P^{ev}_{i,t}
+\tilde p_t
+\Delta t.
+\end{equation}
+
+它在 reward 中是负项。EV 充得越多、价格越高，成本越大。
+
+\subsection{动作边界惩罚}
+
+如果电池已经接近 SoC 边界，但 actor 仍然推动它继续往边界方向走，会触发动作边界惩罚：
+\begin{equation}
+L^{act}_{i,t}
+=
+w^{act}
+|P^b_{i,t}|
+\mathbb{I}_{boundary}.
+\end{equation}
+
+这里 $\mathbb{I}_{boundary}$ 是指示函数，表示是否在边界附近还往错误方向推。
+
+\subsection{SoC 正则惩罚}
+
+项目还设置了软 SoC 区间。如果电池 SoC 太接近硬边界，会有正则惩罚：
+\begin{equation}
+L^{soc}_{i,t}
+=
+w^{soc}
+\left[
+\max(0,SOC^{soft}_{low}-SOC^b_{i,t})^2
++
+\max(0,SOC^b_{i,t}-SOC^{soft}_{high})^2
+\right].
+\end{equation}
+
+物理意义是：不要总贴着电池边界运行，留一点调度余量。
+
+\subsection{EV SoC、离家、进度和价格惩罚}
+
+EV 相关惩罚包括：
+\begin{itemize}
+  \item $L^{ev,soc}$：EV SoC 超出软范围的正则；
+  \item $L^{ev,dep}$：离家时没有达到目标 SoC 的缺口惩罚；
+  \item $L^{ev,over}$：hard 模式下离家超过目标过多的惩罚；
+  \item $L^{ev,prog}$：soft 模式下连接期间没有跟上充电进度的惩罚；
+  \item $L^{ev,price}$：在高于价格阈值时充电的价格感知惩罚；
+  \item $L^{ev,proj}$：hard projection 额外抬高 EV 充电功率的惩罚；
+  \item $L^{ev,eme}$：emergency charging 增加功率的惩罚。
+\end{itemize}
+
+离家缺口惩罚的典型形式是：
+\begin{equation}
+L^{ev,dep}_{i,t}
+=
+w^{ev}_{dep}
+\left[
+\max(0,SOC^{ev}_{req}-SOC^{ev}_{i,t+1})
+\right]^2,
+\end{equation}
+只在 departure step 触发。
+
+进度目标可以理解为：从到家 SoC 到离家目标 SoC 之间画一条随时间上升的线。如果 EV 连接期间落后太多，就提前给惩罚，而不是只在离家那一刻才扣分。
+
+\subsection{throughput bonus}
+
+项目有一个电池吞吐 bonus：
+\begin{equation}
+B^{through}_{i,t}
+=
+w^{through}_t
+|P^b_{i,t}|
+\Delta t.
+\end{equation}
+
+它在训练早期鼓励电池多探索充放电行为。权重会随训练进度下降，所以后期不会一直鼓励无意义动作。
+
+\subsection{电网安全惩罚}
+
+环境执行动作后，pandapower 计算潮流。若电压、线路或变压器越界，会产生安全惩罚：
+\begin{equation}
+L^{safe}_{i,t}
+=
+L^v_{i,t}
++
+L^\ell_{i,t}
++
+L^{tr}_{i,t}.
+\end{equation}
+
+三项分别对应：
+\begin{itemize}
+  \item $L^v$：电压越界惩罚；
+  \item $L^\ell$：线路负载率越界惩罚；
+  \item $L^{tr}$：变压器负载率越界惩罚。
+\end{itemize}
+
+三个 MADRL 方案的安全权重不同：
+\begin{longtable}{p{3.7cm}p{3.4cm}p{6.5cm}}
+\toprule
+方案 & 安全机制 & 含义 \\
+\midrule
+\endhead
+\texttt{MADRL\_BASE} & 安全权重为 0，无 projection & 主要学习经济调度 \\
+\texttt{MADRL\_PENALTY} & 有安全 reward penalty，无 projection & unsafe 后扣分，让 actor 自己学会避免 \\
+\texttt{MADRL\_PROJECTION} & 有安全 penalty，且启用 projection & 执行前修正动作，同时仍保留安全扣分信号 \\
+\bottomrule
+\end{longtable}
+
+\section{项目训练流程}
+
+\subsection{整体伪代码}
+
+\begin{lstlisting}[language={},caption={项目 MADRL 训练流程}]
+初始化每个 agent 的 actor、critic、target actor、target critic
+初始化 replay buffer
+初始化并行训练环境 SubprocVecEnv
+
+while 已完成 episode 数 < 目标 episode 数:
+    1. 每个 actor 根据当前 obs 输出 raw action
+    2. 给 raw action 加探索噪声
+    3. 把电池动作映射到 SoC 可行功率区间
+    4. 以一定概率进行随机可行电池探索
+    5. 如果是 projection 方案，调用 JointGridSafetyProjector
+    6. 再做本地可行性裁剪
+    7. 环境执行 action，返回 reward、next_obs、done、info
+    8. transition 写入 ReplayBuffer
+    9. buffer 足够大后随机采样 batch
+    10. 对每个 agent 更新 critic
+    11. 每隔 policy_update_freq 次更新 actor
+    12. soft update target networks
+
+保存模型、meta 信息、训练 reward 曲线
+\end{lstlisting}
+
+\subsection{探索噪声}
+
+训练时 actor 输出后会加高斯噪声：
+\begin{equation}
+a^{raw}
+\leftarrow
+\operatorname{clip}(a^{raw}+\epsilon,-1,1).
+\end{equation}
+
+噪声标准差从初始值逐渐衰减到最小值。训练早期多试错，训练后期更相信学到的 actor。
+
+项目还会以一定概率随机采样可行电池功率。这个概率也会逐渐下降。它帮助电池动作空间在训练早期被充分探索。
+
+\subsection{Critic 更新流程}
+
+对第 $i$ 个 agent：
+\begin{enumerate}
+  \item target actors 对 next observation 生成下一步动作；
+  \item 给下一步动作加 target smoothing 噪声；
+  \item 对下一步动作做同样的后处理和 projection；
+  \item target twin critics 计算两个 Q 值；
+  \item 取较小值构造 Bellman target；
+  \item 当前 critic 对 batch 中真实动作计算 Q；
+  \item 用 MSE 更新 critic。
+\end{enumerate}
+
+公式：
+\begin{equation}
+y_i
+=
+R^{(n)}_{i,t}
++
+\Gamma^{(n)}_{i,t}
+\min(Q^{target}_{i,1},Q^{target}_{i,2}).
+\end{equation}
+
+loss：
+\begin{equation}
+L^{critic}_i
+=
+\operatorname{MSE}(Q_{i,1},y_i)
++
+\operatorname{MSE}(Q_{i,2},y_i).
+\end{equation}
+
+\subsection{Actor 更新流程}
+
+更新第 $i$ 个 actor 时，项目只替换联合动作中第 $i$ 个 agent 的动作：
+\begin{equation}
+\bm{a}^{policy}_t
+=
+(a_{1,t},\dots,\pi_i(o_{i,t}),\dots,a_{N,t}).
+\end{equation}
+
+然后仍然经过本地可行性处理和可选 projection，再送入 critic：
+\begin{equation}
+L^{actor}_i
+=
+-
+\mathbb{E}
+\left[
+Q_{i,1}(\bm{o}_t,\bm{a}^{policy}_t)
+\right].
+\end{equation}
+
+这相当于问 critic：如果只把 agent $i$ 的动作换成 actor 当前想做的动作，长期价值会不会更好？
+
+\section{Safety penalty 和 safety projection}
+
+\subsection{Safety penalty：事后扣分}
+
+Safety penalty 是动作执行之后才发生的。流程是：
+\begin{equation}
+\text{执行动作}
+\rightarrow
+\text{pandapower 潮流}
+\rightarrow
+\text{发现越界}
+\rightarrow
+\text{reward 扣分}.
+\end{equation}
+
+它像考试后扣分：能告诉 actor 哪些行为不好，但不能阻止这一步 unsafe action 已经发生。
+
+\subsection{Safety projection：执行前修正}
+
+Safety projection 是动作执行前发生的：
+\begin{equation}
+\bm a^{raw}
+\rightarrow
+\bm a^{projected}
+\rightarrow
+\text{环境执行}.
+\end{equation}
+
+它像安全过滤器。如果 actor 输出动作可能导致电压、线路或变压器风险，projection 会尽量把动作拉回近似安全区域。
+
+\section{Safety projection 如何实现}
+
+\subsection{投影变量}
+
+\texttt{JointGridSafetyProjector} 只投影两类变量：
+\begin{equation}
+\bm{x}
+=
+\left[
+P^b_1,\dots,P^b_N,
+G^{curt}_1,\dots,G^{curt}_N
+\right].
+\end{equation}
+
+它不投影 EV 充电。EV 充电由 EV hard projection 或 emergency 逻辑单独处理。
+
+\subsection{为什么电池和 PV 弃光可以一起投影}
+
+把 PV 使用写成 $G^{use}=G-G^{curt}$，净负荷为：
+\begin{equation}
+P^{net}_i
+=
+L_i-G_i+G^{curt}_i+P^b_i+P^{ev}_i.
+\end{equation}
+
+可见：
+\begin{equation}
+\frac{\partial P^{net}_i}{\partial P^b_i}=1,
+\qquad
+\frac{\partial P^{net}_i}{\partial G^{curt}_i}=1.
+\end{equation}
+
+也就是说，电池多充 1 kW 和 PV 多弃 1 kW 都会让该节点净负荷增加 1 kW。projection 因此可以把它们放进同一个变量向量。
+
+\subsection{灵敏度矩阵}
+
+真实 AC 潮流是非线性的。项目用有限差分得到线性灵敏度近似。先在零注入附近运行潮流得到基准：
+\begin{equation}
+\bm v^{base},\qquad \bm \ell^{base}.
+\end{equation}
+
+对第 $j$ 个 agent 做小扰动 $\delta=0.25$ kW：
+\begin{equation}
+\bm v^{+j}=\text{PF}(+\delta\bm e_j),
+\qquad
+\bm v^{-j}=\text{PF}(-\delta\bm e_j).
+\end{equation}
+
+电压灵敏度为：
+\begin{equation}
+S^v_{:,j}
+=
+\frac{\bm v^{+j}-\bm v^{-j}}{2\delta}.
+\end{equation}
+
+线路负载率灵敏度为：
+\begin{equation}
+S^\ell_{:,j}
+=
+\frac{\bm \ell^{+j}-\bm \ell^{-j}}{2\delta}.
+\end{equation}
+
+\subsection{基础净负荷}
+
+投影时，EV 先当作固定负荷：
+\begin{equation}
+P^{base}_i=L_i-G_i+P^{ev}_i.
+\end{equation}
+
+投影变量改变净负荷：
+\begin{equation}
+P^{net}_i=P^{base}_i+P^b_i+G^{curt}_i.
+\end{equation}
+
+\subsection{约束写成 half-space}
+
+线性近似下，电压、线路、变压器约束都可以整理成：
+\begin{equation}
+\bm r_m^\top\bm x\le b_m.
+\end{equation}
+
+所有约束的交集构成近似安全集合：
+\begin{equation}
+\mathcal{C}
+=
+\{\bm x:\bm r_m^\top\bm x\le b_m,\ \forall m\}.
+\end{equation}
+
+\subsection{逐行投影公式}
+
+如果某一行约束没有违反，即：
+\begin{equation}
+\bm r^\top\bm x\le b,
+\end{equation}
+则不修改。
+
+如果违反了，就把 $\bm x$ 沿着约束法向量拉回边界：
+\begin{equation}
+\bm x
+\leftarrow
+\bm x
+-
+\frac{
+\max(0,\bm r^\top\bm x-b)
+}
+\|\bm r\|_2^2
+\bm r.
+\end{equation}
+
+项目会对所有约束行循环投影，并重复：
+\begin{equation}
+\texttt{projection\_iters}=3
+\end{equation}
+轮。每轮之后还会裁剪本地物理范围：
+\begin{equation}
+P^b_i\leftarrow
+\operatorname{clip}(P^b_i,\underline P^b_i,\overline P^b_i),
+\end{equation}
+\begin{equation}
+G^{curt}_i\leftarrow
+\operatorname{clip}(G^{curt}_i,0,G_i).
+\end{equation}
+
+\subsection{投影后的动作转回 actor 格式}
+
+投影得到的是物理量 $P^b_i$ 和 $G^{curt}_i$，最后要转回环境动作：
+\begin{equation}
+a^{bat}_i=\frac{P^b_i}{P^{b,\max}_i},
+\end{equation}
+\begin{equation}
+a^{pv}_i
+=
+2\left(1-\frac{G^{curt}_i}{G_i}\right)-1.
+\end{equation}
+
+EV action 保持原值。
+
+\subsection{projection 的代价}
+
+projection 会提高安全性，但也有副作用：
+\begin{equation}
+\bm a^{actor}\ne \bm a^{executed}.
+\end{equation}
+
+actor 想做的动作和实际执行动作不完全一样，学习会更复杂。实验上常见现象是：projection 方案更安全，但经济性可能下降，因为部分套利动作会被安全过滤器修正。
+
+\section{执行阶段：训练好以后用什么}
+
+训练结束后，模型保存 actor 和 critic 参数。但实际评估或部署时，主要使用 actor：
+\begin{equation}
+o_{i,t}
+\rightarrow
+\pi_i(o_{i,t})
+\rightarrow
+\text{postprocess}
+\rightarrow
+a^{exec}_{i,t}.
+\end{equation}
+
+critic、replay buffer、Bellman target 都是训练时使用的工具。执行阶段不再更新网络，也不需要 replay buffer。
+
+如果模型 meta 中 \texttt{projection=True}，评估控制器会启用同样的 safety projection。代码上，就是 \texttt{MADRLController} 创建 \texttt{JointGridSafetyProjector} 后再执行动作后处理。
+
+\section{从代码角度看完整闭环}
+
+\begin{lstlisting}[language={},caption={项目中的 MADRL 闭环}]
+1. GridEnv._obs 产生 observation:
+   madrl_local, safety_local,
+   wholesale_price_relative_seq,
+   wholesale_price_spread_seq,
+   load_seq, pv_seq
+
+2. Actor 输出 raw action:
+   raw = actor(obs_i)
+
+3. 训练时加入探索:
+   raw = clip(raw + noise, -1, 1)
+
+4. 动作后处理:
+   map_actor_output_to_soc_feasible_action
+   optional JointGridSafetyProjector
+   enforce_local_action_feasibility
+
+5. GridEnv.step(action):
+   EV hard/emergency 逻辑
+   PV effective = pv * utilization
+   net = load - pv_effective + battery_kw + ev_charge_kw
+   pandapower power flow
+   reward = economic terms - penalties + bonus
+
+6. ReplayBuffer.add_batch:
+   形成 n-step transition
+
+7. 训练:
+   sample batch
+   critic 学 Bellman target
+   actor 最大化 critic Q
+   soft update target networks
+\end{lstlisting}
+
+\section{常见名词小词典}
+
+\begin{longtable}{p{3.0cm}p{11.0cm}}
+\toprule
+名词 & 解释 \\
+\midrule
+\endhead
+agent & 做决策的主体，本项目中是每个 prosumer 控制器 \\
+environment & 智能体交互的系统，本项目中是配电网仿真环境 \\
+state & 环境完整真实情况，实际控制器不一定全知道 \\
+observation & agent 能看到并输入网络的信息 \\
+action & actor 输出的控制动作，本项目是电池、PV、EV 三维动作 \\
+reward & 环境给动作的评分，用来引导学习 \\
+return & 从当前开始的未来折扣累计奖励 \\
+policy & 策略，从观测到动作的映射 \\
+actor & 策略网络，负责输出动作 \\
+critic & 价值网络，负责估计 Q 值 \\
+Q 值 & 当前情况下做某动作后，未来累计 reward 的估计 \\
+Bellman target & 用当前 reward 加未来 Q 估计构造出来的 critic 训练目标 \\
+bootstrap & 不把所有未来都展开，而是用 critic 对远期未来进行估计 \\
+replay buffer & 存经验的池子，训练时随机抽样 \\
+n-step return & 先累加未来 $n$ 步真实 reward，再接上 bootstrap Q 值 \\
+target network & 慢速更新的目标网络，用来稳定 Bellman target \\
+twin critic & 两个 critic，同一 target 取较小 Q 值以减少过高估计 \\
+TD3 & 连续动作 actor-critic 算法，使用 twin critic、target smoothing、delayed update \\
+MATD3 & TD3 的多智能体版本，本项目 MADRL 主线接近 MATD3 \\
+CTDE & 集中训练、分散执行 \\
+safety penalty & 动作执行后根据越界情况扣 reward \\
+safety projection & 动作执行前把电池功率和 PV 弃光投影到近似安全集合 \\
+\bottomrule
+\end{longtable}
+
+\section{总结}
+
+本项目中的 MADRL 可以概括为：
+\begin{quote}
+每个 agent 用自己的 actor 根据局部观测输出动作；训练时每个 critic 看联合观测和联合动作，学习 Bellman target；算法采用 MATD3 风格的 twin critic、target network、n-step replay buffer、target policy smoothing 和 delayed actor update；reward function 同时考虑经济性、EV 需求、电池边界和电网安全；projection 方案在动作执行前修正电池功率和 PV 弃光。
+\end{quote}
+
+如果只记一条主线，可以记：
+\begin{equation}
+\text{actor 做动作}
+\rightarrow
+\text{环境给 reward}
+\rightarrow
+\text{critic 学 Q 值}
+\rightarrow
+\text{actor 学会做 critic 认为更好的动作}.
+\end{equation}
+
+Bellman target 的核心也可以记成一句话：
+\begin{quote}
+当前动作的目标价值 = 已经拿到的短期真实 reward + 对剩余未来的 target critic 估计。
+\end{quote}
+
+PV 在项目中不是 actor 创造的电源，而是预测给出的可用发电；actor 通过 PV action 决定利用率，projection 通过调整 PV 弃光和电池功率来改善电网安全。这样，MADRL 不只是学省钱，还可以在 reward penalty 和 projection 的帮助下学习更安全的分布式调度。
+
+\end{document}

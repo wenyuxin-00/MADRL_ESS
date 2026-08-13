@@ -1,0 +1,9 @@
+label,group,total_eur,system_other_cost_eur,storage_profit_total_eur,ev_charging_cost_eur,ev_cost_weight_factor
+Base_hard,MADRL Hard,81.666,287.533,205.867,287.533,1.0
+Projection_Costweight_hard,MADRL Hard,356.284,434.216,-66.807,289.477,1.5
+Projection_Priceaware_hard,MADRL Hard,238.891,291.35,52.459,291.35,1.0
+Projection_hard,MADRL Hard,186.037,373.424,187.387,373.424,1.0
+Projection_hard (SoC0.91),MADRL Hard,494.247,288.425,-205.822,288.425,1.0
+ADMM-MPC Hard,Baseline,-2.855,235.744,238.599,235.744,1.0
+Local MPC Hard,Baseline,-36.374,235.681,272.055,235.681,1.0
+Rule-based with Battery,Baseline,274.009,386.895,112.886,386.895,1.0

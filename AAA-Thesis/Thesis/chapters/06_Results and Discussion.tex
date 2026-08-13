@@ -1,0 +1,372 @@
+% !TeX root = ../main.tex
+
+\chapter{Results and Discussion}\label{chapter:results-discussion}
+
+% Modified: Monetary values place EUR after the number; Chapter 6 tables use the same normal font size as other chapters without whole-table scaling.
+% Modified: Experimental settings already defined in Chapter 5 are not repeated here.
+This chapter evaluates different kinds of MADRL controllers and analyses their economic performance, EV feasibility, and grid safety. The analysis is organised mainly around four research questions:
+\begin{enumerate}
+  \item[RQ1:] Under the same realised demand, PV generation, price trajectories, and physical network model, can MADRL improve upon a simple rule-based controller?
+  \item[RQ2:] How do a soft departure penalty, a progress-based penalty, and hard feasibility correction trade economic performance against EV departure feasibility?
+  \item[RQ3:] How does grid-safety projection affect voltage safety, EV feasibility, and battery arbitrage?
+  \item[RQ4:] Under aligned initial conditions, forecasts, evaluation interval, and reported economic components, what explains the performance gap between MADRL, Local MPC, and ADMM-MPC?
+\end{enumerate}
+Sections~\ref{section:lstm-price-results} and~\ref{section:madrl-convergence} first establish the forecasting and training basis. Sections~\ref{section:madrlsoft-results}--\ref{section:madrl-best} then answer the research questions through two ablations and a benchmark comparison. Section~\ref{section:ch6-limitations} consolidates limitations and failure cases that were previously repeated across several sections.
+
+% Modified: Section 6.1 now reports price, load, and PV forecasting rather than price alone.
+\section{Forecasting Performance}\label{section:lstm-price-results}
+
+% Modified: Forecasting results are restricted to the signals considered in this thesis.
+The LSTM model provides price, household-load, and PV forecasts used by the predictive controllers. Table~\ref{tab:ch6-forecast-performance} reports the results used by the following experiments. Each series contains 1,440 test samples.
+
+% Modified: MAE and RMSE are defined explicitly before the forecasting results are compared.
+Let $y_t$ denote the ground-truth value of a forecast signal at time step $t$, $\hat{y}_t$ its LSTM prediction, and $N_{\mathrm{eval}}$ the number of evaluation samples. MAE and RMSE are calculated as
+\[
+\mathrm{MAE}=\frac{1}{N_{\mathrm{eval}}}\sum_{t=1}^{N_{\mathrm{eval}}}\left|\hat{y}_t-y_t\right|,
+\]
+\[
+\mathrm{RMSE}=\sqrt{\frac{1}{N_{\mathrm{eval}}}\sum_{t=1}^{N_{\mathrm{eval}}}\left(\hat{y}_t-y_t\right)^2}.
+\]
+MAE represents the average magnitude of the forecast error, while RMSE assigns greater weight to large deviations and is therefore more sensitive to errors around local peaks and valleys. From the table, the price model achieves an MAE of 0.0273~EUR/kWh and an RMSE of 0.0368~EUR/kWh. Across the three prosumers, household-load MAE ranges from 9.0144 to 10.4812~kW. The shared PV forecast obtains an MAE of 0.4334~kW and an RMSE of 0.8924~kW.
+
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{LSTM forecasting performance on the held-out test data}
+  \label{tab:ch6-forecast-performance}
+  \begin{tabular}{llrr}
+    \hline
+    Signal & Series & MAE & RMSE \\
+    \hline
+    Price & Shared price & 0.0273 & 0.0368 \\
+    Household load (kW) & SFH12 & 9.7839 & 16.1256 \\
+    Household load (kW) & SFH18 & 9.0144 & 14.8399 \\
+    Household load (kW) & SFH20 & 10.4812 & 14.4119 \\
+    PV generation (kW) & Shared PV & 0.4334 & 0.8924 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch6-lstm-price-prediction} compares LSTM electricity price prediction with the ground-truth values and also shows the prediction error over the evaluation period.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ch6_1_lstm_price_prediction_madrl_train_7days.png}
+  \caption{LSTM day-ahead price prediction over the evaluation period.}
+  \label{fig:ch6-lstm-price-prediction}
+\end{figure}
+
+From figure~\ref{fig:ch6-lstm-price-prediction} the forecast captures the general electricity-price trend, but deviations remain around local peaks and valleys. During high-price periods, the predicted values are generally below the corresponding ground-truth peaks. Some low-price valleys are also overestimated, so the predicted difference between maximum and minimum prices is smaller than in the original series. The LSTM forecast therefore has a smoothing effect on short-term price fluctuations.
+
+This smoothing directly may affect MADRL controllers' results. When a high price is underestimated, the controller can underestimate the economic benefit of battery discharge or reduced grid import. When a low price is overestimated, it can reduce battery or EV charging during an economically favourable interval. Errors around peaks and valleys may therefore weaken the coordination among the battery, EV, and PV even when the general daily trend is predicted correctly. Because MADRL and MPC use the same LSTM forecast family, these errors do not explain their full performance gap, but they limit the price information available to both methods and must be considered when interpreting the subsequent controller results.
+
+Overall, the LSTM forecast is able to capture the general trend of electricity price. Prediction errors around local peaks and valleys may however affect the coordination among the energy storage system, EV, and PV generation, thereby influencing the MADRL analysis results.
+
+% Modified: Section 6.2 follows the convergence analysis and quantitative comparison used in the previous version of this chapter.
+\section{MADRL Convergence Analysis}\label{section:madrl-convergence}
+
+Base Soft was trained for both 100 and 1,000 episodes to investigate the influence of training duration on convergence. Figure~\ref{fig:ch6-madrl-convergence} presents the corresponding training curves. The upper subplot shows the total reward obtained in each episode together with its moving-average curve, while the lower subplot shows the critic loss. To visualise the overall training trend, a moving average over 10 episodes is applied to the 100-episode experiment, whereas a moving average over 50 episodes is used for the 1,000-episode experiment.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ch6_2_madrl_convergence_madrl_base_100_vs_1000.png}
+  \caption{Convergence comparison of Base Soft under different numbers of training episodes.}
+  \label{fig:ch6-madrl-convergence}
+\end{figure}
+
+As shown in Figure~\ref{fig:ch6-madrl-convergence}, when training is limited to 100 episodes, the total reward continues to fluctuate substantially. It improves from -195.19 in the first episode to -50.43 in episode 100. However, the mean reward over the final 10 episodes is still only -61.38, with a standard deviation of 38.90. The large variation at the end of training indicates that the actor and critic have not yet reached stable convergence.
+
+In contrast, the 1,000-episode experiment shows a clearer convergence trend. The total reward improves from -159.30 in the first episode to -3.57 in episode 1,000. Over the final 50 episodes, the mean total reward reaches -16.33, with a standard deviation of 18.96. Compared with the 100-episode experiment, the final mean reward is higher and its variation is smaller. The critic loss also remains more stable during the later training stage. Its final value is 20.03, while the mean critic loss over the final 50 episodes is 25.84.
+
+Battery SoC and EV SoC accumulate over time, while the actions of all prosumers jointly affect the distribution-network state through the power-flow calculation. MADRL therefore requires enough transitions to associate immediate price signals with future SoC states and delayed grid penalties. After only 100 episodes, the critic's state--action value estimates remain unstable, causing the actor to continue adjusting its preference among battery arbitrage, EV charging, and grid safety. After 1,000 episodes, the more stable critic loss indicates that these temporal and cross-device relationships have been learned more consistently. Consequently, all subsequent MADRL experiments use 1,000 training episodes.
+
+% Modified: Section 6.3 compares the four non-projected Base variants requested for the EV-constraint ablation.
+\section{Ablation of EV-Constraint Handling}\label{section:madrlsoft-results}
+
+This section answers RQ2 by comparing four different MADRL controllers without grid-safety projection, namely: Base Soft, Cost-Weighted Soft, Progress Soft, and Base Hard. Under the soft-constraint approach, battery arbitrage generates economic feedback at every time step and therefore provides a relatively dense reward signal, however, the EV departure penalty is imposed only near the departure time, resulting in a much more sparse reward signal. Here, Base Soft provides the reward-only reference. Cost-Weighted Soft then increases the relative EV-cost weight, Progress Soft adds continuous guidance for EV charging, and Base Hard moves departure feasibility from the reward into action execution. 
+
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{Comparison of non-projected Base controllers over 15 evaluation days}
+  \label{tab:ch6-ev-ablation}
+  \setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{p{3.6cm}rrrrrr}
+    \hline
+    Controller & \shortstack{Total\\cost} & \shortstack{EV\\cost} & \shortstack{Storage\\profit} & \shortstack{Mean dep.\\SoC} & \shortstack{Below\\0.90} & \shortstack{Voltage\\viol.} \\
+    \hline
+    Base Soft & 57.39 & 329.78 & 272.39 & 0.9460 & 2 & 2 \\
+    Cost-Weighted Soft & 251.64 & 354.39 & 102.75 & 0.90 & 0 & 0 \\
+    Progress Soft & 188.69 & 335.68 & 146.98 & 0.90 & 0 & 1 \\
+    Base Hard & 81.67 & 287.53 & 205.87 & 0.9098 & 1 & 1 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+From the table, Base Soft produces the lowest total cost, 57.39~EUR, and the highest storage profit, 272.39~EUR, but two of the 45 recorded EV departures fall below the 0.90 requirement. Its economic result is explained by reward density. Battery charging and discharging produce a cost signal at every step, so the critic can quickly associate low-price charging and high-price discharging with long-term value. But the departure penalty is activated only near the end of an EV session. The critic must assign that delayed penalty to charging decisions made several hours earlier, making EV feasibility a more difficult credit-assignment problem. The actor therefore learns the dense battery-arbitrage objective more reliably than the sparse EV departure objective. Therefore, Base Soft is economically well-performed, but its low cost is partly obtained by leaving the departure requirement exposed to learning error.
+
+% Modified: The Cost-Weighted Soft discussion now follows the mechanism-and-evidence structure of the previous chapter version.
+To increase the importance of EV charging demand in the reward function, Cost-Weighted Soft increases the EV-cost weight to 1.5. 
+
+This strategy removes 2 departure shortfalls from Base Soft, but the total cost rises by 194.25~EUR and the storage profit falls by 169.64~EUR relative to Base Soft. Despite the larger EV-cost weight, the EV cost increases from 329.78~EUR to 354.39~EUR. Therefore, simply increasing the EV-cost weight can worsen the overall economic performance.
+
+The reason is that adding cost weight does change the magnitude of the EV feedback but cannot tell the actor how to distribute EV charging over the connection window. Because the departure penalty remains delayed, the critic still has difficulty assigning it to individual earlier actions. To avoid a large EV departure SoC penalty, the actor learns a conservative policy and tends to complete EV charging earlier. At the same time, EV charging and battery charging often compete for the same low-price charging window and feeder capacity. As illustrated in Figure~\ref{fig:ch6-costweight-low-price-competition}, both devices charge during several highlighted low-price intervals. Cost weighting consequently weakens battery arbitrage without directly improving the timing of EV charging.
+
+% Modified: Added the low-price EV--battery competition example requested for Cost-Weighted Soft.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/ch6_3_costweighted_soft_low_price_competition.png}
+  \caption{EV and battery charging competition during low-price periods under Cost-Weighted Soft. Blue shading denotes low-price periods, while red shading marks intervals in which EV and battery charging overlap.}
+  \label{fig:ch6-costweight-low-price-competition}
+\end{figure}
+
+% Modified: The departure-SoC figure covers all four controllers in the Base ablation.
+Therefore, the question is not only about how to reduce costs, but also about how to improve EV departure performance. To investigate the impact of different strategies on EV departure SoC, Figure~\ref{fig:ch6-soft-departure-soc} compares the minimum daily departure SoC of the four Base variants. Base Soft reaches a minimum of 0.8782 and crosses below the requirement. Cost-Weighted Soft and Progress Soft remain near 0.95, whereas Base Hard operates close to the 0.90--0.90 feasibility boundary.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ch6_3_base_variants_departure_soc.png}
+  \caption{Minimum EV departure SoC among the non-projected Base controllers.}
+  \label{fig:ch6-soft-departure-soc}
+\end{figure}
+
+% Modified: The distinction between progress shaping and simple cost weighting is stated explicitly.
+Unlike Cost-Weighted Soft, Progress Soft does not simply increase the reward associated with EV charging. Instead, it encourages the EV SoC to approach a time-dependent target progressively throughout the connection window. It also removes both departure shortfalls and reaches a mean departure SoC of 0.95, but it is 62.95~EUR less costly than Cost-Weighted Soft and retains 44.23~EUR more storage profit. At each connected step, the progress term compares the current SoC with the intermediate target and converts the originally sparse departure requirement into dense temporal guidance. The critic can therefore distinguish the long-term value of gradually charging from postponing charging until the final steps. This reduces the credit-assignment difficulty and explains why Progress Soft achieves the same departure outcome with a better economic result than Cost-Weighted Soft.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ppt_soft_ev_charging_base_progress_vs_costweight_large_fonts.png}
+  \caption{EV charging behaviour of Base Soft, Cost-Weighted Soft, and Progress Soft.}
+  \label{fig:ch6-soft-progress-vs-costweight}
+\end{figure}
+
+Figure~\ref{fig:ch6-soft-progress-vs-costweight} illustrates this difference. Cost-Weighted Soft reacts conservatively to the larger penalty scale, whereas Progress Soft distributes charging according to the evolving target. The latter adds temporal information instead of only increasing the consequence of failure.
+
+The same dense guidance also explains the economic loss. EV charging and battery charging compete for the same low-price power and feeder capacity. Progress Soft reserves more of these intervals for EV progress, leaving the battery less freedom to delay charging or discharge at the most profitable times. Its battery charging--discharging price spread decreases from 0.0549~EUR/kWh for Base Soft to 0.0334~EUR/kWh, consistent with the storage-profit reduction. In addition, continuous positive charging guidance tends to move the EV toward the upper SoC region rather than stopping exactly at 0.90. Progress Soft thus improves learned feasibility but may over-satisfy the requirement.
+
+% Modified: The Hard discussion first explains why the departure target is reachable by construction.
+Unlike three soft controllers, Base Hard, which uses hard constraints, turns EV feasibility from a reward-learning problem into an action-execution problem. At each connected time step, the feasibility correction determines the minimum EV charging power required from the remaining energy demand, the remaining connection time, and the charging-power limit. If the actor proposes a lower value, the executed EV power is raised to this minimum. Therefore, the actor is no longer responsible for satisfying the departure requirement. Consequently, Base Hard reduces EV cost to 287.53~EUR and total cost to 81.67~EUR relative to Progress Soft, while preserving 205.87~EUR of storage profit. Its mean departure SoC of 0.9098 is close to the target because the correction enforces only the lower feasibility boundary rather than continuously rewarding progress toward 0.95. 
+
+However, this approach introduces an actor--execution mismatch. The replay transition is generated by the corrected EV power even when the actor proposed another action, so the critic learns the return of an action channel altered by the environment. The archived correction gap of 9.72~kWh confirms that this is not purely theoretical. One recorded departure remains marginally below 0.90, showing that implementation tolerance and the discrete time-step boundary still matter. Base Hard nevertheless provides the best economic--feasibility compromise among the three feasibility-oriented Base variants.
+
+Generally, the four-controller comparison answers RQ2. Base Soft retains the greatest flexibility but can miss departure requirements. Cost weighting changes reward magnitude without adding temporal information. Progress shaping resolves much of the sparse-reward problem but reserves more flexibility for EV charging. Hard correction handles feasibility most directly and performs better economically than both shaped soft variants, although it changes the executed action.
+
+% Modified: Section 6.4 compares the four projected controllers and separates projection from additional reward shaping.
+\section{Ablation of Grid-Safety Handling}\label{section:madrl-hard-results}
+
+This section answers RQ3 by comparing Projected Progress Soft, Cost-Weighted Projected Hard, Price-Aware Projected Hard, and Projected Hard. Every controller uses the same grid-safety projection method, while their EV handling and reward shaping are different from each other. Projected Progress Soft combines projection with dense soft guidance. The other three use hard EV correction. Cost-Weighted Projected Hard scales EV cost, Price-Aware Projected Hard penalises high-price EV charging, and Projected Hard adds neither auxiliary reward term. 
+
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{Comparison of projected MADRL controllers over 15 evaluation days}
+  \label{tab:ch6-projection-ablation}
+  % Modified: The voltage-violation column is omitted because every controller in this projection ablation records zero violations.
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{p{4.3cm}rrrrr}
+    \hline
+    Controller & \shortstack{Total\\cost} & \shortstack{EV\\cost} & \shortstack{Storage\\profit} & \shortstack{Mean dep.\\SoC} & \shortstack{Below\\0.90} \\
+    \hline
+    Projected Progress Soft & 462.56 & 353.55 & -109.01 & 0.9463 & 1 \\
+    Cost-Weighted Projected Hard & 356.28 & 289.48 & -66.81 & 0.9084 & 6 \\
+    Price-Aware Projected Hard & 238.89 & 291.35 & 52.46 & 0.90 & 3 \\
+    Projected Hard & 186.04 & 373.42 & 187.39 & 0.90 & 0 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+All four projected controllers record zero voltage violations. Their minimum/maximum voltages are 0.9746/1.0451~p.u. for Projected Progress Soft, 0.9750/1.0447~p.u. for Cost-Weighted Projected Hard, 0.9722/1.0460~p.u. for Price-Aware Projected Hard, and 0.9707/1.0456~p.u. for Projected Hard. The projection evaluates the joint action against the feeder constraints and replaces an unsafe battery, EV, and PV combination before execution. So the projection corrects the evaluated proposals successfully.
+
+Relative to Progress Soft in Section~\ref{section:madrlsoft-results}, Projected Progress Soft removes the remaining voltage violation, but total cost increases from 188.69~EUR to 462.56~EUR. Relative to Base Hard, Projected Hard removes one voltage violation and the marginal departure shortfall, but total cost increases from 81.67~EUR to 186.04~EUR. These show that network safety improves by the projection, while the actor loses economically favourable actions and the critic must learn from transitions produced after correction.
+
+Here, Projected Progress Soft is the most expensive controller. Its progress signal reserves charging power throughout the EV connection window, while the grid projection can simultaneously modify battery power and PV curtailment. The actor is thus trained toward a dense EV trajectory, but the executed joint action is repeatedly altered by the safety layer. This twofold restriction weakens the association between low-price battery actions and their realised return. It also leaves one departure below 0.90, demonstrating that soft progress guidance remains a learned preference rather than an execution guarantee.
+
+Cost-Weighted Projected Hard improves EV cost to 289.48~EUR but produces a storage loss of 66.81~EUR and misses six departure records under the strict threshold. This is because that EV-cost weight changes the critic's reward landscape, the hard correction also changes EV power when the proposal is insufficient, and grid projection subsequently changes the joint action for safety. The actor therefore receives feedback after two execution transformations. A raw action with favourable reward under the learned critic may be mapped to a different feasible point, so stronger EV weighting does not achieve a lower total cost or better recorded feasibility.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ppt_hard_projection_costweight_learning_landscape_diagnostic.png}
+  \caption{Interaction between EV cost weighting, hard correction, and grid projection.}
+  \label{fig:ch6-projection-costweight-diagnostic}
+\end{figure}
+
+Figure~\ref{fig:ch6-projection-costweight-diagnostic} illustrates this mismatch. Cost-Weighted Projected Hard simultaneously introduces EV cost reward scaling and grid safety projection. The former changes the relative importance of EV charging in the reward function, while the latter modifies the battery power and PV curtailment actions to satisfy distribution network safety constraints. Consequently, the effective action space available to the actor becomes narrower than that of Base Hard, and the discrepancy between the raw action and the executed action becomes larger. From the critic's perspective, the same raw action may be projected into different executed actions under different grid states, resulting in a less smooth Q-value landscape. From the actor's perspective, actions originally intended for battery arbitrage are more likely to be clipped by the projection. Therefore, although this approach improves distribution network safety, the combination of projection and cost-weight undermines the learning of the battery arbitrage strategy.
+
+Price-Aware Projected Hard reduces total cost to 238.89~EUR and restores a positive storage profit of 52.46~EUR. Its high-price charging share decreases to 38.58\%, compared with 39.78\% for Cost-Weighted Projected Hard. The improvement is however limited because the price-aware penalty only changes the EV preference. Hard correction still imposes a minimum feasible charge when time is short, and grid projection still constrains the battery action that could otherwise offset EV load. The connection window and remaining energy therefore bound how much charging can be shifted.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ppt_priceaware_penalty_mechanism_ev_charge_threshold.png}
+  \caption{Effect of the price-aware penalty under hard EV correction.}
+  \label{fig:ch6-priceaware-mechanism}
+\end{figure}
+
+As shown in Figure~\ref{fig:ch6-priceaware-mechanism}, the price-aware penalty exhibits a marginal effect. By introducing an additional penalty for EV charging during high-price periods, it encourages the actor to avoid a portion of expensive charging. However, under the hard mode, the minimum EV charging power is already constrained by the departure feasibility correction, while the connection window is fixed from the evening to the early morning. Consequently, when the remaining scheduling flexibility becomes limited, the price-aware penalty cannot freely shift all charging demand to low-price periods. Meanwhile, the battery actions remain constrained by the grid safety projection and therefore cannot fully compensate for the changes in net load caused by the adjusted EV charging schedule. As a result, although this method reduces the proportion of charging during high-price periods, it does not significantly decrease the EV charging cost nor restore the battery arbitrage profit. In addition, the battery profitability of Price-Aware Projected Hard remains limited. In other words, the price-aware penalty mainly influences the EV charging behavior, whereas the battery actions remain constrained by the safety projection. Although the proportion of EV charging during high-price periods is reduced, the battery fails to recover the arbitrage capability observed under Base Hard. Consequently, the overall economic performance remains unsatisfactory.
+
+Finally, Projected Hard achieves the lowest total cost in this group, 186.04~EUR, and the highest storage profit, 187.39~EUR. It also records zero departures below 0.90. this controller provides a better balance between distribution network safety and battery profitability than the two reward-shaped projection variants. These results indicate that, for the hard constraint controller, directly applying the projection mechanism to enforce the distribution network safety constraints is more effective and stable than additionally introducing the EV cost weight or the EV price-aware penalty.
+
+This indicates that, in the hard controller, less reward shaping can sometimes lead to more stable learning. Projected Hard retains only two execution-layer mechanisms: the EV hard correction ensures mobility feasibility, while the grid safety projection improves distribution network safety. Since no additional EV cost-weight or price-aware penalty is introduced to modify the reward landscape, the actor can more easily preserve its original learning objective of battery arbitrage. However, the EV charging cost of Projected Hard is relatively high. Under this hard projection setting, the EV tends to be charged close to the upper SoC limit. Although this fully satisfies the departure requirement, it also results in unnecessary additional charging energy and a higher proportion of charging during high-price periods. This result also reveals a limitation of the hard correction mechanism. When the feasibility correction is combined with the actor's own policy, the EV charging behavior may shift from merely satisfying the minimum departure target to approaching the upper SoC limit. In other words, the hard mode guarantees that the departure SoC does not fall below the target value, but it does not inherently prevent overcharging. If the actor continues to request relatively high EV charging power during certain periods while the hard correction ensures feasibility throughout the connection window, the final EV SoC may remain close to the upper limit of 0.95 for an extended period.
+
+The comparison answers RQ3 at two levels. Projection consistently removes the recorded voltage violations, but it narrows the feasible action set and can weaken battery arbitrage. Within that projected action set, additional EV reward shaping does not necessarily improve the final outcome because the actor preference, hard correction, and grid correction can point in different directions. Projected Hard gives the best overall projected result by keeping the reward structure simpler, although its EV overcharging remains a significant limitation.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ch6_4_hard_battery_power_price_episode0.png}
+  \caption{Battery power and price for the hard-constraint controllers in the first evaluation episode.}
+  \label{fig:ch6-hard-battery-price}
+\end{figure}
+
+% Modified: Section 6.5 compares one selected MADRL controller with both MPC benchmarks and the rule-based controller.
+\section{Benchmark Comparison}\label{section:madrl-best}
+
+Based on Sections~\ref{section:madrlsoft-results} and~\ref{section:madrl-hard-results}, this section compares four representative MADRL controllers: Base Soft, Progress Soft, Base Hard, and Projected Hard. Base Soft and Base Hard represent the stronger economic results within their respective constraint modes. Progress Soft represents dense EV-feasibility guidance, while Projected Hard represents the combined use of hard EV correction and grid-safety projection. These four controllers are then compared with Local MPC Hard, ADMM-MPC Hard, and rule-based control. The benchmark settings are defined in Chapter~5.
+
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{Economic, EV, and grid comparison of selected MADRL controllers and benchmarks}
+  \label{tab:ch6-benchmark}
+  \setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{p{3.6cm}rrrrrr}
+    \hline
+    Controller & \shortstack{Total\\cost} & \shortstack{EV\\cost} & \shortstack{Storage\\profit} & \shortstack{Mean dep.\\SoC} & \shortstack{Below\\0.90} & \shortstack{Voltage\\viol.} \\
+    \hline
+    Base Soft & 57.39 & 329.78 & 272.39 & 0.9460 & 2 & 2 \\
+    Progress Soft & 188.69 & 335.68 & 146.98 & 0.90 & 0 & 1 \\
+    Base Hard & 81.67 & 287.53 & 205.87 & 0.9098 & 1 & 1 \\
+    Projected Hard & 186.04 & 373.42 & 187.39 & 0.90 & 0 & 0 \\
+    Local MPC & -36.37 & 235.68 & 272.06 & 0.9000 & 45 & 25 \\
+    ADMM-MPC & -2.86 & 235.74 & 238.60 & 0.9000 & 45 & 0 \\
+    Rule-based & 274.01 & 386.90 & 112.89 & 0.90 & 0 & 3 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:ch6-benchmark} provides a common reference for comparing the operating characteristics of the selected MADRL controllers and the three baselines.
+
+Among the MADRL controllers, Base Soft represents the economically best performmance. Its reward is dominated by dense battery feedback, while the departure objective is delayed and grid safety is not corrected during execution. It therefore retains the greatest scheduling freedom and learns the strongest battery-arbitrage behaviour, but this flexibility is accompanied by EV and voltage violations. Progress Soft shifts the operating point toward EV feasibility by replacing a sparse terminal signal with continuous progress guidance. This improves charging consistency, although EV charging then occupies part of the low-price capacity that would otherwise be available for battery arbitrage. It is therefore the more balanced soft controller, but network feasibility remains a learned outcome rather than an execution guarantee.
+
+Base Hard reaches a different compromise. By embedding the minimum feasible EV charging action in the execution layer, it removes much of the burden of learning departure feasibility from delayed rewards and preserves more economic flexibility than Progress Soft. However, the correction acts only on the EV requirement and does not coordinate the full feeder state. Projected Hard adds this missing network layer: hard correction protects EV reachability, while grid projection corrects unsafe joint actions. It consequently provides the most complete feasibility treatment among the four MADRL controllers, although the additional correction narrows the economically available action space and can produce actor--execution mismatch.
+
+Compared with rule-based control, MADRL has the advantage of adapting its continuous actions to the combined price, load, PV, battery SoC, EV SoC, availability, and network observations. The rule-based controller applies predefined schedules and thresholds and cannot learn how the value of one device action changes with the simultaneous state of the other resources. The selected MADRL controllers therefore demonstrate that learned resource coordination can improve upon fixed local logic. Among them, Projected Hard adds an explicit safety layer to this adaptive scheduling capability and is the strongest answer to RQ1 when economic performance, mobility, and network operation are considered together.
+
+Comparing with MPC, MPC directly solves a finite-horizon optimisation problem at every control step, using updated forecasts to allocate EV and battery energy while enforcing the constraints included in that problem. However, MADRL learns the same temporal preference indirectly through rewards, critic estimates, exploration, and replay data. Once training is complete, MADRL requires only a policy forward pass and feasibility handling, whereas MPC must solve a new optimisation problem online. 
+
+The hard EV correction and grid projection further explain the difference. In MADRL, the actor proposes an action before hard EV correction and grid projection are applied. The critic may therefore learn from a transition generated by an action different from the raw actor output. MPC instead searches its modelled feasible set directly, so its objective and executed decision remain more closely aligned. Local MPC lacks complete feeder-wide coordination and can combine individually economical schedules into an unsafe joint action. ADMM-MPC exchanges coupling information and improves network coordination, but gives up part of the local economic advantage. Thus, the difference between Local MPC and ADMM-MPC reflects the cost of coordination, whereas the difference between MPC and Projected Hard also includes policy approximation and post-policy correction.
+
+The MPC departure SoC values in Table~\ref{tab:ch6-benchmark} are very close to the minimum requirement of 0.90. Due to small numerical differences, they are counted as below the target. However, these results do not represent significant departure constraint violations. They indicate that MPC avoids unnecessary EV charging by operating close to the lower SoC limit. In contrast, Projected Hard maintains a larger SoC margin above the requirement. Therefore, MPC achieves lower charging costs by staying close to the constraint boundary, while Projected Hard uses a more conservative charging strategy to improve departure feasibility.
+
+Figures~\ref{fig:ch6-best-ev-price} and~\ref{fig:ch6-best-battery-price}, together with Table~\ref{tab:ch6-best-price-summary}, compare the scheduling behaviour of the selected MADRL controllers. Base Soft shows the strongest battery-arbitrage behaviour. Progress Soft uses more charging flexibility to improve EV charging progress. Base Hard maintains better price-aware scheduling because it only corrects the minimum EV charging power required for departure. Projected Hard also responds to electricity prices, but its actions can be modified by both EV correction and grid projection. Therefore, price responsiveness alone cannot determine the best controller. EV charging energy, departure feasibility, and grid safety must also be considered.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ch6_5_selected_ev_charge_price_15days.png}
+  \caption{EV charging behaviour and electricity price among selected MADRL controllers.}
+  \label{fig:ch6-best-ev-price}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ch6_5_selected_battery_power_price_15days.png}
+  \caption{Battery operation and electricity price among selected MADRL controllers.}
+  \label{fig:ch6-best-battery-price}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{Price-response indicators among selected MADRL controllers}
+  \label{tab:ch6-best-price-summary}
+  \setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{p{3.1cm}rrrrrr}
+    \hline
+    Controller & \shortstack{EV\\price} & \shortstack{EV\\energy} & \shortstack{Low-price\\share} & \shortstack{High-price\\share} & \shortstack{Battery\\charge} & \shortstack{Battery\\discharge} \\
+     & & (kWh) & (\%) & (\%) & & \\
+    \hline
+    Base Soft & 0.1714 & 1924.17 & 27.61 & 45.99 & 0.1039 & 0.1589 \\
+    Progress Soft & 0.1723 & 1947.67 & 29.60 & 45.75 & 0.1300 & 0.1634 \\
+    Base Hard & 0.1600 & 1797.35 & 33.05 & 40.34 & 0.1275 & 0.1710 \\
+    Projected Hard & 0.1897 & 1968.33 & 24.69 & 56.93 & 0.1295 & 0.1742 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Overall, Base Soft achieves the lowest economic cost, but its EV and voltage violations make it unsuitable as the final controller. Progress Soft improves EV feasibility through continuous guidance, but it reduces battery-arbitrage performance and still records one voltage violation. Base Hard achieves better economic performance under hard EV constraint handling, but it does not guarantee grid safety. Projected Hard has a higher cost than Base Soft and Base Hard, but it is the only selected MADRL controller that satisfies all 45 departure requirements and records zero voltage violations. MPC achieves better economic performance because it solves an optimisation problem using updated states and forecasts at every control step. However, this requires repeated online optimisation and interaction with the environment. In contrast, MADRL performs the main optimisation during offline training. After training, the actor can directly generate control actions through a forward pass, together with the required feasibility corrections. Therefore, Projected Hard provides faster online decision-making and the best overall trade-off among the selected MADRL controllers when economic performance, EV feasibility, grid safety, and online computational requirements are considered together.
+
+% Modified: Repeated caveats and failed variants are consolidated in a dedicated limitations section.
+\section{Limitations and Failure Cases}\label{section:ch6-limitations}
+
+The results mentioned above establish the main trade-offs, but three limitations restrict the strength and generality of the conclusions.
+
+\subsection{Emergency Mechanism Failure}\label{subsection:ch6-eme-failure}
+
+Emergency Soft and Emergency Projected Soft were designed to delay EV charging until the remaining connection time became critical. During the 15-day evaluation, Emergency Soft achieves a mean departure SoC of 0.6112 and fails to satisfy all 45 departure requirements, with a total departure gap of 12.9948. Emergency Projected Soft improves the mean departure SoC to 0.8702, but still misses 16 departures and has a total gap of 2.7520.
+
+The main reason is that emergency charging is a late corrective mechanism rather than a continuous training signal. Before it is activated, the critic receives limited guidance on how much charging progress should be completed during the connection window. If the actor delays charging for too long, the remaining energy demand may become greater than the energy that can be delivered within the remaining time. In this case, emergency charging cannot recover departure feasibility even at the maximum charging power. Moreover, the corrective charging actions are concentrated within a short period and may overlap with household demand and battery charging. This increases grid stress, while grid projection may further limit the available EV charging power. Therefore, emergency charging cannot establish a stable long-term charging strategy and is unsuitable as the main soft-constraint mechanism in this thesis.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/ch6_6_eme_departure_soc.png}
+  \caption{Departure-SoC failure of the EME variants relative to the other soft controllers.}
+  \label{fig:ch6-eme-failure}
+\end{figure}
+
+\subsection{Overcharging and Boundary Conventions}\label{subsection:ch6-overcharging-boundaries}
+
+From the previous results, Projected Hard tends to charge EVs to the upper SoC region rather than stopping at the 0.90 departure requirement. Hard correction defines the minimum action required to preserve feasibility, but it does not penalise an actor overcharging above this minimum. The grid projection can also retain a conservative charging margin when it corrects the joint EV and battery actions. This behaviour removes departure shortfalls, but it increases the EV energy and the corresponding charging cost.
+
+To reduce this overcharging phenomenon, an additional Projected Hard variant sets the EV SoC upper limit to 0.90 instead of 0.95. Over the complete evaluation period, this modification reduces the EV charging cost from 373.42~EUR to 288.43~EUR and the EV energy from 1968.33~kWh to 1784.41~kWh. It also reduces the high-price EV charging share from 56.93\% to 37.67\%. However, the storage profit changes from 187.39~EUR to a loss of 205.82~EUR, causing the total cost to increase from 186.04~EUR to 494.25~EUR. Therefore, reducing EV overcharging does not improve the overall economic performance because the battery arbitrage capability is severely degraded.
+
+% Modified: Added a direct quantitative comparison between the original 0.95 and reduced 0.91 EV SoC upper limits.
+\begin{table}[htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.15}
+  \caption{Comparison of Projected Hard with EV SoC Upper Limits of 0.95 and 0.91}
+  \label{tab:ch6-soc-upper-limit-comparison}
+  \textit{(a) Economic and EV-charging indicators}\\[2pt]
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrrrrrr}
+    \hline
+    \shortstack{SoC upper\\limit} & \shortstack{Total\\cost} & \shortstack{EV\\cost} & \shortstack{Storage\\profit} & \shortstack{EV energy\\(kWh)} & \shortstack{EV\\price} & \shortstack{High-price\\share (\%)} \\
+    \hline
+    0.95 & 186.04 & 373.42 & 187.39 & 1968.33 & 0.1897 & 56.93 \\
+    0.91 & 494.25 & 288.43 & -205.82 & 1784.41 & 0.1616 & 37.67 \\
+    \hline
+  \end{tabular}
+
+  \medskip
+  \textit{(b) Departure-feasibility and correction indicators}\\[2pt]
+  \begin{tabular}{lrrr}
+    \hline
+    SoC upper limit & Mean dep. SoC & Below 0.90 & Projection gap (kWh) \\
+    \hline
+    0.95 & 0.9500 & 0 & 0.00 \\
+    0.91 & 0.9093 & 3 & 13.45 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:ch6-soc-upper-limit-comparison} separates the intended EV effect from the unintended battery effect. Reducing the upper limit by 0.04 lowers the EV energy by 183.92~kWh, the EV cost by 84.99~EUR, and the weighted EV charging price by 0.0281~EUR/kWh. Nevertheless, storage performance deteriorates by 393.21~EUR, which is substantially larger than the EV-cost saving and explains the 308.21~EUR increase in total cost. The tighter boundary also changes the mean departure SoC from 0.9500 to 0.9093 and introduces a projection gap of 13.45~kWh. The three values counted below 0.90 lie at the numerical feasibility boundary, but they indicate that the reduced upper margin leaves less tolerance for correction and discrete-time effects.
+
+Figures~\ref{fig:ch6-soc091-overnight-ev} and~\ref{fig:ch6-soc091-overnight-battery} compare Agents~0--2 from the evening of 1~April to the morning of 2~April. The EV comparison confirms the intended local effect. In this window, the EV energy of each agent decreases from 41.05~kWh under Projected Hard to 38.53~kWh under the 0.91 upper limit. Projected Hard performs most EV charging before midnight and then stops when the EV is no longer able to absorb further energy. With the 0.91 limit, the charging trajectory is redistributed and terminates at a lower accumulated energy. Hence, the upper limit successfully reduces overcharging; the deterioration does not originate from an increase in EV energy.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ch6_6_soc091_overnight_ev_price_comparison.png}
+  \caption{EV charging power and import price for Projected Hard and Projected Hard with the EV SoC upper limit of 0.91 during an overnight connection window.}
+  \label{fig:ch6-soc091-overnight-ev}
+\end{figure}
+
+This explains the economic failure. Under Projected Hard, the battery trajectories retain a clearer charging--discharging response to the overnight price variation. After the EV upper limit is reduced, the battery actions become substantially more aggressive and less aligned with the electricity price signal. The battery charging energy increases from 78.64 to 233.70~kWh for Agent~0, from 117.74 to 186.03~kWh for Agent~1, and from 105.63 to 146.12~kWh for Agent~2 in the displayed window. For Agent~0, the discharged energy simultaneously decreases from 143.80 to 105.53~kWh. The figure also shows repeated near-maximum charging actions and charging during relatively high-price periods. Thus, the EV-cost saving is outweighed by a less profitable battery trajectory.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ch6_6_soc091_overnight_battery_price_comparison.png}
+  \caption{Battery charging--discharging power and import price for Projected Hard and Projected Hard with the EV SoC upper limit of 0.91 during the same overnight window. Positive battery power denotes charging.}
+  \label{fig:ch6-soc091-overnight-battery}
+\end{figure}
+
+Besides, reducing $\mathrm{SoC}_{\max}^{\mathrm{EV}}$ is not an independent evaluation-time adjustment. Once the EV can absorb less energy, the local net-load trajectory and the complementary relationship between EV and battery charging both change. The grid-safety projection consequently modifies the battery actions under a coupling pattern that differs from the one represented during training. Nevertheless, the battery actor still follows a policy learned from the original EV load and SoC boundaries. Its proposed actions are therefore corrected differently, and the resulting battery trajectory can charge at inappropriate prices or fail to discharge sufficiently during high-price periods. The 0.91 experiment consequently demonstrates an actor--projection distribution mismatch rather than a failure of the upper limit to reduce overcharging. A useful implementation of the tighter bound would require retraining, or projection-aware learning with the 0.91 limit included throughout training, so that the battery policy can adapt to the changed net-load and feasible-action distributions.
+
+% Modified: Removed the Generalisation and random seeds discussion as requested.
+Overall, the experiments answer the four research questions and show that no controller performs best in every aspect. Progress shaping improves EV feasibility by providing continuous charging guidance. Hard correction satisfies the departure requirement more directly, but it may change the action proposed by the actor. Grid projection prevents the recorded voltage violations, although it reduces scheduling flexibility. Among the selected MADRL controllers, Projected Hard provides the best overall trade-off between economic performance, EV feasibility, and grid safety. It performs better than rule-based control, but its economic performance remains lower than that of the MPC controllers. This difference mainly results from the mismatch between the actors' proposed action, the corrected action that is finally executed, and the reward used during training.

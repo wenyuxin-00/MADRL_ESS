@@ -1,0 +1,677 @@
+\documentclass[UTF8,zihao=-4]{ctexart}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,longtable,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{listings}
+
+\hypersetup{colorlinks=true,linkcolor=blue!55!black,urlcolor=blue!55!black,citecolor=blue!55!black}
+\setlist[itemize]{leftmargin=2em,itemsep=0.25em}
+\setlist[enumerate]{leftmargin=2em,itemsep=0.25em}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+\title{Rule-based 控制器原理说明\\{\large 面向初学者的项目与算法理解文档}}
+\author{MADRL\_ESS 项目理解笔记}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{先建立直觉：这个项目到底在控制什么}
+
+本项目研究的是低压配电网中的多个家庭型能源用户。每个用户既会用电，也可能有光伏发电、电池储能和电动汽车充电需求，所以常被称为 prosumer，也就是既是 producer 又是 consumer 的用户。
+
+在每一个离散时间步，控制器要决定三件事：
+
+\begin{enumerate}
+  \item 静态电池是充电、放电，还是不动；
+  \item 光伏发电是全部使用，还是弃掉一部分；
+  \item 电动汽车如果在家，应该充多少电。
+\end{enumerate}
+
+项目中的强化学习方法会从数据中学习这些决策，而 Rule-based 控制器不学习神经网络。它使用人提前写好的固定规则。因此它通常被当作基线方法：如果一个复杂算法连简单规则都比不过，就说明复杂算法还没有学好。
+
+本文只讲 Rule-based 控制器。它在代码中有两个版本：
+
+\begin{itemize}
+  \item 无电池版本：只控制 EV 充电，不使用静态电池；
+  \item 有电池版本：EV 仍然尽量充电，静态电池根据电价阈值进行低价充电、高价放电。
+\end{itemize}
+
+\section{基本符号和单位}
+
+为了避免公式看起来像“黑魔法”，先把每个符号的物理意义说明清楚。
+
+\begin{longtable}{>{\centering\arraybackslash}p{3.2cm}p{4.2cm}p{7.0cm}}
+\toprule
+符号 & 单位 & 含义 \\
+\midrule
+\endhead
+$i$ & 无 & 用户编号，项目默认有 $N=3$ 个用户 \\
+$t$ & 无 & 当前时间步 \\
+$\Delta t$ & 小时 & 一个时间步的长度，默认 $\Delta t=0.25$，即 15 分钟 \\
+$T$ & 步 & 一天的时间步数，默认 $T=96$ \\
+$p_t$ & 欧元/kWh & 原始电价 \\
+$\tilde p_t$ & 欧元/kWh & 实际进口电价，等于原始电价加上加价项 \\
+$L_{i,t}$ & kW & 用户 $i$ 在 $t$ 时刻的本地负荷 \\
+$G_{i,t}$ & kW & 用户 $i$ 在 $t$ 时刻可用的光伏功率 \\
+$G^{use}_{i,t}$ & kW & 实际使用的光伏功率 \\
+$P^b_{i,t}$ & kW & 静态电池功率，正数表示充电，负数表示放电 \\
+$P^{ev}_{i,t}$ & kW & EV 实际充电功率，只允许非负 \\
+$SOC^b_{i,t}$ & 无 & 静态电池荷电状态，取值通常在 0 到 1 之间 \\
+$SOC^{ev}_{i,t}$ & 无 & EV 电池荷电状态 \\
+$C^b_i$ & kWh & 静态电池容量，默认每个用户 100 kWh \\
+$C^{ev}_i$ & kWh & EV 电池容量，默认每个用户 60 kWh \\
+$P^{b,\max}_i$ & kW & 静态电池最大充放电功率 \\
+$P^{ev,\max}_i$ & kW & EV 家用充电桩最大功率，默认 11 kW \\
+$\eta_b$ & 无 & 静态电池效率，默认 0.95 \\
+$\eta_{ev}$ & 无 & EV 充电效率，默认 0.95 \\
+\bottomrule
+\end{longtable}
+
+项目中静态电池的最大功率由容量和最大倍率得到：
+\begin{equation}
+P^{b,\max}_i=C^b_i r^b_{\max}.
+\end{equation}
+默认 $C^b_i=100\,\mathrm{kWh}$，$r^b_{\max}=0.5$，所以：
+\begin{equation}
+P^{b,\max}_i=100\times 0.5=50\,\mathrm{kW}.
+\end{equation}
+物理意义是：每个用户的静态电池最多以 50 kW 充电或放电。
+
+\section{EV 是否在家的时间规则}
+
+EV 不是全天都能充电。项目默认 EV 在 18:00 到家，在次日 07:00 离家。因为一天有 96 个 15 分钟时间步，所以：
+\begin{equation}
+t_{arr}=72,\qquad t_{dep}=28.
+\end{equation}
+
+令一天内的步数为：
+\begin{equation}
+\tau(t)=t\bmod T.
+\end{equation}
+由于到家时间 $72$ 晚于离家时间 $28$，连接窗口跨过午夜。EV 可用指示量可写成：
+\begin{equation}
+A^{ev}_t=
+\begin{cases}
+1, & \tau(t)\ge t_{arr}\ \text{或}\ \tau(t)<t_{dep},\\
+0, & \text{其他时间}.
+\end{cases}
+\end{equation}
+
+物理意义是：晚上 18:00 到午夜、午夜到早上 07:00，EV 在家，可以充电；白天离家，不能充电。
+
+EV 到家时，项目把 EV SoC 重置为到家 SoC：
+\begin{equation}
+SOC^{ev}_{i,t}=SOC^{ev}_{arr}.
+\end{equation}
+默认：
+\begin{equation}
+SOC^{ev}_{arr}=0.30.
+\end{equation}
+这表示 EV 回家时还有 30\% 的电。离家目标是：
+\begin{equation}
+SOC^{ev}_{req}=0.90.
+\end{equation}
+也就是希望第二天早上离家时至少有 90\% 的电。
+
+\section{Rule-based 无电池版本}
+
+\subsection{核心思想}
+
+无电池版本只做一件事：只要 EV 在家，并且 EV 没满，就用最大功率充电。静态电池不参与调度。
+
+静态电池功率恒为：
+\begin{equation}
+P^b_{i,t}=0.
+\end{equation}
+
+光伏弃光也恒为：
+\begin{equation}
+G^{curt}_{i,t}=0.
+\end{equation}
+因此实际使用的光伏功率是：
+\begin{equation}
+G^{use}_{i,t}=G_{i,t}.
+\end{equation}
+
+EV 充电规则为：
+\begin{equation}
+P^{ev}_{i,t}=
+\begin{cases}
+P^{ev,\max}_i, & A^{ev}_t=1\ \text{且}\ SOC^{ev}_{i,t}<SOC^{ev}_{\max},\\
+0, & \text{其他情况}.
+\end{cases}
+\end{equation}
+
+这里 $SOC^{ev}_{\max}$ 默认是 0.95。物理意义是：EV 在家且没充到上限时，就满功率充；如果 EV 不在家，或者已经接近满电，就不充。
+
+\subsection{为什么这个规则简单但不聪明}
+
+这个规则不看电价，也不看未来。比如凌晨 2 点电价很低，晚上 19 点电价很高，它也可能刚到家就高价充电，因为规则只问“在不在家、满没满”，不问“现在贵不贵”。
+
+因此无电池 Rule-based 通常能满足充电需求，但经济性不一定好，也不会主动缓解电网压力。
+
+\section{Rule-based 有电池版本}
+
+\subsection{核心思想}
+
+有电池版本在无电池版本的基础上加入静态电池规则：
+
+\begin{itemize}
+  \item 电价低时，电池充电；
+  \item 电价高时，电池放电；
+  \item 电价处于中间区域时，电池不动。
+\end{itemize}
+
+这就是最朴素的套利思想。低价买电存进电池，高价时从电池放出，减少高价购电，甚至形成储能收益。
+
+\subsection{进口电价}
+
+控制器使用的价格不是只看原始电价 $p_t$，而是：
+\begin{equation}
+\tilde p_t=p_t+\mu_{import}.
+\end{equation}
+其中 $\mu_{import}$ 是进口电价加价项。默认情况下它为 0，所以 $\tilde p_t=p_t$。
+
+\subsection{价格分位数阈值}
+
+控制器先从训练集电价中计算两个阈值。设训练集进口电价序列为：
+\begin{equation}
+\mathcal{P}_{train}=\{\tilde p_1,\tilde p_2,\dots,\tilde p_M\}.
+\end{equation}
+
+低价阈值为：
+\begin{equation}
+p^{low}=Q_{q_l}(\mathcal{P}_{train}),
+\end{equation}
+高价阈值为：
+\begin{equation}
+p^{high}=Q_{q_h}(\mathcal{P}_{train}),
+\end{equation}
+其中 $Q_q(\cdot)$ 表示 $q$ 分位数。项目中的 MPC 配置默认使用：
+\begin{equation}
+q_l=0.35,\qquad q_h=0.65.
+\end{equation}
+代码也支持 Rule-based 专用分位数参数；若未设置专用参数，就使用 MPC 中的低价和高价分位数。
+
+分位数的物理意义很直观：
+\begin{itemize}
+  \item $p^{low}$ 以下代表相对便宜的电；
+  \item $p^{high}$ 以上代表相对昂贵的电；
+  \item 中间区域代表价格不够极端，暂时不操作电池。
+\end{itemize}
+
+\subsection{电池功率规则}
+
+令 $\alpha_c$ 为充电比例，$\alpha_d$ 为放电比例，二者都被限制在 $[0,1]$。默认都是 1，即可以用最大功率操作。Rule-based 有电池版本的功率请求是：
+\begin{equation}
+P^{b,req}_{i,t}=
+\begin{cases}
+\alpha_c P^{b,\max}_i, & \tilde p_t\le p^{low},\\
+-\alpha_d P^{b,\max}_i, & \tilde p_t\ge p^{high},\\
+0, & p^{low}<\tilde p_t<p^{high}.
+\end{cases}
+\end{equation}
+
+注意正负号：
+\begin{itemize}
+  \item $P^b>0$ 表示电池充电，电网侧负荷增加；
+  \item $P^b<0$ 表示电池放电，电网侧负荷减少。
+\end{itemize}
+
+如果默认 $\alpha_c=\alpha_d=1$，且每个电池最大功率为 50 kW，那么：
+\begin{equation}
+P^{b,req}_{i,t}=
+\begin{cases}
+50, & \text{低价时充电},\\
+-50, & \text{高价时放电},\\
+0, & \text{中间价不动}.
+\end{cases}
+\end{equation}
+
+\subsection{备用规则：中位数两段式}
+
+代码中还有一个可选模式：如果关闭中间空闲区间，就用训练集价格中位数 $p^{med}$ 分成两类：
+\begin{equation}
+P^{b,req}_{i,t}=
+\begin{cases}
+\alpha_c P^{b,\max}_i, & \tilde p_t\le p^{med},\\
+-\alpha_d P^{b,\max}_i, & \tilde p_t>p^{med}.
+\end{cases}
+\end{equation}
+这个模式会让电池几乎一直动作。它更激进，但也更容易造成无意义循环和电网压力。当前主线规则默认保留中间空闲区间。
+
+\section{从功率请求到环境动作}
+
+环境真正接收的是动作数组，而不是直接接收 kW 功率。Rule-based 控制器先算出功率请求，然后调用动作映射函数。
+
+\subsection{电池动作}
+
+电池原始动作可以理解为归一化功率：
+\begin{equation}
+a^b_{i,t}=\frac{P^{b,req}_{i,t}}{P^{b,\max}_i}.
+\end{equation}
+理论上 $a^b_{i,t}\in[-1,1]$。但是环境还会根据当前 SoC 做可行性裁剪，防止一步之后越过电池 SoC 上下界。
+
+静态电池 SoC 下界和上界为：
+\begin{equation}
+SOC^b_{\min}=0.05,\qquad SOC^b_{\max}=0.95.
+\end{equation}
+
+给定当前 $SOC^b_{i,t}$，动作上界为：
+\begin{equation}
+\overline a^b_{i,t}
+=\frac{(SOC^b_{\max}-SOC^b_{i,t})C^b_i}
+{P^{b,\max}_i\Delta t\eta_b}.
+\end{equation}
+它的物理意义是：当前电池还能装多少能量，折算成这个时间步内最多允许多大的充电动作。
+
+动作下界为：
+\begin{equation}
+\underline a^b_{i,t}
+=\frac{(SOC^b_{\min}-SOC^b_{i,t})\eta_b C^b_i}
+{P^{b,\max}_i\Delta t}.
+\end{equation}
+它通常是负数。物理意义是：当前电池还能放出多少能量，折算成这个时间步内最多允许多大的放电动作。
+
+最终执行动作是：
+\begin{equation}
+a^{b,exec}_{i,t}
+=\mathrm{clip}
+\left(
+a^b_{i,t},
+\max(\underline a^b_{i,t},-1),
+\min(\overline a^b_{i,t},1)
+\right).
+\end{equation}
+
+执行功率为：
+\begin{equation}
+P^b_{i,t}=a^{b,exec}_{i,t}P^{b,\max}_i.
+\end{equation}
+
+\subsection{PV 动作}
+
+Rule-based 控制器不主动弃光，所以：
+\begin{equation}
+G^{curt}_{i,t}=0,\qquad G^{use}_{i,t}=G_{i,t}.
+\end{equation}
+
+如果写成 PV 利用率：
+\begin{equation}
+u^{pv}_{i,t}=\frac{G^{use}_{i,t}}{G_{i,t}}.
+\end{equation}
+在 $G_{i,t}>0$ 时，Rule-based 的 $u^{pv}_{i,t}=1$。环境动作里使用 $[-1,1]$ 表示，所以：
+\begin{equation}
+a^{pv}_{i,t}=2u^{pv}_{i,t}-1=1.
+\end{equation}
+
+\subsection{EV 动作}
+
+EV 充电功率先转成利用率：
+\begin{equation}
+u^{ev}_{i,t}
+=\mathrm{clip}\left(
+\frac{P^{ev}_{i,t}}{P^{ev,\max}_i},0,1
+\right).
+\end{equation}
+再映射到环境动作：
+\begin{equation}
+a^{ev}_{i,t}=2u^{ev}_{i,t}-1.
+\end{equation}
+如果 EV 满功率充电，$u^{ev}=1$，所以 $a^{ev}=1$；如果不充电，$u^{ev}=0$，所以 $a^{ev}=-1$。
+
+\section{电池和 EV 的物理状态更新}
+
+\subsection{静态电池 SoC 更新}
+
+环境中电池功率正数表示充电，负数表示放电。由于效率存在，充电和放电的 SoC 更新不同。
+
+当 $P^b_{i,t}\ge 0$ 时，电池充电：
+\begin{equation}
+SOC^b_{i,t+1}
+=SOC^b_{i,t}
++\frac{P^b_{i,t}\Delta t\eta_b}{C^b_i}.
+\end{equation}
+物理意义是：从电网吸收的能量为 $P^b\Delta t$，只有 $\eta_b$ 的比例真正存进电池。
+
+当 $P^b_{i,t}<0$ 时，电池放电：
+\begin{equation}
+SOC^b_{i,t+1}
+=SOC^b_{i,t}
++\frac{P^b_{i,t}\Delta t}{\eta_b C^b_i}.
+\end{equation}
+因为 $P^b_{i,t}$ 是负数，所以 SoC 会下降。除以 $\eta_b$ 的物理意义是：为了向外提供一定电能，电池内部要消耗更多能量。
+
+最后环境裁剪到安全范围：
+\begin{equation}
+SOC^b_{i,t+1}\leftarrow
+\mathrm{clip}(SOC^b_{i,t+1},SOC^b_{\min},SOC^b_{\max}).
+\end{equation}
+
+\subsection{EV SoC 更新}
+
+EV 只有充电，没有向电网放电。EV 实际充电功率还会受到剩余容量限制：
+\begin{equation}
+E^{head}_{i,t}
+=\max(0,SOC^{ev}_{\max}-SOC^{ev}_{i,t})C^{ev}_i.
+\end{equation}
+这是 EV 距离上限还能存下的能量，单位 kWh。
+
+本时间步最多允许的充电功率为：
+\begin{equation}
+P^{ev,head}_{i,t}
+=\frac{E^{head}_{i,t}}{\Delta t\eta_{ev}}.
+\end{equation}
+
+最终执行的 EV 充电功率为：
+\begin{equation}
+P^{ev,exec}_{i,t}
+=\min(P^{ev,req}_{i,t},P^{ev,head}_{i,t}).
+\end{equation}
+
+EV SoC 更新为：
+\begin{equation}
+SOC^{ev}_{i,t+1}
+=\mathrm{clip}\left(
+SOC^{ev}_{i,t}
++\frac{P^{ev,exec}_{i,t}\Delta t\eta_{ev}}{C^{ev}_i},
+SOC^{ev}_{\min},SOC^{ev}_{\max}
+\right).
+\end{equation}
+
+物理意义是：EV 从充电桩得到功率，乘以时间得到电能，再乘以效率后才真正进入 EV 电池。
+
+\section{净负荷、潮流和电网安全}
+
+\subsection{单个用户的净负荷}
+
+环境把所有设备作用合成用户的净负荷：
+\begin{equation}
+P^{net}_{i,t}
+=L_{i,t}-G^{use}_{i,t}+P^b_{i,t}+P^{ev}_{i,t}.
+\end{equation}
+
+每一项的含义是：
+\begin{itemize}
+  \item $L_{i,t}$ 是家庭本来要用的电，会增加净负荷；
+  \item $G^{use}_{i,t}$ 是本地光伏，会抵消负荷；
+  \item $P^b_{i,t}>0$ 时电池充电，会增加净负荷；
+  \item $P^b_{i,t}<0$ 时电池放电，会减少净负荷；
+  \item $P^{ev}_{i,t}$ 是 EV 充电，会增加净负荷。
+\end{itemize}
+
+如果 $P^{net}_{i,t}>0$，表示该用户总体从电网取电。如果 $P^{net}_{i,t}<0$，表示该用户向电网注入功率。
+
+\subsection{写入 pandapower 网络}
+
+环境会把 $P^{net}_{i,t}$ 写入电网模型。若净负荷为正，就写入负荷表：
+\begin{equation}
+P^{load}_{i,t}=\max(0,P^{net}_{i,t}).
+\end{equation}
+若净负荷为负，就写入分布式发电表：
+\begin{equation}
+P^{sgen}_{i,t}=\max(0,-P^{net}_{i,t}).
+\end{equation}
+注意代码单位要从 kW 转成 MW：
+\begin{equation}
+P_{\mathrm{MW}}=\frac{P_{\mathrm{kW}}}{1000}.
+\end{equation}
+
+然后 pandapower 求解交流潮流，得到母线电压、线路负载率和变压器负载率。
+
+\subsection{电压约束}
+
+项目默认电压允许范围是：
+\begin{equation}
+v_{\min}=0.95,\qquad v_{\max}=1.05.
+\end{equation}
+单位是 p.u.，即标幺值。1.0 p.u. 表示额定电压，0.95 表示额定值的 95\%，1.05 表示额定值的 105\%。
+
+某个母线的电压越界量为：
+\begin{equation}
+\xi^v_{k,t}
+=\max(0,v_{\min}-v_{k,t})+\max(0,v_{k,t}-v_{\max}).
+\end{equation}
+
+如果 $v_{k,t}$ 在安全范围内，两个最大值都是 0；如果低电压或过电压，就产生正的越界量。电压安全惩罚原始量为：
+\begin{equation}
+\psi^v_t=\sum_k(\xi^v_{k,t})^2.
+\end{equation}
+
+\subsection{线路和变压器约束}
+
+线路负载率和变压器负载率用百分比表示。默认安全上限是 100\%。线路越界量为：
+\begin{equation}
+\xi^\ell_{m,t}
+=\frac{\max(0,\ell_{m,t}-\ell_{\max})}{100}.
+\end{equation}
+线路安全惩罚原始量为：
+\begin{equation}
+\psi^\ell_t=\sum_m(\xi^\ell_{m,t})^2.
+\end{equation}
+
+变压器越界量为：
+\begin{equation}
+\xi^{tr}_{r,t}
+=\frac{\max(0,tr_{r,t}-tr_{\max})}{100}.
+\end{equation}
+变压器安全惩罚原始量为：
+\begin{equation}
+\psi^{tr}_t=\sum_r(\xi^{tr}_{r,t})^2.
+\end{equation}
+
+物理意义是：越界越严重，平方惩罚增长越快。因此轻微越界和严重越界在评价中会被明显区分。
+
+\section{经济项：电池收益、EV 成本和总成本}
+
+\subsection{电池储能收益}
+
+环境中的电池收益为：
+\begin{equation}
+R^b_{i,t}
+=\left[\max(-P^b_{i,t},0)-\max(P^b_{i,t},0)\right]\tilde p_t\Delta t.
+\end{equation}
+
+分两种情况理解：
+\begin{itemize}
+  \item 充电时 $P^b>0$，收益为 $-P^b\tilde p_t\Delta t$，是负数，表示买电成本；
+  \item 放电时 $P^b<0$，收益为 $(-P^b)\tilde p_t\Delta t$，是正数，表示避免高价购电或等价收入。
+\end{itemize}
+
+所以 Rule-based 有电池版本的目标直觉是：低价时接受负收益存电，高价时获得正收益放电。只要高价收益大于低价成本，就有套利价值。
+
+\subsection{EV 充电成本}
+
+EV 充电成本为：
+\begin{equation}
+C^{ev}_{i,t}
+=w_{ev}P^{ev}_{i,t}\tilde p_t\Delta t.
+\end{equation}
+其中 $w_{ev}$ 是 EV 成本权重。对 Rule-based 基线而言，可以把它理解为实际电费的缩放系数。若 $w_{ev}=1$，就是普通电费。
+
+EV 只充电不放电，所以它没有“收益”项。它的充电越多、价格越高，成本越大。
+
+\subsection{总成本}
+
+结果统计中常用的总成本可以写成：
+\begin{equation}
+C^{total}
+=\sum_{t,i}
+\left(
+-R^b_{i,t}+C^{ev}_{i,t}+C^{pv}_{i,t}
+\right).
+\end{equation}
+
+当前 PV 成本通常为 0，除非额外配置弃光价格或惩罚。因此可以近似理解为：
+\begin{equation}
+C^{total}\approx
+\sum_{t,i}
+\left(
+-R^b_{i,t}+C^{ev}_{i,t}
+\right).
+\end{equation}
+
+这里 $-R^b$ 是电池成本。如果电池放电赚钱，$R^b>0$，那么 $-R^b<0$，会降低总成本。
+
+\section{完整算法流程}
+
+\subsection{无电池 Rule-based}
+
+\begin{lstlisting}[language={},caption={无电池 Rule-based 控制流程}]
+对每个时间步 t：
+  对每个用户 i：
+    P_b[i] = 0
+    PV_curtail[i] = 0
+
+    如果 EV 在家 且 EV_SOC[i] < EV_SOC_max：
+        P_ev[i] = EV_Pmax[i]
+    否则：
+        P_ev[i] = 0
+
+  把 P_b、PV_curtail、P_ev 转成环境动作
+  环境更新 SoC、净负荷、潮流和成本
+\end{lstlisting}
+
+\subsection{有电池 Rule-based}
+
+\begin{lstlisting}[language={},caption={有电池 Rule-based 控制流程}]
+先用训练集电价计算：
+  low_threshold = 低价分位数
+  high_threshold = 高价分位数
+
+对每个时间步 t：
+  current_price = 当前电价 + 进口加价
+
+  对每个用户 i：
+    如果 current_price <= low_threshold：
+        P_b[i] = +charge_fraction * P_b_max[i]
+    否则如果 current_price >= high_threshold：
+        P_b[i] = -discharge_fraction * P_b_max[i]
+    否则：
+        P_b[i] = 0
+
+    PV_curtail[i] = 0
+
+    如果 EV 在家 且 EV_SOC[i] < EV_SOC_max：
+        P_ev[i] = EV_Pmax[i]
+    否则：
+        P_ev[i] = 0
+
+  环境按 SoC 上下界裁剪电池动作
+  环境按 EV 剩余容量裁剪 EV 充电
+  环境更新 SoC、净负荷、潮流和成本
+\end{lstlisting}
+
+\section{它和 DRL/MADRL 的区别}
+
+Rule-based 和 DRL/MADRL 最大的区别不是“公式多不多”，而是决策来源不同。
+
+Rule-based 的决策来源是人写好的规则：
+\begin{equation}
+\text{状态}\longrightarrow\text{固定判断条件}\longrightarrow\text{动作}.
+\end{equation}
+
+MADRL 的决策来源是训练出来的策略网络：
+\begin{equation}
+\text{状态}\longrightarrow \pi_\theta(\text{状态})\longrightarrow\text{动作}.
+\end{equation}
+
+Rule-based 不需要训练，计算很快，也很容易解释。但它有几个明显局限：
+
+\begin{itemize}
+  \item 它只看当前电价，不真正优化未来多个时间步；
+  \item EV 规则不看电价，所以可能高价充电；
+  \item 所有用户看到同一个电价阈值，容易同时充电或同时放电，造成电网压力；
+  \item 它不主动根据电压、线路负载率、变压器负载率调整动作；
+  \item 它不会从历史失败中学习，也不会适应复杂的负荷、PV 和 EV 模式。
+\end{itemize}
+
+因此，Rule-based 的意义主要是提供一个清楚、简单、可解释的比较对象。复杂算法如果表现更好，应当能解释为：它更好地利用了未来预测、设备耦合、电价变化和电网安全反馈。
+
+\section{一个数字例子}
+
+假设某个用户的参数为：
+\begin{equation}
+C^b=100\,\mathrm{kWh},\quad P^{b,\max}=50\,\mathrm{kW},\quad
+\Delta t=0.25\,\mathrm{h},\quad \eta_b=0.95.
+\end{equation}
+
+如果低价时满功率充电：
+\begin{equation}
+P^b=50\,\mathrm{kW}.
+\end{equation}
+本步存入电池的能量为：
+\begin{equation}
+50\times 0.25\times 0.95=11.875\,\mathrm{kWh}.
+\end{equation}
+SoC 增加：
+\begin{equation}
+\Delta SOC^b=\frac{11.875}{100}=0.11875.
+\end{equation}
+也就是电池 SoC 增加约 11.875 个百分点。
+
+如果高价时满功率放电：
+\begin{equation}
+P^b=-50\,\mathrm{kW}.
+\end{equation}
+SoC 变化为：
+\begin{equation}
+\Delta SOC^b=\frac{-50\times 0.25}{0.95\times 100}
+\approx -0.1316.
+\end{equation}
+也就是电池 SoC 下降约 13.16 个百分点。放电时 SoC 降得更多，是因为效率损耗使电池内部要消耗更多能量。
+
+再看 EV。若 EV 以 11 kW 充 15 分钟，容量 60 kWh，效率 0.95：
+\begin{equation}
+\Delta SOC^{ev}
+=\frac{11\times 0.25\times 0.95}{60}
+\approx 0.0435.
+\end{equation}
+也就是 EV SoC 增加约 4.35 个百分点。
+
+\section{阅读代码时应该抓住的主线}
+
+如果你刚入门，不建议一开始就试图读懂所有文件。可以按下面的顺序理解：
+
+\begin{enumerate}
+  \item 先读控制器：Rule-based 怎样把当前状态变成功率请求；
+  \item 再读动作映射：功率请求如何变成环境动作；
+  \item 再读环境 step：动作如何更新 SoC、EV、PV 和净负荷；
+  \item 再读潮流核心：净负荷如何写进 pandapower 并得到电压、线路、变压器结果；
+  \item 最后读记录和评估：一次 rollout 如何被转成成本表、图和指标。
+\end{enumerate}
+
+对应到当前项目，关键文件是：
+\begin{itemize}
+  \item \texttt{controllers/rule\_based.py}：Rule-based 控制规则；
+  \item \texttt{envs/grid\_env.py}：动作执行、SoC 更新、成本和奖励计算；
+  \item \texttt{envs/grid\_core.py}：pandapower 潮流计算和电网安全指标；
+  \item \texttt{scripts/rule\_based.py}：运行 Rule-based 基线、保存表格和图；
+  \item \texttt{configs/cfg.py}：默认参数。
+\end{itemize}
+
+\section{总结}
+
+Rule-based 控制器可以概括为一句话：
+
+\begin{quote}
+EV 在家且没满就满功率充；如果启用静态电池，则电价低于低分位阈值时充电，高于高分位阈值时放电，中间价格不动作。
+\end{quote}
+
+它的数学结构很简单，但背后仍然连接了完整的物理系统：EV SoC、静态电池 SoC、光伏利用、净负荷、交流潮流、电压越界、线路越载、变压器越载和经济成本。
+
+对于初学者来说，理解 Rule-based 的价值在于：它先给出一个不需要学习的清晰基准。之后再理解 MADRL 时，就可以问一个更具体的问题：学习算法究竟学到了什么，是不是比“低价充、高价放、EV 满功率充”这个简单策略更会利用未来信息和系统耦合。
+
+\end{document}

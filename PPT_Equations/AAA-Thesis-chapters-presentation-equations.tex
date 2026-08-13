@@ -1,0 +1,34 @@
+\documentclass[varwidth=230mm, border=3pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage[table]{xcolor}
+\usepackage{array}
+
+\definecolor{headerblue}{HTML}{173F73}
+\definecolor{rowbluea}{HTML}{D6E8FA}
+\definecolor{rowblueb}{HTML}{C8DDF2}
+\definecolor{textblue}{HTML}{0B1F3A}
+
+\begin{document}
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{7pt}
+\color{textblue}
+\begin{tabular}{
+>{\raggedright\arraybackslash}p{48mm}
+>{\centering\arraybackslash}p{24mm}
+>{\raggedright\arraybackslash}p{55mm}
+>{\raggedright\arraybackslash}p{78mm}}
+\rowcolor{headerblue}
+\color{white}\textbf{Controller} &
+\color{white}\textbf{Total cost} &
+\color{white}\textbf{Departure SoC} &
+\color{white}\textbf{Grid safety} \\
+\rowcolor{rowbluea} Rule-based with Battery & 274.01 & Mean: 0.9500; below target: 0 & Voltage vio.: 3; min V: 0.9682; max V: 1.0511 \\
+\rowcolor{rowblueb} Local MPC & -83.25 & Mean: 0.8963; below target: 45 & Voltage vio.: 19; min V: 0.9663; max V: 1.0510 \\
+\rowcolor{rowbluea} ADMM MPC & -24.86 & Mean: 0.8961; below target: 45 & Voltage vio.: 0; min V: 0.9736; max V: 1.0486 \\
+\rowcolor{rowblueb} Base\_soft & 57.39 & Mean: 0.9460; below target: 2 & Voltage vio.: 2; min V: 0.9681; max V: 1.0508 \\
+\rowcolor{rowbluea} Base\_Progress\_soft & 188.69 & Mean: 0.9500; below target: 0 & Voltage vio.: 1; min V: 0.9675; max V: 1.0527 \\
+\rowcolor{rowblueb} Base\_hard & 81.67 & Mean: 0.9098; below target: 1 & Voltage vio.: 1; min V: 0.9718; max V: 1.0505 \\
+\rowcolor{rowbluea} Projection\_hard & 186.04 & Mean: 0.9500; below target: 0 & Voltage vio.: 0; min V: 0.9707; max V: 1.0456 \\
+\end{tabular}
+\end{document}

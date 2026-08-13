@@ -1,0 +1,42 @@
+\begin{titlepage}
+  \centering
+
+  \vspace{5mm}
+  {\large{\getFaculty{}}}\\
+
+  \vspace{5mm}
+  {\huge\bfseries{\getUniversity{}}}\\
+
+  \vspace{20mm}
+  \IfFileExists{logos/tum.pdf}{%
+    \includegraphics[height=20mm]{logos/tum.pdf}
+  }{
+    \vspace*{20mm}
+  }
+
+  \vspace{15mm}
+  {\huge\bfseries \getTitle{} \par}
+
+  \vspace{5mm}
+  {\Large \getDoctype{}}
+
+
+  \vspace{15mm}
+
+{\raggedright
+\begin{tabular}{@{}p{40mm}l@{}}
+\textbf{Author:}           & \getAuthor{} \\
+\textbf{Matriculation No.:} & 03782672 \\
+\textbf{Program:}           & M.Sc. Energy and Process Engineering \\
+\textbf{Mentor:}            & \getMentor{} \\
+\textbf{Supervisor:}        & \getSupervisor{} \\
+\textbf{Submission Date:}   & \getSubmissionDate{} \\
+\end{tabular}
+\par
+}
+
+  \IfFileExists{logos/faculty.pdf}{%
+    \vfill{}
+    \includegraphics[height=20mm]{logos/faculty.pdf}
+  }{}
+\end{titlepage}
